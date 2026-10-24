@@ -1,0 +1,61 @@
+name: Build and Release Windows App
+
+on:
+  push:
+    tags:
+      - 'v*' # e.g. v0.2.0 — must match APP_VERSION in core/version.py
+
+permissions:
+  contents: write # needed to create the release and upload the .exe
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Check tag matches app version
+        shell: pwsh
+        run: |
+          $appVersion = python -c "import sys; sys.path.insert(0, 'core'); import version; print(version.APP_VERSION)"
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v', 'V')
+          if ($appVersion -ne $tagVersion) {
+            Write-Error "Tag ${{ github.ref_name }} doesn't match APP_VERSION '$appVersion' in core/version.py. Update one so they match."
+            exit 1
+          }
+          Write-Host "Releasing version $appVersion"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build executable with PyInstaller
+        run: pyinstaller AssetManager.spec --noconfirm
+
+      - name: Self-test the executable
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "self-test.log"
+          $p = Start-Process -FilePath "dist\AssetManager.exe" -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) {
+            Write-Error "AssetManager.exe self-test failed (exit code $($p.ExitCode)); not publishing."
+            exit 1
+          }
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Asset Manager ${{ github.ref_name }}
+          files: dist/AssetManager.exe
+          generate_release_notes: true

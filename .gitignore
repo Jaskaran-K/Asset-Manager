@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+
+# Backups made by the in-app updater
+.update_backup/
+
+# PyInstaller output (the .exe is published on GitHub Releases)
+build/
+dist/

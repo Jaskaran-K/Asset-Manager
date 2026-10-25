@@ -5,7 +5,8 @@ Features:
 - Grid view area for asset thumbnails with multi-format support
 - Status bar for asset counts and selection details
 - Settings for library folders, scanned file types, sidebar categories, and appearance
-- Built-in lightweight interactive viewer for 3D objects, textures, and PDFs
+- Built-in lightweight interactive viewer for 3D objects, textures, PDFs, and videos
+- Tagging: automatic file type tags, custom tags (bulk tagging), and tag:name search
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -75,11 +77,15 @@ from core.settings import (
     is_scan_folder,
     set_scan_folders,
 )
+from core.tag_repository import Tag, get_repository
 from core.thumbnail_manager import ThumbnailManager
 from core.updater import cleanup_after_update
+from core.video_tools import apply_media_backend
 from core.version import APP_NAME
-from ui.icons import category_icon, color_dot_icon, resolve_category_colors
+from ui.icons import app_icon, category_icon, color_dot_icon, resolve_category_colors
+from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
+from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background
 from ui.themes import apply_theme
 from ui.viewer import AssetViewerDialog
 
@@ -89,7 +95,7 @@ from ui.viewer import AssetViewerDialog
 class ScanWorker(QObject):
     """Background worker to scan folders without blocking the UI thread."""
 
-    finished = Signal(list)
+    finished = Signal(list, object)  # assets, tag info ({"ids", "tags", "error"})
     failed = Signal(str)
 
     def __init__(self, folders: list[Path], extensions: list[str]):
@@ -109,9 +115,22 @@ class ScanWorker(QObject):
                         seen.add(asset.path)
                         assets.append(asset)
             assets.sort(key=lambda a: a.name.lower())
-            self.finished.emit(assets)
+            self.finished.emit(assets, self._sync_tags(assets))
         except Exception as exc:  # pylint: disable=broad-except
             self.failed.emit(str(exc))
+
+    @staticmethod
+    def _sync_tags(assets: list[AssetItem]) -> dict:
+        """Record the assets and their default file type tags (also backfills older libraries)."""
+        repo = get_repository()
+        try:
+            ids = repo.sync_assets(assets)
+            return {"ids": ids, "tags": repo.tags_by_asset(list(ids.values())), "error": None}
+        except Exception as exc:  # pylint: disable=broad-except
+            # Browsing still works without the tag database
+            return {"ids": {}, "tags": {}, "error": str(exc)}
+        finally:
+            repo.close_thread_connection()
 
 
 # ----------------------------------------------------------------------
@@ -134,6 +153,13 @@ class MainWindow(QMainWindow):
         self.filter_mode: str = "all"
         self.filter_value: Optional[frozenset[str]] = None
         self.search_filter: str = ""
+        # Tagging: database ids by str(asset.path), each asset's tags, and the tag search result
+        # (None when no tag filter is active)
+        self.repo = get_repository()
+        self._asset_ids: dict[str, int] = {}
+        self._asset_tags: dict[int, list[Tag]] = {}
+        self._tag_match_ids: Optional[set[int]] = None
+        self._tag_search_generation = 0
         self.thumbnail_size: int = get_thumbnail_size()
         # (tree item, display name, extensions) for every category row, for count updates
         self._sidebar_rows: list[tuple[QTreeWidgetItem, str, frozenset[str]]] = []
@@ -222,24 +248,37 @@ class MainWindow(QMainWindow):
         self.btn_view_asset.clicked.connect(self._open_viewer_for_selected)
         layout.addWidget(self.btn_view_asset)
 
+        # "Tag" button: tag the selected files
+        self.btn_tag = QPushButton("🏷 Tag")
+        self.btn_tag.setEnabled(False)
+        self.btn_tag.setToolTip("Add or remove tags on the selected files (Ctrl+T)")
+        self.btn_tag.setShortcut(shortcuts.sequence("main.tag"))
+        self.btn_tag.setCursor(Qt.CursorShape.PointingHandCursor)
+        # lambda: clicked passes a "checked" bool that must not land in the assets argument
+        self.btn_tag.clicked.connect(lambda: self._open_tag_dialog())
+        layout.addWidget(self.btn_tag)
+
         # Path display field
         self.txt_path = QLineEdit()
         self.txt_path.setReadOnly(True)
         self.txt_path.setPlaceholderText("No library folders. Add some in Settings > Folders, or click 'Open Folder'...")
         layout.addWidget(self.txt_path, 1)
 
-        # Search filter
-        self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Search assets...")
-        self.txt_search.setFixedWidth(220)
-        self.txt_search.textChanged.connect(self._on_search_text_changed)
-        layout.addWidget(self.txt_search)
+        # Search: file names plus tag filter chips (tag:name)
+        self.search_bar = TagSearchBar()
+        self.search_bar.setMinimumWidth(280)
+        self.search_bar.setMaximumWidth(560)
+        self.search_bar.changed.connect(self._on_search_changed)
+        self.search_bar.unknown_tag.connect(
+            lambda name: self.status_label.setText(f'No tag named "{name}". Create it in Settings > Tags.')
+        )
+        layout.addWidget(self.search_bar)
 
         # Settings
         self.btn_settings = QPushButton("⚙ Settings")
         self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_settings.setToolTip("Settings (Ctrl+,)")
-        self.btn_settings.setShortcut("Ctrl+,")
+        self.btn_settings.setShortcut(shortcuts.sequence("main.settings"))
         self.btn_settings.clicked.connect(self._open_settings)
         layout.addWidget(self.btn_settings)
 
@@ -422,7 +461,10 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         """Open the settings dialog and apply any saved changes."""
         dialog = SettingsDialog(self)
-        if dialog.exec() != SettingsDialog.DialogCode.Accepted:
+        accepted = dialog.exec() == SettingsDialog.DialogCode.Accepted
+        if dialog.page_tags.changed:
+            self._after_tags_changed()
+        if not accepted:
             return
 
         if dialog.thumbnail_size_changed:
@@ -493,24 +535,33 @@ class MainWindow(QMainWindow):
 
         self.scan_thread.start()
 
-    def _on_scan_finished(self, assets: list[AssetItem]) -> None:
+    def _on_scan_finished(self, assets: list[AssetItem], tag_info: dict) -> None:
         """Handle scan results, update categories, and populate grid."""
         self.btn_open_folder.setEnabled(True)
         self.btn_refresh.setEnabled(True)
         self.all_assets = assets
+        self._asset_ids = tag_info["ids"]
+        self._asset_tags = tag_info["tags"]
         self._update_sidebar_counts()
+        self._reload_tag_suggestions()
 
         models = sum(1 for a in assets if a.is_3d_model)
         textures = sum(1 for a in assets if a.is_texture)
         docs = sum(1 for a in assets if a.is_document)
-        other = len(assets) - models - textures - docs
-        summary = f"{models} 3D models, {textures} textures, {docs} documents"
+        videos = sum(1 for a in assets if a.is_video)
+        other = len(assets) - models - textures - docs - videos
+        summary = f"{models} 3D models, {textures} textures, {docs} documents, {videos} videos"
         if other:
             summary += f", {other} other"
         self.status_label.setText(f"Loaded {len(assets)} assets ({summary})")
+        if tag_info["error"]:
+            self.status_label.setText(f"Loaded {len(assets)} assets; tags unavailable: {tag_info['error']}")
         self.status_info.setText(f"{len(assets)} assets")
 
-        self._refresh_grid_display()
+        if self.search_bar.tag_ids():
+            self._run_tag_search()  # asset ids may have changed
+        else:
+            self._refresh_grid_display()
 
     def _on_scan_failed(self, error_msg: str) -> None:
         """Handle scanning failure."""
@@ -528,9 +579,31 @@ class MainWindow(QMainWindow):
             self.filter_mode, self.filter_value = data
             self._refresh_grid_display()
 
-    def _on_search_text_changed(self, text: str) -> None:
-        """Filter grid items in real-time as user types."""
-        self.search_filter = text.strip().lower()
+    def _on_search_changed(self) -> None:
+        """Filter the grid as the search text or tag chips change."""
+        self.search_filter = self.search_bar.text().casefold()
+        if self.search_bar.tag_ids():
+            self._run_tag_search()
+        else:
+            self._tag_match_ids = None
+            self._refresh_grid_display()
+
+    def _run_tag_search(self) -> None:
+        """Query the tag database off the UI thread; only the newest query's result is used."""
+        self._tag_search_generation += 1
+        generation = self._tag_search_generation
+        tag_ids, text = self.search_bar.tag_ids(), self.search_filter
+        run_in_background(
+            self.repo,
+            lambda repo: repo.find_assets_by_tags(tag_ids, match_all=True, text=text),
+            partial(self._on_tag_search_done, generation),
+            lambda error: self.status_label.setText(f"Tag search failed: {error}"),
+        )
+
+    def _on_tag_search_done(self, generation: int, asset_ids: set[int]) -> None:
+        if generation != self._tag_search_generation or not self.search_bar.tag_ids():
+            return  # a newer search is running, or the filters were cleared meanwhile
+        self._tag_match_ids = asset_ids
         self._refresh_grid_display()
 
     def _get_filtered_assets(self) -> list[AssetItem]:
@@ -543,9 +616,14 @@ class MainWindow(QMainWindow):
         elif self.filter_mode == "uncategorized":
             filtered = [a for a in filtered if a.extension not in self._categorized_exts]
 
+        # Apply tag filter (matched in SQL by _run_tag_search; all tags must match)
+        if self._tag_match_ids is not None:
+            matches, ids = self._tag_match_ids, self._asset_ids
+            filtered = [a for a in filtered if ids.get(str(a.path)) in matches]
+
         # Apply search filter
         if self.search_filter:
-            filtered = [a for a in filtered if self.search_filter in a.name.lower()]
+            filtered = [a for a in filtered if self.search_filter in a.name.casefold()]
 
         return filtered
 
@@ -568,6 +646,7 @@ class MainWindow(QMainWindow):
                 )
             self.status_info.setText("0 assets shown")
             self.btn_view_asset.setEnabled(False)
+            self.btn_tag.setEnabled(False)
             return
 
         self.lbl_empty_state.hide()
@@ -581,17 +660,23 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(icon, asset.name)
             item.setData(Qt.ItemDataRole.UserRole, asset)
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
-            item.setToolTip(
-                f"<b>{asset.name}</b><br>"
-                f"Type: {asset.asset_group} ({asset.category_name})<br>"
-                f"Size: {asset.formatted_size}<br>"
-                f"Modified: {asset.formatted_modified_time}<br>"
-                f"Path: {asset.path}"
-            )
+            item.setToolTip(self._asset_tooltip(asset))
             self.list_grid.addItem(item)
             self._grid_item_map[str(asset.path)] = item
 
         self.status_info.setText(f"{len(filtered)} of {len(self.all_assets)} assets shown")
+
+    def _asset_tooltip(self, asset: AssetItem) -> str:
+        tags = self._asset_tags.get(self._asset_ids.get(str(asset.path)), [])
+        tag_line = f"<br>Tags: {', '.join(t.name for t in tags)}" if tags else ""
+        return (
+            f"<b>{asset.name}</b><br>"
+            f"Type: {asset.asset_group} ({asset.category_name})<br>"
+            f"Size: {asset.formatted_size}<br>"
+            f"Modified: {asset.formatted_modified_time}<br>"
+            f"Path: {asset.path}"
+            f"{tag_line}"
+        )
 
     def _on_async_thumbnail_loaded(self, path_str: str, pixmap: QPixmap) -> None:
         """Smoothly update thumbnail icon when background decoding completes."""
@@ -606,6 +691,7 @@ class MainWindow(QMainWindow):
         """Update status bar and preview button state based on selection."""
         selected_items = self.list_grid.selectedItems()
         self.btn_view_asset.setEnabled(len(selected_items) == 1)
+        self.btn_tag.setEnabled(bool(selected_items))
 
         if not selected_items:
             self.status_label.setText(f"Showing {self.list_grid.count()} assets")
@@ -635,12 +721,17 @@ class MainWindow(QMainWindow):
 
     def _open_viewer(self, asset: AssetItem) -> None:
         """Open the interactive AssetViewerDialog modal for the given asset."""
-        dialog = AssetViewerDialog(asset, self)
+        asset_id = self._asset_ids.get(str(asset.path))
+        tags = self._asset_tags.get(asset_id, []) if asset_id is not None else None
+        edit_tags = (lambda: self._open_tag_dialog([asset])) if asset_id is not None else None
+        dialog = AssetViewerDialog(asset, self, tags=tags, edit_tags=edit_tags)
         dialog.exec()
+        # Free the viewer (GL context, decoded image, video player) instead of keeping it parented
+        dialog.deleteLater()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Handle keyboard shortcuts (e.g. Spacebar to quick-preview)."""
-        if event.key() == Qt.Key.Key_Space:
+        if shortcuts.matches("main.preview", event):
             selected_items = self.list_grid.selectedItems()
             if selected_items:
                 asset: AssetItem = selected_items[0].data(Qt.ItemDataRole.UserRole)
@@ -682,6 +773,14 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
+        selected = len(self.list_grid.selectedItems())
+        action_tag = QAction("Tag..." if selected <= 1 else f"Tag {selected} Files...", self)
+        action_tag.setShortcut(shortcuts.sequence("main.tag"))
+        action_tag.triggered.connect(lambda: self._open_tag_dialog())
+        menu.addAction(action_tag)
+
+        menu.addSeparator()
+
         action_copy_path = QAction("Copy Full Path", self)
         action_copy_path.triggered.connect(
             lambda: QGuiApplication.clipboard().setText(str(asset.path))
@@ -689,6 +788,56 @@ class MainWindow(QMainWindow):
         menu.addAction(action_copy_path)
 
         menu.exec(self.list_grid.mapToGlobal(pos))
+
+    # ------------------------------------------------------------------
+    # Tagging
+    # ------------------------------------------------------------------
+    def _open_tag_dialog(self, assets: Optional[list[AssetItem]] = None) -> Optional[list[Tag]]:
+        """Tag the given assets (default: the grid selection).
+
+        Returns the first asset's updated tags if anything changed (used by the viewer), else None.
+        """
+        if assets is None:
+            assets = [i.data(Qt.ItemDataRole.UserRole) for i in self.list_grid.selectedItems()]
+        ids = [self._asset_ids[str(a.path)] for a in assets if str(a.path) in self._asset_ids]
+        if not ids:
+            QMessageBox.information(self, "Tags Unavailable", "These files aren't in the tag database yet. Try Refresh.")
+            return None
+        dialog = TagAssetsDialog(self.repo, ids, self)
+        dialog.exec()
+        dialog.deleteLater()
+        if not dialog.changed:
+            return None
+        self._after_tags_changed(ids)
+        return self._asset_tags.get(ids[0], [])
+
+    def _after_tags_changed(self, asset_ids: Optional[list[int]] = None) -> None:
+        """Refresh cached tags, tooltips, suggestions and tag search after tags were edited.
+
+        asset_ids: the files that changed, or None after tags were renamed / recolored / deleted
+        (which can affect every file; reloaded in the background).
+        """
+        self._reload_tag_suggestions()
+        if asset_ids is not None:
+            self._apply_tag_cache(self.repo.tags_by_asset(asset_ids))
+        else:
+            run_in_background(self.repo, lambda repo: repo.tags_by_asset(list(self._asset_ids.values())),
+                              self._apply_tag_cache)
+
+    def _apply_tag_cache(self, tags_by_asset: dict[int, list[Tag]]) -> None:
+        self._asset_tags.update(tags_by_asset)
+        changed = set(tags_by_asset)
+        for path_str, item in self._grid_item_map.items():
+            if self._asset_ids.get(path_str) in changed:
+                item.setToolTip(self._asset_tooltip(item.data(Qt.ItemDataRole.UserRole)))
+        if self.search_bar.tag_ids():
+            self._run_tag_search()
+
+    def _reload_tag_suggestions(self) -> None:
+        try:
+            self.search_bar.set_available_tags(self.repo.list_tags())
+        except Exception as exc:  # pylint: disable=broad-except
+            self.status_label.setText(f"Tags unavailable: {exc}")
 
     @staticmethod
     def _reveal_in_explorer(path: Path) -> None:
@@ -769,12 +918,43 @@ def run_self_test(log_path: Optional[str]) -> int:
         dialog = SettingsDialog()
         dialog.close()
         from PySide6.QtPdf import QPdfDocument  # noqa: F401
+        if app_icon().isNull():
+            raise RuntimeError("application icon missing from the build")
         return "settings dialog built"
+
+    def check_tags():
+        from core.tag_repository import TagRepository
+        from core.scanner import AssetScanner
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.png").write_bytes(b"x")
+            repo = TagRepository(Path(tmp) / "test.db")
+            ids = repo.sync_assets(AssetScanner().scan(Path(tmp)))
+            tag = repo.create_custom_tag("SelfTest")
+            repo.add_tags(list(ids.values()), [tag.id])
+            png = repo.find_tag("PNG")
+            if repo.find_assets_by_tags([tag.id, png.id]) != set(ids.values()):
+                raise RuntimeError("tag search returned the wrong files")
+            version = repo.schema_version()
+            repo.close_thread_connection()  # the temp folder can't be deleted while the DB is open
+            return f"schema v{version}"
+
+    def check_video():
+        from PySide6.QtMultimedia import QMediaFormat
+        from ui.video_player import VideoPlayer
+        formats = QMediaFormat().supportedFileFormats(QMediaFormat.ConversionMode.Decode)
+        if not formats:
+            raise RuntimeError("no multimedia backend: Qt can't decode any video format")
+        player = VideoPlayer()
+        player.stop()
+        player.close()
+        return f"{len(formats)} decodable container formats"
 
     step("imports", check_imports)
     step("3D model loading", check_models)
     step("image thumbnails", check_images)
     step("user interface", check_ui)
+    step("video playback", check_video)
+    step("tag database", check_tags)
 
     lines.append("RESULT: " + ("PASS" if ok else "FAIL"))
     report = "\n".join(lines)
@@ -814,8 +994,17 @@ def main() -> None:
     qInstallMessageHandler(_qt_message_handler)
     QImageReader.setAllocationLimit(2048)
 
+    # Qt multimedia picks its backend when QApplication starts
+    apply_media_backend()
+
+    if sys.platform == "win32":
+        # Own taskbar identity, so Windows shows our icon instead of python.exe's
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AssetManager.App")
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(app_icon())
     apply_theme(get_theme(), app)
 
     window = MainWindow()

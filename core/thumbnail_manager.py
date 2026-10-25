@@ -39,6 +39,7 @@ from PySide6.QtPdf import QPdfDocument
 
 from .psd_reader import read_psd_composite
 from .scanner import AssetItem
+from .video_tools import extract_poster_frame
 
 # Increase Qt's default image allocation limit from 256 MB to 2048 MB
 QImageReader.setAllocationLimit(2048)
@@ -53,6 +54,8 @@ PALETTE_MAP = {
     "JPEG": (QColor(251, 191, 36), QColor(217, 119, 6), QColor(146, 64, 14)),
     "TIFF": (QColor(96, 165, 250), QColor(37, 99, 235), QColor(30, 58, 138)),
     "PDF": (QColor(239, 68, 68), QColor(185, 28, 28), QColor(127, 29, 29)),
+    "MP4": (QColor(249, 115, 22), QColor(234, 88, 12), QColor(154, 52, 18)),
+    "MOV": (QColor(244, 63, 94), QColor(225, 29, 72), QColor(136, 19, 55)),
 }
 
 
@@ -260,6 +263,34 @@ def load_texture_thumbnail_image(file_path: Path, category_name: str, size: int 
         return None
 
 
+def load_video_thumbnail_image(file_path: Path, category_name: str, size: int = 110) -> Optional[QImage]:
+    """Poster-frame thumbnail for a video (extracted and cached by ffmpeg) with a play badge."""
+    poster = extract_poster_frame(file_path)
+    if poster is None:
+        return None
+    card_img = load_texture_thumbnail_image(poster, category_name, size)
+    if card_img is None:
+        return None
+
+    p = QPainter(card_img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    radius = max(8.0, size * 0.12)
+    center = QPointF(size / 2.0, (size - 18) / 2.0 + 4)
+    p.setBrush(QBrush(QColor(0, 0, 0, 150)))
+    p.setPen(QPen(QColor(255, 255, 255, 200), 1.2))
+    p.drawEllipse(center, radius, radius)
+    tri = radius * 0.45
+    p.setBrush(QBrush(QColor(255, 255, 255, 230)))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF([
+        QPointF(center.x() - tri * 0.7, center.y() - tri),
+        QPointF(center.x() + tri, center.y()),
+        QPointF(center.x() - tri * 0.7, center.y() + tri),
+    ]))
+    p.end()
+    return card_img
+
+
 def load_pdf_thumbnail_image(file_path: Path, size: int = 110) -> Optional[QImage]:
     """Render page 0 of a PDF into a thumbnail QImage."""
     doc = QPdfDocument()
@@ -324,6 +355,8 @@ class _ThumbnailRunnable(QRunnable):
             qimg = load_texture_thumbnail_image(self.asset.path, self.asset.category_name, self.size)
         elif self.asset.is_document and self.asset.extension == ".pdf":
             qimg = load_pdf_thumbnail_image(self.asset.path, self.size)
+        elif self.asset.is_video:
+            qimg = load_video_thumbnail_image(self.asset.path, self.asset.category_name, self.size)
         elif self.asset.is_3d_model:
             # Check for companion preview images (model.png, etc.)
             for preview_ext in [".png", ".jpg", ".jpeg", ".webp"]:
@@ -368,6 +401,7 @@ class ThumbnailManager(QObject):
         needs_async = (
             asset.is_texture
             or asset.is_document
+            or asset.is_video
             or any(asset.path.with_suffix(ext).exists() for ext in [".png", ".jpg", ".jpeg", ".webp"])
         )
 

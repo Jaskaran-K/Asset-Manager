@@ -1,9 +1,10 @@
-"""Lightweight interactive viewer for 3D objects, textures, and documents.
+"""Lightweight interactive viewer for 3D objects, textures, documents, and videos.
 
 Includes:
 - Model3DViewportWidget: 3D orbit viewport for .obj, .gltf, .glb, .fbx with shaded/wireframe modes.
 - TextureViewerWidget: High-resolution texture/image viewer with interactive zoom, pan, and checkerboard.
 - DocumentViewerWidget: Embedded PDF document viewer with page navigation and zoom.
+- VideoPlayer (ui.video_player): in-app video playback with proxy fallback.
 - AssetViewerDialog: Unified modal viewer dialog hosting the appropriate view.
 """
 
@@ -14,7 +15,7 @@ import math
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from OpenGL import GL
@@ -40,6 +41,7 @@ from PySide6.QtGui import (
     QImageReader,
     QMatrix4x4,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QPolygonF,
@@ -67,6 +69,10 @@ from PySide6.QtWidgets import (
 
 from core.model_loader import Mesh3D, load_3d_model
 from core.scanner import AssetItem
+from core.tag_repository import Tag
+from ui import shortcuts
+from ui.tag_widgets import tag_chip_cloud
+from ui.video_player import VideoPlayer, control_icon
 
 
 # ----------------------------------------------------------------------
@@ -271,16 +277,16 @@ class Model3DViewportWidget(QOpenGLWidget):
         self.update()
 
     def keyPressEvent(self, event) -> None:
-        """Support shortcut keys: 'W' to cycle wireframe/shaded, 'G' to toggle grid."""
-        if event.key() == Qt.Key.Key_W:
+        """Viewport keys (see ui.shortcuts): cycle wireframe/shaded, toggle grid, reset camera."""
+        if shortcuts.matches("viewer3d.wireframe", event):
             modes = ["Shaded", "Wireframe", "Shaded + Wireframe"]
             cur_idx = modes.index(self.render_mode) if self.render_mode in modes else 0
             self.render_mode = modes[(cur_idx + 1) % len(modes)]
             self.update()
-        elif event.key() == Qt.Key.Key_G:
+        elif shortcuts.matches("viewer3d.grid", event):
             self.show_grid = not self.show_grid
             self.update()
-        elif event.key() == Qt.Key.Key_R:
+        elif shortcuts.matches("viewer3d.reset", event):
             self.reset_camera()
         else:
             super().keyPressEvent(event)
@@ -576,8 +582,11 @@ class Model3DViewportWidget(QOpenGLWidget):
 # ----------------------------------------------------------------------
 # Texture / Image Viewer (Interactive Zoom & Pan)
 # ----------------------------------------------------------------------
-def load_full_texture(file_path: Path) -> QPixmap:
-    """Load high-resolution texture safely without hitting 256MB memory limit."""
+def load_full_texture(file_path: Path) -> tuple[QPixmap, bool]:
+    """Load high-resolution texture safely without hitting 256MB memory limit.
+
+    Returns the pixmap and whether the image actually contains transparent pixels.
+    """
     QImageReader.setAllocationLimit(2048)
     try:
         from PIL import Image
@@ -592,10 +601,12 @@ def load_full_texture(file_path: Path) -> QPixmap:
             if rgba.width > 8192 or rgba.height > 8192:
                 rgba.thumbnail((8192, 8192), Image.Resampling.BILINEAR)
 
+            # Every image is RGBA after conversion, so check the alpha values themselves
+            has_alpha = rgba.getchannel("A").getextrema()[0] < 255
             qimg = QImage(
                 rgba.tobytes(), rgba.width, rgba.height, QImage.Format.Format_RGBA8888
             ).copy()
-            return QPixmap.fromImage(qimg)
+            return QPixmap.fromImage(qimg), has_alpha
     except Exception:
         pass
 
@@ -605,8 +616,20 @@ def load_full_texture(file_path: Path) -> QPixmap:
     reader.setAllocationLimit(2048)
     qimg = reader.read()
     if not qimg.isNull():
-        return QPixmap.fromImage(qimg)
-    return QPixmap()
+        return QPixmap.fromImage(qimg), qimg.hasAlphaChannel()
+    return QPixmap(), False
+
+
+def _checker_brush(tile_size: int = 8) -> QBrush:
+    """Repeating light grey / white checker (the usual transparency pattern)."""
+    tile = QPixmap(tile_size * 2, tile_size * 2)
+    tile.fill(QColor(255, 255, 255))
+    p = QPainter(tile)
+    light_grey = QColor(204, 204, 204)
+    p.fillRect(tile_size, 0, tile_size, tile_size, light_grey)
+    p.fillRect(0, tile_size, tile_size, tile_size, light_grey)
+    p.end()
+    return QBrush(tile)
 
 
 class TextureViewerWidget(QWidget):
@@ -615,13 +638,15 @@ class TextureViewerWidget(QWidget):
     def __init__(self, file_path: Path, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.file_path = file_path
-        self.pixmap = load_full_texture(file_path)
+        self.pixmap, self.has_alpha = load_full_texture(file_path)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.zoom: float = 1.0
         self.pan_x: float = 0.0
         self.pan_y: float = 0.0
-        self.show_checkerboard: bool = True
+        # On by default only when there's transparency to see
+        self.show_checkerboard: bool = self.has_alpha
+        self._checker_brush = _checker_brush()
 
         self.last_mouse_pos: Optional[QPoint] = None
         self._fit_to_screen_requested: bool = True
@@ -720,19 +745,15 @@ class TextureViewerWidget(QWidget):
 
         img_rect = QRectF(dest_x, dest_y, target_w, target_h)
 
-        # Draw checkerboard behind image
+        # Checkerboard behind the image so transparent pixels are visible. One tiled-brush fill
+        # of the on-screen part only, so the cost doesn't grow with the zoom level.
         if self.show_checkerboard:
-            painter.save()
-            painter.setClipRect(img_rect)
-            tile_size = 16
-            c1, c2 = QColor(42, 45, 54), QColor(32, 34, 42)
-            start_x = int(dest_x) - (int(dest_x) % tile_size)
-            start_y = int(dest_y) - (int(dest_y) % tile_size)
-            for x in range(start_x, int(dest_x + target_w) + tile_size, tile_size):
-                for y in range(start_y, int(dest_y + target_h) + tile_size, tile_size):
-                    col = c1 if ((x // tile_size + y // tile_size) % 2 == 0) else c2
-                    painter.fillRect(x, y, tile_size, tile_size, col)
-            painter.restore()
+            visible = img_rect.intersected(QRectF(0, 0, w, h))
+            if not visible.isEmpty():
+                painter.save()
+                painter.setBrushOrigin(img_rect.topLeft())  # pattern moves with the image when panning
+                painter.fillRect(visible, self._checker_brush)
+                painter.restore()
 
         # Render texture smoothly
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -815,13 +836,29 @@ class DocumentViewerWidget(QWidget):
 # Unified Asset Viewer Dialog
 # ----------------------------------------------------------------------
 class AssetViewerDialog(QDialog):
-    """Unified modal viewer dialog for 3D models, textures, and documents."""
+    """Unified modal viewer dialog for 3D models, textures, documents, and videos."""
 
-    def __init__(self, asset: AssetItem, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        asset: AssetItem,
+        parent: Optional[QWidget] = None,
+        tags: Optional[list[Tag]] = None,
+        edit_tags: Optional[Callable[[], Optional[list[Tag]]]] = None,
+    ):
+        """tags: the asset's tags to show (None hides the section).
+        edit_tags: opens the tagging dialog; returns the updated tags, or None if nothing changed."""
         super().__init__(parent)
         self.asset = asset
+        self.tags = tags
+        self._edit_tags = edit_tags
+        self.video_player: Optional[VideoPlayer] = None  # at most one, owned by this dialog
+        # Window state to return to when leaving fullscreen
+        self._state_before_fullscreen = Qt.WindowState.WindowNoState
+        self._was_fullscreen_for_video = False  # viewer was already full screen when the video went full screen
 
         self.setWindowTitle(f"Viewer - {asset.name}")
+        # Dialogs get no maximize button by default
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.resize(1100, 720)
         self.setMinimumSize(800, 500)
 
@@ -833,8 +870,8 @@ class AssetViewerDialog(QDialog):
         main_layout.setSpacing(0)
 
         # 1. Top Header Bar
-        header = self._build_header_bar()
-        main_layout.addWidget(header)
+        self.header_bar = self._build_header_bar()
+        main_layout.addWidget(self.header_bar)
 
         # 2. Main Content Splitter (Viewer + Metadata Inspector)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -843,15 +880,15 @@ class AssetViewerDialog(QDialog):
         viewer_widget, metadata_dict = self._create_viewer_and_metadata()
         splitter.addWidget(viewer_widget)
 
-        inspector_panel = self._build_inspector_panel(metadata_dict)
-        splitter.addWidget(inspector_panel)
+        self.inspector_panel = self._build_inspector_panel(metadata_dict)
+        splitter.addWidget(self.inspector_panel)
 
         splitter.setSizes([840, 260])
         main_layout.addWidget(splitter, 1)
 
         # 3. Bottom Action Bar
-        bottom_bar = self._build_bottom_bar()
-        main_layout.addWidget(bottom_bar)
+        self.bottom_bar = self._build_bottom_bar()
+        main_layout.addWidget(self.bottom_bar)
 
     def _build_header_bar(self) -> QWidget:
         header = QWidget()
@@ -877,6 +914,15 @@ class AssetViewerDialog(QDialog):
         layout.addWidget(meta)
 
         layout.addStretch(1)
+
+        icon_color = self.palette().color(QPalette.ColorRole.ButtonText)
+        self._fullscreen_icons = (control_icon("fullscreen", icon_color), control_icon("exit_fullscreen", icon_color))
+        self.btn_fullscreen = QPushButton(" Full Screen")
+        self.btn_fullscreen.setIcon(self._fullscreen_icons[0])
+        self.btn_fullscreen.setToolTip("Toggle full screen (F11)")
+        self.btn_fullscreen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
+        layout.addWidget(self.btn_fullscreen)
 
         return header
 
@@ -963,6 +1009,7 @@ class AssetViewerDialog(QDialog):
                         "Resolution": f"{w} × {h} px",
                         "Aspect Ratio": aspect,
                         "Color Depth": f"{tex_viewer.pixmap.depth()}-bit",
+                        "Transparency": "Yes" if tex_viewer.has_alpha else "No",
                     }
                 )
 
@@ -983,7 +1030,8 @@ class AssetViewerDialog(QDialog):
 
             btn_checker = QPushButton("Checkerboard")
             btn_checker.setCheckable(True)
-            btn_checker.setChecked(True)
+            btn_checker.setChecked(tex_viewer.show_checkerboard)
+            btn_checker.setToolTip("Check Transparency")
             btn_checker.toggled.connect(tex_viewer.toggle_checkerboard)
             tb_layout.addWidget(btn_checker)
 
@@ -1000,6 +1048,14 @@ class AssetViewerDialog(QDialog):
             doc_viewer = DocumentViewerWidget(self.asset.path)
             metadata["Pages"] = str(doc_viewer.doc.pageCount())
             layout.addWidget(doc_viewer, 1)
+
+        # Case D: Video Player
+        elif self.asset.is_video:
+            self.video_player = VideoPlayer()
+            self.video_player.fullscreen_changed.connect(self._on_video_fullscreen)
+            layout.addWidget(self.video_player, 1)
+            self.video_player.load(self.asset.path, autoplay=True)
+            self.video_player.setFocus()
 
         # Fallback
         else:
@@ -1043,8 +1099,40 @@ class AssetViewerDialog(QDialog):
             prop_box.addWidget(v_lbl)
             layout.addLayout(prop_box)
 
+        if self.tags is not None:
+            layout.addWidget(self._build_tags_section())
+
         layout.addStretch(1)
         return panel
+
+    def _build_tags_section(self) -> QWidget:
+        section = QWidget()
+        box = QVBoxLayout(section)
+        box.setContentsMargins(0, 6, 0, 0)
+        box.setSpacing(4)
+        k_lbl = QLabel("TAGS")
+        k_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        k_lbl.setObjectName("inspectorKey")
+        box.addWidget(k_lbl)
+        self._tag_cloud_holder = QVBoxLayout()
+        self._tag_cloud_holder.setContentsMargins(0, 0, 0, 0)
+        self._tag_cloud_holder.addWidget(tag_chip_cloud(self.tags))
+        box.addLayout(self._tag_cloud_holder)
+        if self._edit_tags is not None:
+            btn = QPushButton("Edit Tags...")
+            btn.setToolTip("Add or remove custom tags on this file")
+            btn.clicked.connect(self._on_edit_tags)
+            box.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
+        return section
+
+    def _on_edit_tags(self) -> None:
+        updated = self._edit_tags()
+        if updated is None:
+            return
+        self.tags = updated
+        old = self._tag_cloud_holder.takeAt(0).widget()
+        old.deleteLater()
+        self._tag_cloud_holder.addWidget(tag_chip_cloud(updated))
 
     def _build_bottom_bar(self) -> QWidget:
         """Construct bottom action bar."""
@@ -1076,8 +1164,66 @@ class AssetViewerDialog(QDialog):
 
         return bar
 
+    # ------------------------------------------------------------------
+    # Full screen
+    # ------------------------------------------------------------------
+    def toggle_fullscreen(self) -> None:
+        """Whole viewer (header, inspector and actions included) full screen, or back."""
+        if self.isFullScreen():
+            self._leave_fullscreen()
+        else:
+            self._enter_fullscreen()
+
+    def _enter_fullscreen(self) -> None:
+        if not self.isFullScreen():
+            self._state_before_fullscreen = self.windowState() & ~Qt.WindowState.WindowFullScreen
+            self.showFullScreen()
+        self.btn_fullscreen.setText(" Exit Full Screen")
+        self.btn_fullscreen.setIcon(self._fullscreen_icons[1])
+
+    def _leave_fullscreen(self) -> None:
+        self.btn_fullscreen.setText(" Full Screen")
+        self.btn_fullscreen.setIcon(self._fullscreen_icons[0])
+        if self._state_before_fullscreen & Qt.WindowState.WindowMaximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+
+    def _on_video_fullscreen(self, enabled: bool) -> None:
+        """Video-only full screen: hide the viewer's own chrome around the player."""
+        for widget in (self.header_bar, self.inspector_panel, self.bottom_bar):
+            widget.setVisible(not enabled)
+        if enabled:
+            self._was_fullscreen_for_video = self.isFullScreen()
+            self._enter_fullscreen()
+        elif not self._was_fullscreen_for_video:
+            self._leave_fullscreen()
+
+    def keyPressEvent(self, event) -> None:
+        if shortcuts.matches("viewer.fullscreen", event):
+            if self.video_player is not None and self.video_player.is_fullscreen():
+                self.video_player.set_fullscreen(False)
+            else:
+                self.toggle_fullscreen()
+        elif shortcuts.matches("viewer.exit_fullscreen", event) and self.isFullScreen():
+            # Esc leaves full screen first instead of closing the viewer
+            if self.video_player is not None and self.video_player.is_fullscreen():
+                self.video_player.set_fullscreen(False)
+            else:
+                self._leave_fullscreen()
+        else:
+            super().keyPressEvent(event)
+
+    def done(self, result: int) -> None:
+        """Stop playback and release the video file however the dialog closes."""
+        if self.video_player is not None:
+            self.video_player.stop()
+        super().done(result)
+
     def _open_external(self) -> None:
         """Open asset in system default application."""
+        if self.video_player is not None:
+            self.video_player.player.pause()
         if self.asset.path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.asset.path)))
 

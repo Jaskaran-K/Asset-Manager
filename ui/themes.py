@@ -311,6 +311,13 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #inspectorKey { color: $text_faint; }
 #inspectorValue { color: $text; font-size: 12px; }
 #inspectorLine { color: $border; }
+/* Video area stays dark in every theme, like the 3D viewport */
+#videoSurface, #videoMessage { background-color: #0b0c10; }
+#videoMessageTitle { color: #f3f4f6; font-size: 15px; font-weight: bold; }
+#videoMessageDetail { color: #9ca3af; font-size: 12px; }
+#seekPreview { background-color: #0b0c10; border: 1px solid $accent; border-radius: 6px; }
+#seekPreviewFrame { background-color: #000000; }
+#seekPreviewTime { color: #f3f4f6; font-size: 11px; font-weight: bold; }
 """)
 
 _current_theme_id = DEFAULT_THEME

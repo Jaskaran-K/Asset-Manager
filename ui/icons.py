@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,6 +13,15 @@ from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 # Fallback badge colors when a category has no saved color, cycled by position
 MAIN_CATEGORY_COLORS = ["#3b82f6", "#10b981", "#ef4444", "#f59e0b", "#a855f7", "#06b6d4", "#ec4899"]
 SUB_CATEGORY_COLORS = ["#60a5fa", "#f59e0b", "#10b981", "#a855f7", "#34d399", "#fbbf24", "#ef4444", "#c084fc"]
+
+# Bundled files live under sys._MEIPASS in the PyInstaller executable
+_RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+APP_ICON_PATH = _RESOURCE_ROOT / "assets" / "Asset-Manager-Icon.ico"
+
+
+def app_icon() -> QIcon:
+    """The application icon (window title bar and taskbar); empty if the file is missing."""
+    return QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.is_file() else QIcon()
 
 
 def resolve_category_colors(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:

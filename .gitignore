@@ -12,3 +12,6 @@ venv/
 # PyInstaller output (the .exe is published on GitHub Releases)
 build/
 dist/
+
+# Test cache
+.pytest_cache/

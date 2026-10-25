@@ -5,12 +5,16 @@ Pages:
 - General > Files:       file extensions the scanner picks up
 - General > Categories:  sidebar main categories / subcategories and their file types
 - General > Appearance:  theme, grid size, category colors & icons
+- General > Video:       ffmpeg location, playback backend, preview cache
+- General > Tags:        custom tags (create, rename, recolor, delete)
+- General > Shortcuts:   every keyboard shortcut / mouse control (from ui.shortcuts)
 - About:                 application description, version, GitHub update check
 """
 
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -21,11 +25,14 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QColorDialog,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -47,11 +54,14 @@ from core.settings import (
     DEFAULT_CATEGORIES,
     DEFAULT_FILE_EXTENSIONS,
     MAX_CATEGORY_ICON_BYTES,
+    MEDIA_BACKENDS,
     PREVIEWABLE_EXTENSIONS,
     THUMBNAIL_SIZE_RANGE,
     category_extensions,
     get_categories,
+    get_ffmpeg_path,
     get_file_extensions,
+    get_media_backend,
     get_scan_folders,
     get_theme,
     get_thumbnail_size,
@@ -59,11 +69,14 @@ from core.settings import (
     parse_extension_list,
     remove_unused_category_icons,
     set_categories,
+    set_ffmpeg_path,
     set_file_extensions,
+    set_media_backend,
     set_scan_folders,
     set_theme,
     set_thumbnail_size,
 )
+from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagError, TagRepository, get_repository
 from core.thumbnail_manager import render_placeholder_image
 from core.updater import (
     UpdateError,
@@ -74,13 +87,17 @@ from core.updater import (
     restart_application,
 )
 from core.version import APP_NAME, APP_VERSION, GITHUB_URL
+from core.video_tools import CACHE_ROOT, cache_size_bytes, clear_video_cache, find_ffmpeg
 from ui.icons import (
     MAIN_CATEGORY_COLORS,
     SUB_CATEGORY_COLORS,
     category_icon,
+    color_swatch_icon,
     load_icon_image,
     resolve_category_colors,
 )
+from ui import shortcuts
+from ui.tag_widgets import next_tag_color
 from ui.themes import THEMES, apply_theme
 
 # Data roles on category tree items
@@ -897,6 +914,326 @@ class AppearancePage(QWidget):
 
 
 # ----------------------------------------------------------------------
+# General > Video
+# ----------------------------------------------------------------------
+class VideoPage(QWidget):
+    """ffmpeg location, playback backend, and the proxy / poster-frame cache."""
+
+    _BACKEND_LABELS = {
+        "auto": "Automatic (FFmpeg, Qt's default)",
+        "ffmpeg": "FFmpeg",
+        "windows": "Windows Media Foundation",
+    }
+
+    def __init__(self, ffmpeg_path: str, media_backend: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        layout.addWidget(_page_header(
+            "Video",
+            "Videos play inside the viewer. ffmpeg (a free external program) is used for grid "
+            "thumbnails and for 720p preview copies of files that won't play or that stutter.",
+        ))
+
+        layout.addWidget(self._section_label("ffmpeg location"))
+        row = QHBoxLayout()
+        self.txt_ffmpeg = QLineEdit(ffmpeg_path)
+        self.txt_ffmpeg.setPlaceholderText("Leave blank to use ffmpeg from the system PATH")
+        self.txt_ffmpeg.textChanged.connect(self._update_ffmpeg_status)
+        btn_browse = QPushButton("Browse...")
+        btn_browse.clicked.connect(self._on_browse)
+        row.addWidget(self.txt_ffmpeg, 1)
+        row.addWidget(btn_browse)
+        layout.addLayout(row)
+        self.lbl_ffmpeg_status = QLabel()
+        self.lbl_ffmpeg_status.setObjectName("pageHint")
+        self.lbl_ffmpeg_status.setWordWrap(True)
+        self.lbl_ffmpeg_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.lbl_ffmpeg_status)
+
+        layout.addSpacing(10)
+        layout.addWidget(self._section_label("Playback backend"))
+        self.cb_backend = QComboBox()
+        for backend_id in MEDIA_BACKENDS:
+            self.cb_backend.addItem(self._BACKEND_LABELS[backend_id], backend_id)
+        self.cb_backend.setCurrentIndex(max(0, self.cb_backend.findData(media_backend)))
+        layout.addWidget(self.cb_backend, 0, Qt.AlignmentFlag.AlignLeft)
+        backend_hint = "Try Windows Media Foundation if videos play incorrectly. Takes effect after restarting the app."
+        env_backend = os.environ.get("QT_MEDIA_BACKEND")
+        if env_backend and env_backend != media_backend:
+            backend_hint += f" (The QT_MEDIA_BACKEND environment variable currently forces \"{env_backend}\".)"
+        lbl_backend = QLabel(backend_hint)
+        lbl_backend.setObjectName("pageHint")
+        lbl_backend.setWordWrap(True)
+        layout.addWidget(lbl_backend)
+
+        layout.addSpacing(10)
+        layout.addWidget(self._section_label("Preview cache"))
+        self.lbl_cache = QLabel()
+        self.lbl_cache.setObjectName("pageHint")
+        self.lbl_cache.setWordWrap(True)
+        layout.addWidget(self.lbl_cache)
+        cache_row = QHBoxLayout()
+        btn_open_cache = QPushButton("Open Cache Folder")
+        btn_open_cache.clicked.connect(self._on_open_cache)
+        btn_clear_cache = QPushButton("Clear Cache")
+        btn_clear_cache.clicked.connect(self._on_clear_cache)
+        cache_row.addWidget(btn_open_cache)
+        cache_row.addWidget(btn_clear_cache)
+        cache_row.addStretch(1)
+        layout.addLayout(cache_row)
+        layout.addStretch(1)
+
+        self._update_ffmpeg_status()
+        self._update_cache_label()
+
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        return label
+
+    def ffmpeg_path(self) -> str:
+        return self.txt_ffmpeg.text().strip()
+
+    def media_backend(self) -> str:
+        return self.cb_backend.currentData()
+
+    def _on_browse(self) -> None:
+        start = self.ffmpeg_path() or str(Path.home())
+        chosen, _ = QFileDialog.getOpenFileName(self, "Locate ffmpeg.exe", start, "ffmpeg (ffmpeg.exe);;Programs (*.exe)")
+        if chosen:
+            self.txt_ffmpeg.setText(str(Path(chosen)))
+
+    def _update_ffmpeg_status(self) -> None:
+        found = find_ffmpeg(self.ffmpeg_path())
+        if found:
+            self.lbl_ffmpeg_status.setText(f"✔ Using {found}")
+        elif self.ffmpeg_path():
+            self.lbl_ffmpeg_status.setText("✖ No ffmpeg.exe at that location.")
+        else:
+            self.lbl_ffmpeg_status.setText(
+                "✖ ffmpeg isn't on the system PATH. Install it (for example: winget install ffmpeg) "
+                "or browse to ffmpeg.exe. Videos still play; only thumbnails and preview copies need it."
+            )
+
+    def _update_cache_label(self) -> None:
+        size_mb = cache_size_bytes() / (1024 * 1024)
+        self.lbl_cache.setText(f"{size_mb:.1f} MB of preview copies and thumbnails in {CACHE_ROOT}")
+
+    def _on_open_cache(self) -> None:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CACHE_ROOT)))
+
+    def _on_clear_cache(self) -> None:
+        clear_video_cache()
+        self._update_cache_label()
+
+
+# ----------------------------------------------------------------------
+# General > Shortcuts
+# ----------------------------------------------------------------------
+class ShortcutsPage(QWidget):
+    """Read-only list of every shortcut, grouped by where it's used (built from ui.shortcuts)."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.addWidget(_page_header(
+            "Shortcuts",
+            "Keyboard shortcuts and mouse controls, grouped by where they work.",
+        ))
+
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("Filter shortcuts...")
+        self.txt_filter.setClearButtonEnabled(True)
+        self.txt_filter.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.txt_filter)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Shortcut", "Action"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(12)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        bold = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        for category, items in shortcuts.by_category():
+            if not items:
+                continue
+            root = QTreeWidgetItem(self.tree, [category, ""])
+            root.setFont(0, bold)
+            root.setFirstColumnSpanned(True)
+            for shortcut in items:
+                row = QTreeWidgetItem(root, [shortcut.keys, shortcut.action])
+                row.setFont(0, bold)
+        self.tree.expandAll()
+        for root_index in range(self.tree.topLevelItemCount()):
+            self.tree.topLevelItem(root_index).setFirstColumnSpanned(True)
+        self.tree.resizeColumnToContents(0)
+        self.tree.setColumnWidth(0, self.tree.columnWidth(0) + 24)
+        layout.addWidget(self.tree, 1)
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        for root_index in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(root_index)
+            category_hit = needle in root.text(0).casefold()
+            visible = 0
+            for i in range(root.childCount()):
+                row = root.child(i)
+                hit = not needle or category_hit or needle in row.text(0).casefold() or needle in row.text(1).casefold()
+                row.setHidden(not hit)
+                visible += hit
+            root.setHidden(visible == 0)
+
+
+# ----------------------------------------------------------------------
+# General > Tags
+# ----------------------------------------------------------------------
+class TagsPage(QWidget):
+    """Create, rename, recolor and delete custom tags. Changes are saved immediately."""
+
+    def __init__(self, repo: TagRepository, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.repo = repo
+        self.changed = False  # set once anything was edited, so the main window can refresh
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.addWidget(_page_header(
+            "Tags",
+            "Custom tags let you group files however you like. Tag files from the grid "
+            "(right-click > Tag..., or Ctrl+T) and search with tag:name. "
+            "File type tags are added automatically and can't be edited. Changes here are saved immediately.",
+        ))
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Tag", "Files"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(12)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, self.tree.header().ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(1, self.tree.header().ResizeMode.ResizeToContents)
+        self.tree.currentItemChanged.connect(self._update_buttons)
+        self.tree.itemDoubleClicked.connect(lambda *_: self._on_rename())
+        layout.addWidget(self.tree, 1)
+
+        buttons = QHBoxLayout()
+        self.btn_new = QPushButton("+ New Tag...")
+        self.btn_new.setObjectName("primaryBtn")
+        self.btn_new.clicked.connect(self._on_new)
+        self.btn_rename = QPushButton("Rename...")
+        self.btn_rename.clicked.connect(self._on_rename)
+        self.btn_color = QPushButton("Change Color...")
+        self.btn_color.clicked.connect(self._on_color)
+        self.btn_delete = QPushButton("Delete")
+        self.btn_delete.clicked.connect(self._on_delete)
+        for btn in (self.btn_new, self.btn_rename, self.btn_color, self.btn_delete):
+            buttons.addWidget(btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.refresh()
+
+    def refresh(self, select_id: Optional[int] = None) -> None:
+        self.tree.clear()
+        tags = self.repo.list_tags()
+        custom_root = QTreeWidgetItem(self.tree, ["Custom Tags", ""])
+        default_root = QTreeWidgetItem(self.tree, ["File Type Tags (automatic)", ""])
+        for root in (custom_root, default_root):
+            root.setFont(0, QFont("Segoe UI", 9, QFont.Weight.Bold))
+            root.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        selected = None
+        for tag in tags:
+            item = QTreeWidgetItem(default_root if tag.is_default else custom_root, [tag.name, str(tag.file_count)])
+            item.setData(0, Qt.ItemDataRole.UserRole, tag)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if tag.is_default:
+                item.setForeground(0, self.palette().color(self.palette().ColorRole.PlaceholderText))
+                item.setToolTip(0, "Added automatically from the file extension; can't be edited")
+            else:
+                item.setIcon(0, color_swatch_icon(tag.color or "#9ca3af", 14, 14))
+            if tag.id == select_id:
+                selected = item
+        if not custom_root.childCount():
+            hint = QTreeWidgetItem(custom_root, ["No custom tags yet. Click + New Tag... to make one.", ""])
+            hint.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.tree.expandAll()
+        if selected is not None:
+            self.tree.setCurrentItem(selected)
+        self._update_buttons()
+
+    def _current_custom(self) -> Optional[Tag]:
+        item = self.tree.currentItem()
+        tag = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        return tag if tag is not None and not tag.is_default else None
+
+    def _update_buttons(self, *_args) -> None:
+        enabled = self._current_custom() is not None
+        for btn in (self.btn_rename, self.btn_color, self.btn_delete):
+            btn.setEnabled(enabled)
+
+    def _ask_name(self, title: str, initial: str = "") -> Optional[str]:
+        name, ok = QInputDialog.getText(self, title, f"Tag name (up to {MAX_TAG_NAME_LENGTH} characters):", text=initial)
+        return name if ok else None
+
+    def _on_new(self) -> None:
+        name = self._ask_name("New Tag")
+        while name is not None:
+            try:
+                tag = self.repo.create_custom_tag(name, next_tag_color(self.repo.list_tags(kind="custom")))
+            except TagError as exc:
+                QMessageBox.warning(self, "Can't Create Tag", str(exc))
+                name = self._ask_name("New Tag", name)
+                continue
+            self.changed = True
+            self.refresh(select_id=tag.id)
+            return
+
+    def _on_rename(self) -> None:
+        tag = self._current_custom()
+        if tag is None:
+            return
+        name = self._ask_name("Rename Tag", tag.name)
+        while name is not None and name.strip() != tag.name:
+            try:
+                self.repo.rename_custom_tag(tag.id, name)
+            except TagError as exc:
+                QMessageBox.warning(self, "Can't Rename Tag", str(exc))
+                name = self._ask_name("Rename Tag", name)
+                continue
+            self.changed = True
+            self.refresh(select_id=tag.id)
+            return
+
+    def _on_color(self) -> None:
+        tag = self._current_custom()
+        if tag is None:
+            return
+        color = QColorDialog.getColor(QColor(tag.color or "#9ca3af"), self, f"Color for {tag.name}")
+        if color.isValid():
+            self.repo.set_tag_color(tag.id, color.name())
+            self.changed = True
+            self.refresh(select_id=tag.id)
+
+    def _on_delete(self) -> None:
+        tag = self._current_custom()
+        if tag is None:
+            return
+        files = f"{tag.file_count} file{'s' if tag.file_count != 1 else ''}"
+        answer = QMessageBox.question(
+            self, "Delete Tag",
+            f'Delete the tag "{tag.name}"?\n\nIt will be removed from {files}. The files themselves are not affected.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.repo.delete_custom_tag(tag.id)
+            self.changed = True
+            self.refresh()
+
+
+# ----------------------------------------------------------------------
 # About
 # ----------------------------------------------------------------------
 class _UpdateWorker(QObject):
@@ -1126,6 +1463,8 @@ class SettingsDialog(QDialog):
         self._orig_categories = get_categories()
         self._orig_theme = get_theme()
         self._orig_thumbnail_size = get_thumbnail_size()
+        self._orig_ffmpeg_path = get_ffmpeg_path()
+        self._orig_media_backend = get_media_backend()
 
         # Set after Save so the main window knows what to refresh
         self.folders_changed = False
@@ -1139,6 +1478,9 @@ class SettingsDialog(QDialog):
         self.page_categories = CategoriesPage(self._orig_categories, self._orig_extensions)
         self.page_appearance = AppearancePage(self.page_categories, self._orig_theme, self._orig_thumbnail_size)
         self.page_appearance.theme_selected.connect(self._on_theme_selected)
+        self.page_video = VideoPage(self._orig_ffmpeg_path, self._orig_media_backend)
+        self.page_tags = TagsPage(get_repository())
+        self.page_shortcuts = ShortcutsPage()
         self.page_about = AboutPage()
 
         self.page_files.validity_changed.connect(self._on_files_validity_changed)
@@ -1168,6 +1510,9 @@ class SettingsDialog(QDialog):
             ("Files", self.page_files),
             ("Categories", self.page_categories),
             ("Appearance", self.page_appearance),
+            ("Video", self.page_video),
+            ("Tags", self.page_tags),
+            ("Shortcuts", self.page_shortcuts),
         ):
             item = QTreeWidgetItem(general, [name])
             item.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(page))
@@ -1274,5 +1619,12 @@ class SettingsDialog(QDialog):
             set_theme(theme_id)
         if self.thumbnail_size_changed:
             set_thumbnail_size(thumbnail_size)
+        if self.page_video.ffmpeg_path() != self._orig_ffmpeg_path:
+            set_ffmpeg_path(self.page_video.ffmpeg_path())
+        if self.page_video.media_backend() != self._orig_media_backend:
+            set_media_backend(self.page_video.media_backend())
+            QMessageBox.information(
+                self, "Restart Required", "The new video playback backend will be used after you restart the app."
+            )
 
         self.accept()

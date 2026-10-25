@@ -6,6 +6,7 @@ from .scanner import (
     MODEL_EXTENSIONS,
     TEXTURE_EXTENSIONS,
     DOCUMENT_EXTENSIONS,
+    VIDEO_EXTENSIONS,
     ALL_SUPPORTED_EXTENSIONS,
 )
 from .settings import (
@@ -27,6 +28,7 @@ __all__ = [
     "MODEL_EXTENSIONS",
     "TEXTURE_EXTENSIONS",
     "DOCUMENT_EXTENSIONS",
+    "VIDEO_EXTENSIONS",
     "ALL_SUPPORTED_EXTENSIONS",
     "get_scan_folders",
     "set_scan_folders",

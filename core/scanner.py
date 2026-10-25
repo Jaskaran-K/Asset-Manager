@@ -1,9 +1,10 @@
-"""Core asset scanner module for 3D models, textures, and document files.
+"""Core asset scanner module for 3D models, textures, documents, and video files.
 
 Scans local directories for:
 - 3D Models: .fbx, .obj, .gltf, .glb, .stl, .dae, .blend, .3ds, .ply
 - Textures & Images: .png, .jpg, .jpeg, .tiff, .tif, .tga, .bmp, .webp, .exr, .psd, .hdr, .dds
 - Documents: .pdf
+- Videos: .mp4, .mov, .mkv, .avi, .webm, .m4v
 """
 
 from __future__ import annotations
@@ -47,8 +48,18 @@ DOCUMENT_EXTENSIONS: set[str] = {
     ".pdf",
 }
 
+# Played in-app with QMediaPlayer (add more containers here)
+VIDEO_EXTENSIONS: set[str] = {
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".webm",
+    ".m4v",
+}
+
 ALL_SUPPORTED_EXTENSIONS: set[str] = (
-    MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS
+    MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS
 )
 
 DEFAULT_EXCLUDED_DIRS: set[str] = {
@@ -69,14 +80,14 @@ DEFAULT_EXCLUDED_DIRS: set[str] = {
 
 @dataclass
 class AssetItem:
-    """Represents a discovered asset file (3D model, texture, or document)."""
+    """Represents a discovered asset file (3D model, texture, document, or video)."""
 
     path: Path
     name: str
     extension: str
     size_bytes: int
     modified_timestamp: float
-    asset_group: str  # "3D Models", "Textures", "Documents"
+    asset_group: str  # "3D Models", "Textures", "Documents", "Videos"
     category_name: str  # e.g. "FBX", "OBJ", "PNG", "TIFF", "PDF"
 
     @property
@@ -109,6 +120,11 @@ class AssetItem:
         """Check if asset is a document (e.g. PDF)."""
         return self.asset_group == "Documents"
 
+    @property
+    def is_video(self) -> bool:
+        """Check if asset is a video file."""
+        return self.asset_group == "Videos"
+
 
 def determine_asset_group(extension: str) -> str:
     """Classify file extension into an asset group."""
@@ -119,6 +135,8 @@ def determine_asset_group(extension: str) -> str:
         return "Textures"
     if ext in DOCUMENT_EXTENSIONS:
         return "Documents"
+    if ext in VIDEO_EXTENSIONS:
+        return "Videos"
     return "Other"
 
 
@@ -148,6 +166,12 @@ def determine_category_name(extension: str) -> str:
         ".hdr": "HDR",
         ".dds": "DDS",
         ".pdf": "PDF",
+        ".mp4": "MP4",
+        ".mov": "MOV",
+        ".mkv": "MKV",
+        ".avi": "AVI",
+        ".webm": "WebM",
+        ".m4v": "M4V",
     }
     return mapping.get(ext, ext.lstrip(".").upper())
 

@@ -6,6 +6,9 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - categories:       sidebar main categories, their subcategories, file types, colors and icons
 - theme:            UI theme id ("dark", "light", "dark_purple")
 - thumbnail_size:   grid thumbnail size in pixels
+- ffmpeg_path:      ffmpeg executable for video proxies / poster frames (blank = search PATH)
+- media_backend:    Qt multimedia backend ("auto", "ffmpeg", "windows"); applied on restart
+- video_skip_seconds: jump time for the video player's skip buttons and arrow keys
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .scanner import DOCUMENT_EXTENSIONS, MODEL_EXTENSIONS, TEXTURE_EXTENSIONS
+from .scanner import DOCUMENT_EXTENSIONS, MODEL_EXTENSIONS, TEXTURE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
 CONFIG_FILE_PATH: Path = Path.home() / ".3d_asset_manager_config.json"
@@ -37,6 +40,7 @@ DEFAULT_FILE_EXTENSIONS: list[str] = [
     ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".tga", ".bmp", ".webp", ".exr",
     ".psd", ".hdr", ".dds",
     ".pdf",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
 ]
 
 # Mirrors the original hard-coded sidebar layout
@@ -71,10 +75,16 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             {"name": "PDF", "color": "#ef4444", "extensions": [".pdf"]},
         ],
     },
+    {
+        "name": "Videos",
+        "color": "#f59e0b",
+        "extensions": [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"],
+        "subcategories": [],
+    },
 ]
 
 # Extensions the built-in viewer / thumbnailer knows how to preview
-PREVIEWABLE_EXTENSIONS: set[str] = MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS
+PREVIEWABLE_EXTENSIONS: set[str] = MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS
 
 _EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9_]+$")
 _COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -312,3 +322,42 @@ def get_thumbnail_size() -> int:
 def set_thumbnail_size(size: int) -> None:
     lo, hi = THUMBNAIL_SIZE_RANGE
     _update_config("thumbnail_size", max(lo, min(hi, int(size))))
+
+
+# ----------------------------------------------------------------------
+# Video
+# ----------------------------------------------------------------------
+MEDIA_BACKENDS = ("auto", "ffmpeg", "windows")
+
+
+def get_ffmpeg_path() -> str:
+    """User-configured ffmpeg executable, or "" to search the system PATH."""
+    path = _load_raw_config().get("ffmpeg_path", "")
+    return path if isinstance(path, str) else ""
+
+
+def set_ffmpeg_path(path: str) -> None:
+    _update_config("ffmpeg_path", path.strip())
+
+
+def get_media_backend() -> str:
+    backend = _load_raw_config().get("media_backend")
+    return backend if backend in MEDIA_BACKENDS else "auto"
+
+
+def set_media_backend(backend: str) -> None:
+    _update_config("media_backend", backend if backend in MEDIA_BACKENDS else "auto")
+
+
+VIDEO_SKIP_OPTIONS = (1, 5, 10, 15, 30)  # seconds
+DEFAULT_VIDEO_SKIP = 5
+
+
+def get_video_skip_seconds() -> int:
+    """Jump time for the player's skip buttons and arrow keys."""
+    seconds = _load_raw_config().get("video_skip_seconds")
+    return seconds if seconds in VIDEO_SKIP_OPTIONS else DEFAULT_VIDEO_SKIP
+
+
+def set_video_skip_seconds(seconds: int) -> None:
+    _update_config("video_skip_seconds", seconds if seconds in VIDEO_SKIP_OPTIONS else DEFAULT_VIDEO_SKIP)

@@ -62,12 +62,20 @@ def _violations(path: Path) -> list[str]:
 
 
 def _used_ids() -> dict[str, list[str]]:
-    """Shortcut ids referenced in code -> where."""
+    """Shortcut ids referenced in code -> where.
+
+    Counts ids passed straight to shortcuts.sequence/matches/get, and registered ids written
+    as string constants elsewhere (e.g. a table of ids that a loop binds).
+    """
+    registered = {s.id for s in shortcuts.SHORTCUTS}
     used: dict[str, list[str]] = {}
     for path in SOURCES:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            where = f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', '?')}"
             if _is_registry_call(node) and node.args and isinstance(node.args[0], ast.Constant):
-                used.setdefault(node.args[0].value, []).append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                used.setdefault(node.args[0].value, []).append(where)
+            elif isinstance(node, ast.Constant) and node.value in registered:
+                used.setdefault(node.value, []).append(where)
     return used
 
 

@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import crash_log
 from core.scanner import AssetItem
 from core.settings import (
     DEFAULT_CATEGORIES,
@@ -62,6 +63,7 @@ from core.settings import (
     get_ffmpeg_path,
     get_file_extensions,
     get_media_backend,
+    get_motion,
     get_scan_folders,
     get_theme,
     get_thumbnail_size,
@@ -72,6 +74,7 @@ from core.settings import (
     set_ffmpeg_path,
     set_file_extensions,
     set_media_backend,
+    set_motion,
     set_scan_folders,
     set_theme,
     set_thumbnail_size,
@@ -88,6 +91,7 @@ from core.updater import (
 )
 from core.version import APP_NAME, APP_VERSION, GITHUB_URL
 from core.video_tools import CACHE_ROOT, cache_size_bytes, clear_video_cache, find_ffmpeg
+from ui.animations import set_motion_mode
 from ui.icons import (
     MAIN_CATEGORY_COLORS,
     SUB_CATEGORY_COLORS,
@@ -143,9 +147,11 @@ class FoldersPage(QWidget):
 
         buttons = QHBoxLayout()
         self.btn_add = QPushButton("+ Add Folder...")
+        self.btn_add.setToolTip("Add a folder to the library; it's scanned with all its subfolders")
         self.btn_add.setObjectName("primaryBtn")
         self.btn_add.clicked.connect(self._on_add)
         self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setToolTip("Remove the selected folder from the library (the files themselves aren't touched)")
         self.btn_remove.clicked.connect(self._on_remove)
         buttons.addWidget(self.btn_add)
         buttons.addWidget(self.btn_remove)
@@ -229,6 +235,7 @@ class FilesPage(QWidget):
 
         buttons = QHBoxLayout()
         btn_reset = QPushButton("Reset to Defaults")
+        btn_reset.setToolTip("Restore the default list of file types")
         btn_reset.clicked.connect(
             lambda: self.txt_extensions.setPlainText(", ".join(DEFAULT_FILE_EXTENSIONS))
         )
@@ -319,10 +326,13 @@ class CategoriesPage(QWidget):
 
         row1 = QHBoxLayout()
         self.btn_add_main = QPushButton("+ Category")
+        self.btn_add_main.setToolTip("Add a top-level sidebar category")
         self.btn_add_main.clicked.connect(self._on_add_main)
         self.btn_add_sub = QPushButton("+ Subcategory")
+        self.btn_add_sub.setToolTip("Add a subcategory under the selected category")
         self.btn_add_sub.clicked.connect(self._on_add_sub)
         self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setToolTip("Remove the selected category")
         self.btn_remove.clicked.connect(self._on_remove)
         row1.addWidget(self.btn_add_main)
         row1.addWidget(self.btn_add_sub)
@@ -331,10 +341,13 @@ class CategoriesPage(QWidget):
 
         row2 = QHBoxLayout()
         self.btn_up = QPushButton("▲ Up")
+        self.btn_up.setToolTip("Move the selected category up")
         self.btn_up.clicked.connect(lambda: self._move_current(-1))
         self.btn_down = QPushButton("▼ Down")
+        self.btn_down.setToolTip("Move the selected category down")
         self.btn_down.clicked.connect(lambda: self._move_current(1))
         btn_reset = QPushButton("Reset to Defaults")
+        btn_reset.setToolTip("Restore the default categories")
         btn_reset.clicked.connect(self._on_reset)
         row2.addWidget(self.btn_up)
         row2.addWidget(self.btn_down)
@@ -679,6 +692,7 @@ class AppearancePage(QWidget):
         self.theme_buttons: dict[str, QPushButton] = {}
         for tid, tokens in THEMES.items():
             btn = QPushButton(tokens["label"])
+            btn.setToolTip(f"Switch to {tokens['label']} (previewed now; Save keeps it)")
             btn.setObjectName("themeCard")
             btn.setCheckable(True)
             btn.setIcon(QIcon(_theme_swatch(tid)))
@@ -735,6 +749,23 @@ class AppearancePage(QWidget):
         layout.addWidget(self.grid_preview)
         layout.addSpacing(14)
 
+        # --- Animations ---
+        layout.addWidget(self._section_title("Animations"))
+        motion_row = QHBoxLayout()
+        self.cb_motion = QComboBox()
+        for mode, label in (
+            ("auto", "Follow Windows (Animation effects)"),
+            ("on", "On"),
+            ("off", "Off (reduce motion)"),
+        ):
+            self.cb_motion.addItem(label, mode)
+        self.cb_motion.setCurrentIndex(max(0, self.cb_motion.findData(get_motion())))
+        self.cb_motion.setToolTip("Button, menu and dropdown animations. Off makes everything change instantly.")
+        motion_row.addWidget(self.cb_motion)
+        motion_row.addStretch(1)
+        layout.addLayout(motion_row)
+        layout.addSpacing(14)
+
         # --- Category colors & icons ---
         layout.addWidget(self._section_title("Category Colors & Icons"))
         hint = QLabel(
@@ -757,10 +788,13 @@ class AppearancePage(QWidget):
 
         cat_buttons = QVBoxLayout()
         self.btn_color = QPushButton("Change Color...")
+        self.btn_color.setToolTip("Pick the color of the selected category's sidebar badge")
         self.btn_color.clicked.connect(self._on_choose_color)
         self.btn_icon = QPushButton("Set Icon Image...")
+        self.btn_icon.setToolTip("Use a small image (PNG, JPG, SVG or ICO, up to 1 MB) as the selected category's icon")
         self.btn_icon.clicked.connect(self._on_choose_icon)
         self.btn_clear_icon = QPushButton("Remove Icon")
+        self.btn_clear_icon.setToolTip("Go back to the color badge for the selected category")
         self.btn_clear_icon.clicked.connect(self._on_clear_icon)
         for btn in (self.btn_color, self.btn_icon, self.btn_clear_icon):
             cat_buttons.addWidget(btn)
@@ -942,6 +976,7 @@ class VideoPage(QWidget):
         self.txt_ffmpeg.setPlaceholderText("Leave blank to use ffmpeg from the system PATH")
         self.txt_ffmpeg.textChanged.connect(self._update_ffmpeg_status)
         btn_browse = QPushButton("Browse...")
+        btn_browse.setToolTip("Pick ffmpeg.exe")
         btn_browse.clicked.connect(self._on_browse)
         row.addWidget(self.txt_ffmpeg, 1)
         row.addWidget(btn_browse)
@@ -976,8 +1011,10 @@ class VideoPage(QWidget):
         layout.addWidget(self.lbl_cache)
         cache_row = QHBoxLayout()
         btn_open_cache = QPushButton("Open Cache Folder")
+        btn_open_cache.setToolTip("Open the folder with cached video previews and thumbnails")
         btn_open_cache.clicked.connect(self._on_open_cache)
         btn_clear_cache = QPushButton("Clear Cache")
+        btn_clear_cache.setToolTip("Delete cached previews and thumbnails; they're made again when needed")
         btn_clear_cache.clicked.connect(self._on_clear_cache)
         cache_row.addWidget(btn_open_cache)
         cache_row.addWidget(btn_clear_cache)
@@ -1093,12 +1130,17 @@ class ShortcutsPage(QWidget):
 # General > Tags
 # ----------------------------------------------------------------------
 class TagsPage(QWidget):
-    """Create, rename, recolor and delete custom tags. Changes are saved immediately."""
+    """Create, rename, recolor and delete custom tags.
+
+    Edits are written straight away (so the counts shown are real), and each one records
+    how to undo it; Cancel on the Settings dialog calls revert() to undo them all.
+    """
 
     def __init__(self, repo: TagRepository, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.repo = repo
         self.changed = False  # set once anything was edited, so the main window can refresh
+        self._undo: list[Callable[[], None]] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -1106,7 +1148,7 @@ class TagsPage(QWidget):
             "Tags",
             "Custom tags let you group files however you like. Tag files from the grid "
             "(right-click > Tag..., or Ctrl+T) and search with tag:name. "
-            "File type tags are added automatically and can't be edited. Changes here are saved immediately.",
+            "File type tags are added automatically and can't be edited. Cancel undoes the changes made here.",
         ))
 
         self.tree = QTreeWidget()
@@ -1122,19 +1164,32 @@ class TagsPage(QWidget):
 
         buttons = QHBoxLayout()
         self.btn_new = QPushButton("+ New Tag...")
+        self.btn_new.setToolTip("Create a custom tag")
         self.btn_new.setObjectName("primaryBtn")
         self.btn_new.clicked.connect(self._on_new)
         self.btn_rename = QPushButton("Rename...")
+        self.btn_rename.setToolTip("Rename the selected tag (or double-click it)")
         self.btn_rename.clicked.connect(self._on_rename)
         self.btn_color = QPushButton("Change Color...")
+        self.btn_color.setToolTip("Change the selected tag's color")
         self.btn_color.clicked.connect(self._on_color)
         self.btn_delete = QPushButton("Delete")
+        self.btn_delete.setToolTip("Delete the selected tag (Cancel brings it back)")
         self.btn_delete.clicked.connect(self._on_delete)
         for btn in (self.btn_new, self.btn_rename, self.btn_color, self.btn_delete):
             buttons.addWidget(btn)
         buttons.addStretch(1)
         layout.addLayout(buttons)
         self.refresh()
+
+    def revert(self) -> None:
+        """Undo every edit made on this page, newest first."""
+        for undo in reversed(self._undo):
+            try:
+                undo()
+            except TagError:
+                pass  # e.g. the name was taken again meanwhile; skip that one
+        self._undo.clear()
 
     def refresh(self, select_id: Optional[int] = None) -> None:
         self.tree.clear()
@@ -1187,6 +1242,7 @@ class TagsPage(QWidget):
                 QMessageBox.warning(self, "Can't Create Tag", str(exc))
                 name = self._ask_name("New Tag", name)
                 continue
+            self._undo.append(lambda tag_id=tag.id: self.repo.delete_custom_tag(tag_id))
             self.changed = True
             self.refresh(select_id=tag.id)
             return
@@ -1203,6 +1259,7 @@ class TagsPage(QWidget):
                 QMessageBox.warning(self, "Can't Rename Tag", str(exc))
                 name = self._ask_name("Rename Tag", name)
                 continue
+            self._undo.append(lambda tag_id=tag.id, old=tag.name: self.repo.rename_custom_tag(tag_id, old))
             self.changed = True
             self.refresh(select_id=tag.id)
             return
@@ -1214,6 +1271,7 @@ class TagsPage(QWidget):
         color = QColorDialog.getColor(QColor(tag.color or "#9ca3af"), self, f"Color for {tag.name}")
         if color.isValid():
             self.repo.set_tag_color(tag.id, color.name())
+            self._undo.append(lambda tag_id=tag.id, old=tag.color: self.repo.set_tag_color(tag_id, old))
             self.changed = True
             self.refresh(select_id=tag.id)
 
@@ -1224,11 +1282,14 @@ class TagsPage(QWidget):
         files = f"{tag.file_count} file{'s' if tag.file_count != 1 else ''}"
         answer = QMessageBox.question(
             self, "Delete Tag",
-            f'Delete the tag "{tag.name}"?\n\nIt will be removed from {files}. The files themselves are not affected.',
+            f'Delete the tag "{tag.name}"?\n\nIt will be removed from {files}. The files themselves are not affected. '
+            "(Cancel in Settings brings it back.)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
         )
         if answer == QMessageBox.StandardButton.Yes:
+            snapshot = self.repo.custom_tag_snapshot(tag.id)  # the tag and its files, to undo on Cancel
             self.repo.delete_custom_tag(tag.id)
+            self._undo.append(lambda: self.repo.restore_custom_tag(*snapshot))
             self.changed = True
             self.refresh()
 
@@ -1312,9 +1373,21 @@ class AboutPage(QWidget):
 
         row = QHBoxLayout()
         self.btn_update = QPushButton("Check for Updates")
+        self.btn_update.setToolTip("Look for a newer version on GitHub")
         self.btn_update.setObjectName("primaryBtn")
         self.btn_update.clicked.connect(self._on_check_updates)
         row.addWidget(self.btn_update)
+        self.btn_crash_log = QPushButton("Open Crash Log")
+        log_exists = crash_log.crash_log_path().exists()
+        self.btn_crash_log.setEnabled(log_exists)
+        self.btn_crash_log.setToolTip(
+            "Crashes, freezes and errors are recorded here, for bug reports"
+            if log_exists else "Nothing has been logged: no crashes or errors so far"
+        )
+        self.btn_crash_log.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(crash_log.crash_log_path())))
+        )
+        row.addWidget(self.btn_crash_log)
         row.addStretch(1)
         layout.addLayout(row)
         layout.addSpacing(8)
@@ -1402,9 +1475,10 @@ class AboutPage(QWidget):
         self._progress_dialog.setMinimumWidth(360)
         self._progress_dialog.show()
 
+        # Connect bound slots only: a lambda would run on the worker thread and touch widgets there
         worker = _UpdateWorker(info)
         worker.progress.connect(self._progress_dialog.setLabelText)
-        worker.installed.connect(lambda changed: self._on_installed(info, changed))
+        worker.installed.connect(self._on_installed)
         worker.failed.connect(self._on_install_failed)
         self._run_in_thread(worker, worker.install)
 
@@ -1419,7 +1493,9 @@ class AboutPage(QWidget):
         self._set_status(message, "warningLabel")
         QMessageBox.warning(self, "Update Failed", message)
 
-    def _on_installed(self, info: UpdateInfo, requirements_changed: bool) -> None:
+    @Slot(bool)
+    def _on_installed(self, requirements_changed: bool) -> None:
+        info = self._worker.info
         self._close_progress()
         self.btn_update.setText("Restart to Finish Updating")
         self.btn_update.setEnabled(True)
@@ -1543,8 +1619,10 @@ class SettingsDialog(QDialog):
         footer_layout.addWidget(self.lbl_footer_warning)
         footer_layout.addStretch(1)
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setToolTip("Close without saving (tag edits made here are undone too)")
         btn_cancel.clicked.connect(self.reject)
         self.btn_save = QPushButton("Save")
+        self.btn_save.setToolTip("Save all settings")
         self.btn_save.setObjectName("primaryBtn")
         self.btn_save.setDefault(True)
         self.btn_save.clicked.connect(self._on_save)
@@ -1576,6 +1654,8 @@ class SettingsDialog(QDialog):
             apply_theme(get_theme())
         # Discard icon images imported during this session
         remove_unused_category_icons(get_categories())
+        # Tag edits are saved as they're made; Cancel undoes them
+        self.page_tags.revert()
         super().reject()
 
     def _sync_category_extensions(self) -> None:
@@ -1619,6 +1699,10 @@ class SettingsDialog(QDialog):
             set_theme(theme_id)
         if self.thumbnail_size_changed:
             set_thumbnail_size(thumbnail_size)
+        motion = self.page_appearance.cb_motion.currentData()
+        if motion != get_motion():
+            set_motion(motion)
+            set_motion_mode(motion)  # takes effect right away
         if self.page_video.ffmpeg_path() != self._orig_ffmpeg_path:
             set_ffmpeg_path(self.page_video.ffmpeg_path())
         if self.page_video.media_backend() != self._orig_media_backend:

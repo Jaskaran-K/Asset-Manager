@@ -14,6 +14,7 @@ import ctypes
 import math
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -806,18 +807,22 @@ class DocumentViewerWidget(QWidget):
         t_layout.setSpacing(8)
 
         btn_fit = QPushButton("Fit Page")
+        btn_fit.setToolTip("Zoom so the whole page fits")
         btn_fit.clicked.connect(lambda: self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitInView))
         t_layout.addWidget(btn_fit)
 
         btn_fit_width = QPushButton("Fit Width")
+        btn_fit_width.setToolTip("Zoom so the page fills the width")
         btn_fit_width.clicked.connect(lambda: self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth))
         t_layout.addWidget(btn_fit_width)
 
         btn_zoom_in = QPushButton("+ Zoom In")
+        btn_zoom_in.setToolTip("Zoom in by 25%")
         btn_zoom_in.clicked.connect(lambda: self.pdf_view.setZoomFactor(self.pdf_view.zoomFactor() * 1.25))
         t_layout.addWidget(btn_zoom_in)
 
         btn_zoom_out = QPushButton("- Zoom Out")
+        btn_zoom_out.setToolTip("Zoom out by 25%")
         btn_zoom_out.clicked.connect(lambda: self.pdf_view.setZoomFactor(self.pdf_view.zoomFactor() / 1.25))
         t_layout.addWidget(btn_zoom_out)
 
@@ -835,6 +840,16 @@ class DocumentViewerWidget(QWidget):
 # ----------------------------------------------------------------------
 # Unified Asset Viewer Dialog
 # ----------------------------------------------------------------------
+@dataclass
+class ViewerTarget:
+    """A file to show in the viewer, as handed out by the viewer's navigate callback."""
+
+    asset: AssetItem
+    tags: Optional[list[Tag]] = None
+    edit_tags: Optional[Callable[[], Optional[list[Tag]]]] = None
+    position: str = ""  # e.g. "3 of 120"
+
+
 class AssetViewerDialog(QDialog):
     """Unified modal viewer dialog for 3D models, textures, documents, and videos."""
 
@@ -844,30 +859,63 @@ class AssetViewerDialog(QDialog):
         parent: Optional[QWidget] = None,
         tags: Optional[list[Tag]] = None,
         edit_tags: Optional[Callable[[], Optional[list[Tag]]]] = None,
+        navigate: Optional[Callable[[int], Optional[ViewerTarget]]] = None,
+        position: str = "",
     ):
         """tags: the asset's tags to show (None hides the section).
-        edit_tags: opens the tagging dialog; returns the updated tags, or None if nothing changed."""
+        edit_tags: opens the tagging dialog; returns the updated tags, or None if nothing changed.
+        navigate: navigate(-1 / +1) returns the previous / next file, or None at either end;
+        it enables the < > buttons and Page Up / Page Down. position: e.g. "3 of 120"."""
         super().__init__(parent)
         self.asset = asset
         self.tags = tags
         self._edit_tags = edit_tags
+        self._navigate = navigate
+        self._position = position
         self.video_player: Optional[VideoPlayer] = None  # at most one, owned by this dialog
         # Window state to return to when leaving fullscreen
         self._state_before_fullscreen = Qt.WindowState.WindowNoState
         self._was_fullscreen_for_video = False  # viewer was already full screen when the video went full screen
 
-        self.setWindowTitle(f"Viewer - {asset.name}")
         # Dialogs get no maximize button by default
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.resize(1100, 720)
         self.setMinimumSize(800, 500)
 
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._page: Optional[QWidget] = None
         self._init_ui()
 
+    def show_target(self, target: ViewerTarget) -> None:
+        """Switch to another file, keeping the window (and full screen) as it is."""
+        if self.video_player is not None:
+            self.video_player.set_fullscreen(False)
+            self.video_player.stop()
+            self.video_player = None
+        self.asset, self.tags, self._edit_tags, self._position = target.asset, target.tags, target.edit_tags, target.position
+        self._init_ui()
+        self.setFocus()
+
+    def go(self, step: int) -> None:
+        """Show the previous (-1) or next (+1) file."""
+        target = self._navigate(step) if self._navigate is not None else None
+        if target is not None:
+            self.show_target(target)
+
     def _init_ui(self) -> None:
-        main_layout = QVBoxLayout(self)
+        """(Re)build the page for self.asset."""
+        self.setWindowTitle(f"Viewer - {self.asset.name}")
+        page = QWidget()
+        main_layout = QVBoxLayout(page)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+        if self._page is None:
+            self._layout.addWidget(page)
+        else:
+            self._layout.replaceWidget(self._page, page)
+            self._page.deleteLater()
+        self._page = page
 
         # 1. Top Header Bar
         self.header_bar = self._build_header_bar()
@@ -916,9 +964,24 @@ class AssetViewerDialog(QDialog):
         layout.addStretch(1)
 
         icon_color = self.palette().color(QPalette.ColorRole.ButtonText)
+        if self._navigate is not None:
+            for step, kind, tip in ((-1, "back", "Previous file (Page Up or Alt+Left)"), (1, "forward", "Next file (Page Down or Alt+Right)")):
+                button = QPushButton()
+                button.setIcon(control_icon(kind, icon_color))
+                button.setToolTip(tip)
+                button.setFixedWidth(40)
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                button.clicked.connect(lambda _checked=False, s=step: self.go(s))
+                layout.addWidget(button)
+                if step < 0 and self._position:
+                    position = QLabel(self._position)
+                    position.setObjectName("toolbarLabel")
+                    layout.addWidget(position)
+
         self._fullscreen_icons = (control_icon("fullscreen", icon_color), control_icon("exit_fullscreen", icon_color))
-        self.btn_fullscreen = QPushButton(" Full Screen")
-        self.btn_fullscreen.setIcon(self._fullscreen_icons[0])
+        fullscreen = self.isFullScreen()
+        self.btn_fullscreen = QPushButton(" Exit Full Screen" if fullscreen else " Full Screen")
+        self.btn_fullscreen.setIcon(self._fullscreen_icons[1 if fullscreen else 0])
         self.btn_fullscreen.setToolTip("Toggle full screen (F11)")
         self.btn_fullscreen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
@@ -973,6 +1036,7 @@ class AssetViewerDialog(QDialog):
             tb_layout.addWidget(btn_grid)
 
             btn_turntable = QPushButton("▶ Auto Rotate")
+            btn_turntable.setToolTip("Spin the model slowly to see it from every side")
             btn_turntable.setCheckable(True)
 
             def on_turntable_toggled(checked: bool):
@@ -1021,10 +1085,12 @@ class AssetViewerDialog(QDialog):
             tb_layout.setSpacing(8)
 
             btn_fit = QPushButton("Fit Screen")
+            btn_fit.setToolTip("Fit the whole image in the window")
             btn_fit.clicked.connect(tex_viewer.fit_to_screen)
             tb_layout.addWidget(btn_fit)
 
             btn_100 = QPushButton("100% (1:1)")
+            btn_100.setToolTip("Show the image at its real size: one image pixel per screen pixel")
             btn_100.clicked.connect(tex_viewer.set_actual_size)
             tb_layout.addWidget(btn_100)
 
@@ -1143,14 +1209,17 @@ class AssetViewerDialog(QDialog):
         layout.setSpacing(10)
 
         btn_open = QPushButton("Open in External App")
+        btn_open.setToolTip("Open the file in the program Windows uses for it")
         btn_open.clicked.connect(self._open_external)
         layout.addWidget(btn_open)
 
         btn_explorer = QPushButton("Show in File Explorer")
+        btn_explorer.setToolTip("Open its folder in File Explorer with the file selected")
         btn_explorer.clicked.connect(self._reveal_in_explorer)
         layout.addWidget(btn_explorer)
 
         btn_copy = QPushButton("Copy Path")
+        btn_copy.setToolTip("Copy the file's full path to the clipboard")
         btn_copy.clicked.connect(
             lambda: QGuiApplication.clipboard().setText(str(self.asset.path))
         )
@@ -1159,6 +1228,7 @@ class AssetViewerDialog(QDialog):
         layout.addStretch(1)
 
         btn_close = QPushButton("Close")
+        btn_close.setToolTip("Close the viewer (Esc)")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
 
@@ -1200,7 +1270,11 @@ class AssetViewerDialog(QDialog):
             self._leave_fullscreen()
 
     def keyPressEvent(self, event) -> None:
-        if shortcuts.matches("viewer.fullscreen", event):
+        if shortcuts.matches("viewer.previous", event) or shortcuts.matches("viewer.previous_alt", event):
+            self.go(-1)
+        elif shortcuts.matches("viewer.next", event) or shortcuts.matches("viewer.next_alt", event):
+            self.go(1)
+        elif shortcuts.matches("viewer.fullscreen", event):
             if self.video_player is not None and self.video_player.is_fullscreen():
                 self.video_player.set_fullscreen(False)
             else:

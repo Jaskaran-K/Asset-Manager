@@ -4,11 +4,16 @@ Solves:
 1. High-resolution texture freezing: loads thumbnails in background QThreadPool workers.
 2. 256 MB allocation limit: uses Pillow for streaming downsampled decoding without full-res buffers.
 3. TIFF tag warnings: avoids libtiff parser bugs on null-terminated metadata tags.
+4. Slow repeat launches: finished thumbnails are cached on disk (disk_cache_path), so a
+   big texture is decoded once, not every session.
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
+import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -43,6 +48,11 @@ from .video_tools import extract_poster_frame
 
 # Increase Qt's default image allocation limit from 256 MB to 2048 MB
 QImageReader.setAllocationLimit(2048)
+
+# Finished thumbnails are cached as PNGs in core.video_tools.THUMB_DIR (see disk_cache_path)
+MAX_DISK_CACHE_BYTES = 512 * 1024 * 1024
+_CACHE_VERSION = 1  # bump when thumbnail drawing changes, so old cached pictures aren't reused
+_COMPANION_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")  # model.png next to model.fbx
 
 # Format-specific color palettes for badges
 PALETTE_MAP = {
@@ -339,16 +349,93 @@ class _WorkerSignals(QObject):
     ready = Signal(str, QImage)
 
 
+def _card_style_key() -> str:
+    return "|".join(color.name(QColor.NameFormat.HexArgb) for color in _CARD_STYLE.values())
+
+
+def disk_cache_path(asset: AssetItem, size: int) -> Optional[Path]:
+    """Where a finished thumbnail is cached on disk, or None for types that aren't cached.
+
+    The name covers everything the picture depends on (file, size, modified time, thumbnail
+    size, theme card colors), so a changed file or theme simply gets a new entry.
+    3D models aren't cached: their picture comes from a companion image that can change.
+    """
+    if not (asset.is_texture or asset.is_video or (asset.is_document and asset.extension == ".pdf")):
+        return None
+    from . import video_tools  # CACHE_ROOT can be redirected (tests)
+
+    key = f"{os.path.normcase(str(asset.path))}|{asset.size_bytes}|{asset.modified_timestamp!r}|{size}|{_card_style_key()}|{_CACHE_VERSION}"
+    return video_tools.THUMB_DIR / f"{hashlib.sha1(key.encode('utf-8')).hexdigest()}.png"
+
+
+def prune_disk_cache(max_bytes: int = MAX_DISK_CACHE_BYTES) -> int:
+    """Delete the least recently used cached thumbnails beyond max_bytes. Returns how many were removed."""
+    from . import video_tools
+
+    try:
+        entries = [(e.stat().st_mtime, e.stat().st_size, e) for e in os.scandir(video_tools.THUMB_DIR) if e.is_file()]
+    except OSError:
+        return 0
+    total = sum(size for _mtime, size, _entry in entries)
+    if total <= max_bytes:
+        return 0
+    removed = 0
+    for _mtime, size, entry in sorted(entries, key=lambda e: e[0]):  # least recently used first
+        if total <= max_bytes * 0.8:  # leave headroom so pruning doesn't run on every launch
+            break
+        try:
+            os.unlink(entry.path)
+            total -= size
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 class _ThumbnailRunnable(QRunnable):
     """Background task to decode image/texture and generate thumbnail."""
 
-    def __init__(self, asset: AssetItem, size: int):
+    def __init__(self, asset: AssetItem, size: int, cache_file: Optional[Path]):
         super().__init__()
         self.asset = asset
         self.size = size
+        self.cache_file = cache_file  # computed on the UI thread (the theme colors live there)
         self.signals = _WorkerSignals()
 
     def run(self) -> None:
+        cached = self._from_disk()
+        if cached is not None:
+            self.signals.ready.emit(str(self.asset.path), cached)
+            return
+        qimg = self._render()
+        if qimg is not None and not qimg.isNull():
+            self._to_disk(qimg)
+            self.signals.ready.emit(str(self.asset.path), qimg)
+
+    def _from_disk(self) -> Optional[QImage]:
+        if self.cache_file is None or not self.cache_file.is_file():
+            return None
+        image = QImage(str(self.cache_file))
+        if image.isNull():
+            return None
+        try:
+            os.utime(self.cache_file)  # mark as recently used for prune_disk_cache
+        except OSError:
+            pass
+        return image
+
+    def _to_disk(self, image: QImage) -> None:
+        if self.cache_file is None:
+            return
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            partial = self.cache_file.with_suffix(f".{threading.get_ident()}.partial")
+            if image.save(str(partial), "PNG"):
+                os.replace(partial, self.cache_file)
+        except OSError:
+            pass  # caching is only a speed-up
+
+    def _render(self) -> Optional[QImage]:
         qimg: Optional[QImage] = None
 
         if self.asset.is_texture:
@@ -359,15 +446,13 @@ class _ThumbnailRunnable(QRunnable):
             qimg = load_video_thumbnail_image(self.asset.path, self.asset.category_name, self.size)
         elif self.asset.is_3d_model:
             # Check for companion preview images (model.png, etc.)
-            for preview_ext in [".png", ".jpg", ".jpeg", ".webp"]:
+            for preview_ext in _COMPANION_EXTENSIONS:
                 companion = self.asset.path.with_suffix(preview_ext)
                 if companion.exists():
                     qimg = load_texture_thumbnail_image(companion, self.asset.category_name, self.size)
                     if qimg is not None:
                         break
-
-        if qimg is not None and not qimg.isNull():
-            self.signals.ready.emit(str(self.asset.path), qimg)
+        return qimg
 
 
 # ----------------------------------------------------------------------
@@ -382,9 +467,30 @@ class ThumbnailManager(QObject):
         super().__init__(parent)
         self._cache: dict[str, QPixmap] = {}
         self._pending: set[str] = set()
+        # Placeholders depend only on the file type and size: draw each once
+        self._placeholders: dict[tuple[str, int], QPixmap] = {}
+        self._has_companion: dict[str, bool] = {}  # 3D model -> has a model.png etc. next to it
         self._thread_pool = QThreadPool()
         # Limit concurrent image worker threads to prevent disk IO saturation
         self._thread_pool.setMaxThreadCount(4)
+
+    def cached(self, asset: AssetItem) -> Optional[QPixmap]:
+        return self._cache.get(str(asset.path))
+
+    def placeholder(self, asset: AssetItem, size: int) -> QPixmap:
+        key = (asset.category_name, size)
+        pixmap = self._placeholders.get(key)
+        if pixmap is None:
+            pixmap = self._placeholders[key] = QPixmap.fromImage(render_placeholder_image(asset, size))
+        return pixmap
+
+    def _needs_async(self, asset: AssetItem) -> bool:
+        if asset.is_texture or asset.is_document or asset.is_video:
+            return True
+        key = str(asset.path)
+        if key not in self._has_companion:
+            self._has_companion[key] = any(asset.path.with_suffix(ext).exists() for ext in _COMPANION_EXTENSIONS)
+        return self._has_companion[key]
 
     def get_thumbnail(self, asset: AssetItem, size: int = 110) -> QPixmap:
         """Return cached thumbnail if present; otherwise returns placeholder and queues background load."""
@@ -393,25 +499,13 @@ class ThumbnailManager(QObject):
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        # Generate fast placeholder immediately
-        placeholder_qimg = render_placeholder_image(asset, size)
-        placeholder_pixmap = QPixmap.fromImage(placeholder_qimg)
-
-        # Queue background worker if this asset needs async texture/preview loading
-        needs_async = (
-            asset.is_texture
-            or asset.is_document
-            or asset.is_video
-            or any(asset.path.with_suffix(ext).exists() for ext in [".png", ".jpg", ".jpeg", ".webp"])
-        )
-
-        if needs_async and cache_key not in self._pending:
+        if self._needs_async(asset) and cache_key not in self._pending:
             self._pending.add(cache_key)
-            runnable = _ThumbnailRunnable(asset, size)
+            runnable = _ThumbnailRunnable(asset, size, disk_cache_path(asset, size))
             runnable.signals.ready.connect(self._on_worker_ready)
             self._thread_pool.start(runnable)
 
-        return placeholder_pixmap
+        return self.placeholder(asset, size)
 
     def _on_worker_ready(self, path_str: str, qimg: QImage) -> None:
         """Slot executed on main GUI thread when a background thumbnail completes."""
@@ -422,7 +516,14 @@ class ThumbnailManager(QObject):
         self._cache[path_str] = pixmap
         self.thumbnail_loaded.emit(path_str, pixmap)
 
+    def invalidate(self, path_str: str) -> None:
+        """Forget one file's thumbnail (it was edited)."""
+        self._cache.pop(path_str, None)
+        self._pending.discard(path_str)
+
     def clear_cache(self) -> None:
-        """Clear the in-memory thumbnail cache."""
+        """Clear the in-memory thumbnail cache (e.g. after a theme or size change)."""
         self._cache.clear()
         self._pending.clear()
+        self._placeholders.clear()
+        self._has_companion.clear()

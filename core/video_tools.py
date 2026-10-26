@@ -28,6 +28,7 @@ from .settings import get_ffmpeg_path, get_media_backend
 CACHE_ROOT: Path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AssetManager"
 PROXY_DIR: Path = CACHE_ROOT / "proxies"
 POSTER_DIR: Path = CACHE_ROOT / "posters"
+THUMB_DIR: Path = CACHE_ROOT / "thumbnails"  # grid thumbnails (core.thumbnail_manager)
 
 PROXY_HEIGHT = 720
 POSTER_WIDTH = 320
@@ -264,18 +265,48 @@ def extract_poster_frame(source: Path) -> Optional[Path]:
     return None
 
 
+_VIDEO_SIZE_PATTERN = re.compile(r"Stream #.*Video:.*?(\d{2,5})x(\d{2,5})")
+
+
+def probe_video(source: Path) -> Optional[tuple[int, int, int]]:
+    """(duration in ms, width, height) read by ffmpeg, or None if ffmpeg is missing or can't read it.
+
+    Blocking (a fraction of a second per file): call from a background thread.
+    """
+    ffmpeg = find_ffmpeg()
+    if ffmpeg is None:
+        return None
+    try:
+        # With no output file ffmpeg prints the file's details and exits with an error code
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostdin", "-i", str(source)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=POSTER_TIMEOUT_SECONDS, creationflags=_NO_WINDOW, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    info = result.stderr.decode("utf-8", errors="replace")
+    duration, size = _DURATION_PATTERN.search(info), _VIDEO_SIZE_PATTERN.search(info)
+    if duration is None:
+        return None
+    hours, minutes, seconds = duration.groups()
+    ms = int((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000)
+    width, height = (int(size.group(1)), int(size.group(2))) if size else (0, 0)
+    return ms, width, height
+
+
 def cache_size_bytes() -> int:
-    """Total size of cached proxies and poster frames."""
+    """Total size of cached proxies, poster frames and grid thumbnails."""
     total = 0
-    for folder in (PROXY_DIR, POSTER_DIR):
+    for folder in (PROXY_DIR, POSTER_DIR, THUMB_DIR):
         if folder.is_dir():
             total += sum(f.stat().st_size for f in folder.iterdir() if f.is_file())
     return total
 
 
 def clear_video_cache() -> None:
-    """Delete all cached proxies and poster frames (files in use are skipped)."""
-    for folder in (PROXY_DIR, POSTER_DIR):
+    """Delete all cached proxies, poster frames and grid thumbnails (files in use are skipped)."""
+    for folder in (PROXY_DIR, POSTER_DIR, THUMB_DIR):
         if not folder.is_dir():
             continue
         for file in folder.iterdir():

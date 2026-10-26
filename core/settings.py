@@ -9,6 +9,9 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - ffmpeg_path:      ffmpeg executable for video proxies / poster frames (blank = search PATH)
 - media_backend:    Qt multimedia backend ("auto", "ffmpeg", "windows"); applied on restart
 - video_skip_seconds: jump time for the video player's skip buttons and arrow keys
+- video_speed:      playback speed (0.25-3.0)
+- video_positions:  where recently watched videos were left, to resume there
+- motion:           "auto" (follow Windows), "on" or "off" for UI animations
 """
 
 from __future__ import annotations
@@ -311,6 +314,18 @@ def set_theme(theme_id: str) -> None:
     _update_config("theme", theme_id if theme_id in THEME_IDS else DEFAULT_THEME)
 
 
+MOTION_MODES = ("auto", "on", "off")  # auto: follow Windows' "Animation effects" setting
+
+
+def get_motion() -> str:
+    mode = _load_raw_config().get("motion")
+    return mode if mode in MOTION_MODES else "auto"
+
+
+def set_motion(mode: str) -> None:
+    _update_config("motion", mode if mode in MOTION_MODES else "auto")
+
+
 def get_thumbnail_size() -> int:
     size = _load_raw_config().get("thumbnail_size", DEFAULT_THUMBNAIL_SIZE)
     if not isinstance(size, int):
@@ -361,3 +376,47 @@ def get_video_skip_seconds() -> int:
 
 def set_video_skip_seconds(seconds: int) -> None:
     _update_config("video_skip_seconds", seconds if seconds in VIDEO_SKIP_OPTIONS else DEFAULT_VIDEO_SKIP)
+
+
+VIDEO_SPEED_RANGE = (0.25, 3.0)
+
+
+def get_video_speed() -> float:
+    speed = _load_raw_config().get("video_speed", 1.0)
+    lo, hi = VIDEO_SPEED_RANGE
+    return min(hi, max(lo, float(speed))) if isinstance(speed, (int, float)) else 1.0
+
+
+def set_video_speed(speed: float) -> None:
+    lo, hi = VIDEO_SPEED_RANGE
+    _update_config("video_speed", round(min(hi, max(lo, float(speed))), 2))
+
+
+# Where each video was left, so it resumes there: {normalized path: milliseconds}
+MAX_REMEMBERED_POSITIONS = 200
+
+
+def _position_key(path: Path | str) -> str:
+    return str(Path(path).resolve()).casefold()
+
+
+def get_video_position(path: Path | str) -> int:
+    positions = _load_raw_config().get("video_positions")
+    value = positions.get(_position_key(path)) if isinstance(positions, dict) else None
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def set_video_position(path: Path | str, position_ms: int) -> None:
+    """Remember where a video was left (0 forgets it). Only the most recent ones are kept."""
+    config = _load_raw_config()
+    positions = config.get("video_positions")
+    positions = dict(positions) if isinstance(positions, dict) else {}
+    key = _position_key(path)
+    positions.pop(key, None)
+    if position_ms > 0:
+        positions[key] = int(position_ms)  # re-inserted last: newest
+    while len(positions) > MAX_REMEMBERED_POSITIONS:
+        positions.pop(next(iter(positions)))
+    if positions != config.get("video_positions"):
+        config["video_positions"] = positions
+        _save_raw_config(config)

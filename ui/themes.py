@@ -267,6 +267,9 @@ QListWidget::item:selected { background-color: $accent; color: #ffffff; }
 #assetGrid::item:selected { background: $card_selected; border: 1px solid $accent_border; color: $card_selected_text; }
 
 #emptyState { color: $text_faint; font-size: 14px; padding: 40px; }
+#welcomePanel { background: $grid_bg; }
+#welcomeTitle { color: $text_strong; font-size: 22px; font-weight: bold; }
+#welcomeText { color: $text_muted; font-size: 14px; }
 #mutedLabel { color: $text_muted; }
 
 QStatusBar { background: $surface; border-top: 1px solid $border; color: $text_muted; font-size: 12px; }
@@ -318,6 +321,22 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #seekPreview { background-color: #0b0c10; border: 1px solid $accent; border-radius: 6px; }
 #seekPreviewFrame { background-color: #000000; }
 #seekPreviewTime { color: #f3f4f6; font-size: 11px; font-weight: bold; }
+/* Video controls: hover fill is painted by ui.animations, so :hover stays flat here */
+#mediaBtn, #mediaBtn:hover, #mediaBtn:pressed {
+    background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0px 6px;
+}
+#mediaBtn:checked { background-color: $accent_soft; border-color: $accent; color: $card_selected_text; }
+#mediaBtn:disabled { background: transparent; border-color: transparent; color: $text_faint; }
+#playBtn, #playBtn:hover, #playBtn:pressed {
+    background-color: $accent; border: 1px solid $accent_border; border-radius: 19px; padding: 0px;
+}
+#playBtn:disabled { background-color: $button_disabled; border-color: $border; }
+#speedPopup { background-color: $input_bg; border: 1px solid $border; border-radius: 10px; }  /* solid: it floats over video */
+#speedValue { color: $accent_text; font-weight: bold; }
+#speedPreset, #speedPreset:hover, #speedPreset:pressed {
+    background: transparent; border: none; border-radius: 6px; padding: 5px 10px; text-align: left;
+}
+#speedPreset:checked { background-color: $accent; color: #ffffff; font-weight: bold; }
 """)
 
 _current_theme_id = DEFAULT_THEME

@@ -1,6 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller build for the single-file windowed AssetManager.exe.
-# Build locally with:   pyinstaller AssetManager.spec
+# PyInstaller build. One analysis, two outputs:
+#   dist/AssetManager.exe        portable single file (unpacks itself on every launch, so it starts slower)
+#   dist/AssetManager/           folder build, packaged by installer/AssetManager.iss into
+#                                dist/AssetManager-Setup.exe (starts much faster)
+# Build locally with:   pyinstaller AssetManager.spec --noconfirm
 # The release workflow (.github/workflows/release.yml) uses this same file.
 
 
@@ -19,19 +22,12 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+common = dict(
     name='AssetManager',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -39,4 +35,34 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets/Asset-Manager-Icon.ico',
+)
+
+# Portable single file
+portable = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    **common,
+)
+
+# Folder build for the installer
+folder_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    **common,
+)
+COLLECT(
+    folder_exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='AssetManager',
 )

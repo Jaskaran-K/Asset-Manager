@@ -44,19 +44,42 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
 
-      - name: Build executable with PyInstaller
+      - name: Build with PyInstaller (portable exe + folder build)
         run: pyinstaller AssetManager.spec --noconfirm
 
-      - name: Self-test the executable
+      - name: Self-test the builds
         shell: pwsh
         run: |
-          $log = Join-Path $env:RUNNER_TEMP "self-test.log"
-          $p = Start-Process -FilePath "dist\AssetManager.exe" -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
-          if (Test-Path $log) { Get-Content $log }
-          if ($p.ExitCode -ne 0) {
-            Write-Error "AssetManager.exe self-test failed (exit code $($p.ExitCode)); not publishing."
-            exit 1
+          foreach ($exe in "dist\AssetManager.exe", "dist\AssetManager\AssetManager.exe") {
+            $log = Join-Path $env:RUNNER_TEMP "self-test-$([guid]::NewGuid()).log"
+            $p = Start-Process -FilePath $exe -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
+            Write-Host "== $exe"; if (Test-Path $log) { Get-Content $log }
+            if ($p.ExitCode -ne 0) { Write-Error "$exe self-test failed (exit code $($p.ExitCode)); not publishing."; exit 1 }
           }
+
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          $version = "${{ github.ref_name }}".TrimStart('v', 'V')
+          & $iscc "/DAppVersion=$version" installer\AssetManager.iss
+          if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup failed"; exit 1 }
+
+      - name: Test the installer (silent install, then self-test the installed app)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "am-install"
+          $p = Start-Process -FilePath "dist\AssetManager-Setup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/NOLAUNCH", "`"/DIR=$dir`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "Installer failed (exit code $($p.ExitCode))"; exit 1 }
+          $log = Join-Path $env:RUNNER_TEMP "self-test-installed.log"
+          $p = Start-Process -FilePath (Join-Path $dir "AssetManager.exe") -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { Write-Error "Installed app self-test failed; not publishing."; exit 1 }
 
       - name: Find release notes
         id: notes
@@ -70,6 +93,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Asset Manager ${{ github.ref_name }}
-          files: dist/AssetManager.exe
+          files: |
+            dist/AssetManager-Setup.exe
+            dist/AssetManager.exe
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true # appended below the hand-written notes

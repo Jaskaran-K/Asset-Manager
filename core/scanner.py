@@ -197,14 +197,19 @@ class AssetScanner:
         else:
             self.excluded_dirs = {d.lower() for d in excluded_dirs}
 
+    def is_excluded_dir(self, path: Path) -> bool:
+        return path.name.lower() in self.excluded_dirs
+
     def scan(
-        self, folder_path: str | Path, recursive: bool = True
+        self, folder_path: str | Path, recursive: bool = True, directories: set[Path] | None = None
     ) -> list[AssetItem]:
         """Scan a folder and return a list of AssetItem objects found.
 
         Args:
             folder_path: The root directory to scan.
             recursive: If True, recursively scan subdirectories.
+            directories: If given, every folder walked (the root included) is added to it,
+                for watching the library for changes.
 
         Returns:
             A list of AssetItem objects sorted by name.
@@ -214,6 +219,8 @@ class AssetScanner:
             return []
 
         assets: list[AssetItem] = []
+        if directories is not None:
+            directories.add(root)
 
         if recursive:
             iterator = root.rglob("*")
@@ -222,11 +229,15 @@ class AssetScanner:
 
         for item_path in iterator:
             try:
-                # Skip excluded directories (e.g. .git, .venv, node_modules)
-                if any(part.lower() in self.excluded_dirs for part in item_path.parts):
+                # Skip excluded directories (e.g. .git, .venv, node_modules) inside the library;
+                # the library's own location (say D:\build\assets) doesn't count
+                if any(part.lower() in self.excluded_dirs for part in item_path.relative_to(root).parts[:-1]) \
+                        or (item_path.is_dir() and self.is_excluded_dir(item_path)):
                     continue
 
                 if not item_path.is_file():
+                    if directories is not None and recursive and item_path.is_dir():
+                        directories.add(item_path)
                     continue
 
                 # Filter out compiler build artifacts like foo.cpp.obj

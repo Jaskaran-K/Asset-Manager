@@ -7,6 +7,7 @@ thread with run_in_background().
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
 from PySide6.QtCore import (
@@ -41,15 +42,45 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
-from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagError, TagRepository
+from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagChange, TagError, TagRepository
 from ui import shortcuts
 from ui.icons import MAIN_CATEGORY_COLORS, SUB_CATEGORY_COLORS, color_swatch_icon
 
 # Colors handed out to new custom tags, in order
 TAG_COLORS = list(dict.fromkeys(MAIN_CATEGORY_COLORS + SUB_CATEGORY_COLORS))
 
-# tag:name  or  tag:"name with spaces"
-_TAG_TOKEN = re.compile(r'tag:(?:"([^"]+)"|(\S+))', re.IGNORECASE)
+# Tag filter tokens:  tag:name   tag:"two words"   -tag:name (must not have)   tag:a|b|"c d" (any of)
+_NAME = r'(?:"[^"]+"|[^\s|"]+)'
+_TAG_TOKEN = re.compile(rf'(?<!\S)(-?)tag:({_NAME}(?:\|{_NAME})*)\|?(?!\S)', re.IGNORECASE)
+_UNFINISHED_TOKEN = re.compile(r'(?i)(?:^|\s)-?tag:(?:"[^"]*|\S*)$')
+
+
+@dataclass(frozen=True)
+class TagToken:
+    """A parsed tag:... token: names of tags (several = any of them), and whether it's excluded."""
+
+    names: tuple[str, ...]
+    exclude: bool = False
+
+
+@dataclass(frozen=True)
+class TagFilter:
+    """An active tag filter (a chip): has any of `tags`, or with exclude=True, has none of them."""
+
+    tags: tuple[Tag, ...]
+    exclude: bool = False
+
+
+@dataclass(frozen=True)
+class TagQuery:
+    """Active tag filters, in the shape TagRepository.find_assets() takes."""
+
+    all_of: tuple[int, ...] = ()
+    any_of: tuple[tuple[int, ...], ...] = ()
+    none_of: tuple[int, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.all_of or self.any_of or self.none_of)
 
 
 def next_tag_color(existing: Sequence[Tag]) -> str:
@@ -57,21 +88,33 @@ def next_tag_color(existing: Sequence[Tag]) -> str:
     return next((c for c in TAG_COLORS if c not in used), TAG_COLORS[len(existing) % len(TAG_COLORS)])
 
 
+def _quote(name: str) -> str:
+    return f'"{name}"' if re.search(r'[\s|]', name) else name
+
+
 def tag_token(name: str) -> str:
     """Search-bar token for a tag name."""
-    return f'tag:"{name}"' if " " in name else f"tag:{name}"
+    return f"tag:{_quote(name)}"
 
 
-def parse_search_text(text: str) -> tuple[list[str], str]:
-    """Split search text into tag names (tag:x tokens) and the remaining free text.
+def filter_token(tag_filter: TagFilter) -> str:
+    """Search-bar text for a filter chip (the inverse of parse_search_text)."""
+    names = "|".join(_quote(t.name) for t in tag_filter.tags)
+    return f"{'-' if tag_filter.exclude else ''}tag:{names}"
+
+
+def parse_search_text(text: str) -> tuple[list[TagToken], str]:
+    """Split search text into tag tokens and the remaining free text.
 
     An unfinished trailing "tag:" is dropped from the free text so the file
     name filter doesn't flicker to "no results" while it's being typed.
     """
-    names = [quoted or bare for quoted, bare in _TAG_TOKEN.findall(text)]
-    rest = _TAG_TOKEN.sub(" ", text)
-    rest = re.sub(r'(?i)(?:^|\s)tag:"?[^"\s]*$', " ", rest)
-    return names, " ".join(rest.split())
+    tokens = [
+        TagToken(tuple(name.strip('"') for name in re.findall(_NAME, group)), bool(minus))
+        for minus, group in _TAG_TOKEN.findall(text)
+    ]
+    rest = _UNFINISHED_TOKEN.sub(" ", _TAG_TOKEN.sub(" ", text))
+    return tokens, " ".join(rest.split())
 
 
 # ----------------------------------------------------------------------
@@ -137,20 +180,30 @@ class _DbTask(QRunnable):
 _db_pool: Optional[QThreadPool] = None
 
 
+_slow_pool: Optional[QThreadPool] = None
+
+
 def run_in_background(
     repo: TagRepository,
     fn: Callable[[TagRepository], Any],
     on_done: Callable[[Any], None],
     on_failed: Optional[Callable[[str], None]] = None,
+    slow: bool = False,
 ) -> None:
-    """Run fn(repo) on a worker thread (with its own connection); callbacks run on the UI thread."""
-    global _db_pool
+    """Run fn(repo) on a worker thread (with its own connection); callbacks run on the UI thread.
+
+    slow=True uses a separate single-thread pool, so long background jobs (reading file
+    details) never hold up quick ones like tag searches.
+    """
+    global _db_pool, _slow_pool
     if _db_pool is None:
         _db_pool = QThreadPool()
         _db_pool.setMaxThreadCount(2)
+        _slow_pool = QThreadPool()
+        _slow_pool.setMaxThreadCount(1)
     task = _DbTask(repo, fn)
     _CallbackRelay(task, on_done, on_failed)  # owned by the application until it reports back
-    _db_pool.start(task)
+    (_slow_pool if slow else _db_pool).start(task)
 
 
 # ----------------------------------------------------------------------
@@ -197,6 +250,58 @@ class TagChip(QFrame):
             btn.clicked.connect(lambda: self.remove_clicked.emit(self.tag))
             layout.addWidget(btn)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+
+class FilterChip(QFrame):
+    """Search bar chip for one tag filter: a tag, several tags (any of them), or excluded tags.
+
+    Clicking the chip switches it between "has" and "doesn't have"; the x removes it.
+    """
+
+    remove_clicked = Signal(object)  # TagFilter
+    toggle_clicked = Signal(object)  # TagFilter
+
+    def __init__(self, tag_filter: TagFilter, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.tag_filter = tag_filter
+        bg, fg, border = chip_colors(tag_filter.tags[0])
+        names = " or ".join(t.name for t in tag_filter.tags)
+        if tag_filter.exclude:
+            # Outline only, with the tag color as the border: reads as "not this"
+            fg, style = "palette(text)", f"background-color: transparent; border: 1px dashed {bg if bg.startswith('#') else border};"
+            text = f"not {names}"
+        else:
+            style = f"background-color: {bg}; border: 1px solid {border};"
+            text = names
+        self.setObjectName("tagChip")
+        self.setStyleSheet(
+            f"#tagChip {{ {style} border-radius: 9px; }}"
+            f"#tagChip QLabel, #tagChip QToolButton {{ color: {fg}; background: transparent; border: none; padding: 0; }}"
+        )
+        if tag_filter.exclude:
+            meaning = f"Files without {names}"
+        elif len(tag_filter.tags) > 1:
+            meaning = f"Files with any of: {', '.join(t.name for t in tag_filter.tags)}"
+        else:
+            meaning = f"Files tagged {names}"
+        self.setToolTip(f"{meaning}\nClick to switch between has / doesn't have")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 1, 4, 1)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel(text))
+        btn = QToolButton()
+        btn.setText("✕")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("Remove this filter")
+        btn.clicked.connect(lambda: self.remove_clicked.emit(self.tag_filter))
+        layout.addWidget(btn)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.toggle_clicked.emit(self.tag_filter)
+        super().mouseReleaseEvent(event)
 
 
 class FlowLayout(QLayout):
@@ -275,20 +380,25 @@ def tag_chip_cloud(tags: Sequence[Tag], parent: Optional[QWidget] = None) -> QWi
 class TagSearchBar(QFrame):
     """Search box with tag filter chips.
 
-    - Typing filters by file name, as before.
-    - Pick a suggested tag (autocomplete over tag names) or type tag:name and
-      press Enter/Space to turn it into a chip. Several chips combine with AND.
-    - Backspace in an empty box removes the last chip; the clear button (or
-      Esc) removes everything.
+    - Typing filters by file name (plus filters like rating:>=3, see core.search_query).
+    - Pick a suggested tag (autocomplete over tag names) or type a token and press
+      Enter/Space to turn it into a chip:
+        tag:name      files with the tag        (several chips must all match)
+        -tag:name     files without it
+        tag:a|b       files with any of them
+      Clicking a chip switches it between "has" and "doesn't have".
+    - Backspace in an empty box removes the last chip; the clear button (or Esc)
+      removes everything. The star saves the search as a sidebar collection.
     """
 
-    changed = Signal()  # tags or text changed
+    changed = Signal()  # filters or text changed
     unknown_tag = Signal(str)
+    save_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("tagSearchBar")
-        self._tags: list[Tag] = []  # active filters
+        self._filters: list[TagFilter] = []  # active chips
         self._all_tags: list[Tag] = []
 
         layout = QHBoxLayout(self)
@@ -303,14 +413,25 @@ class TagSearchBar(QFrame):
         self.edit.setPlaceholderText("Search assets or tag:name...")
         self.edit.setToolTip(
             "Type to search file names.\n"
-            "Add tag filters by picking a suggestion or typing tag:name then Enter.\n"
-            "Multiple tags must all match. Esc clears."
+            "tag:name  has the tag (pick a suggestion, or type it and press Enter)\n"
+            "-tag:name  doesn't have it      tag:a|b  has any of them\n"
+            "is:fav, rating:>=3, res:>=2048, size:>10mb, dur:<30s, poly:<10k, ext:png\n"
+            "Click a tag chip to switch has / doesn't have. Esc clears."
         )
         self.edit.setMinimumWidth(160)
         self.edit.textChanged.connect(self._on_text_changed)
         self.edit.returnPressed.connect(self._commit_tokens)
         self.edit.installEventFilter(self)
         layout.addWidget(self.edit, 1)
+
+        self.btn_save = QToolButton()
+        self.btn_save.setText("☆")
+        self.btn_save.setToolTip("Save this search as a collection in the sidebar")
+        self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_save.setAutoRaise(True)
+        self.btn_save.clicked.connect(self.save_requested)
+        self.btn_save.hide()
+        layout.addWidget(self.btn_save)
 
         self.btn_clear = QToolButton()
         self.btn_clear.setText("✕")
@@ -331,43 +452,95 @@ class TagSearchBar(QFrame):
 
     # Public ------------------------------------------------------------
     def set_available_tags(self, tags: Sequence[Tag]) -> None:
-        """Tags offered by autocomplete; active chips for deleted tags are dropped, renamed ones updated."""
+        """Tags offered by autocomplete; chips of deleted tags are dropped, renamed ones updated."""
         self._all_tags = list(tags)
         self._completer_model.setStringList([t.name for t in self._all_tags])
         by_id = {t.id: t for t in self._all_tags}
-        updated = [by_id[t.id] for t in self._tags if t.id in by_id]
-        if [(t.id, t.name, t.color) for t in updated] != [(t.id, t.name, t.color) for t in self._tags]:
-            self._tags = updated
+        updated = []
+        for f in self._filters:
+            tags_now = tuple(by_id[t.id] for t in f.tags if t.id in by_id)
+            if tags_now:
+                updated.append(TagFilter(tags_now, f.exclude))
+
+        def shown(filters: list[TagFilter]) -> list:  # file counts changing doesn't matter
+            return [(f.exclude, [(t.id, t.name, t.color) for t in f.tags]) for f in filters]
+
+        changed = shown(updated) != shown(self._filters)
+        self._filters = updated
+        if changed:
             self._rebuild_chips()
             self.changed.emit()
 
-    def tag_ids(self) -> list[int]:
-        return [t.id for t in self._tags]
+    def filters(self) -> list[TagFilter]:
+        return list(self._filters)
+
+    def tag_query(self) -> TagQuery:
+        all_of, any_of, none_of = [], [], []
+        for f in self._filters:
+            ids = tuple(t.id for t in f.tags)
+            if f.exclude:
+                none_of.extend(ids)
+            elif len(ids) == 1:
+                all_of.extend(ids)
+            else:
+                any_of.append(ids)
+        return TagQuery(tuple(all_of), tuple(any_of), tuple(none_of))
+
+    def has_tag_filters(self) -> bool:
+        return bool(self._filters)
 
     def text(self) -> str:
         """Free-text part of the search (tag: tokens excluded)."""
         return parse_search_text(self.edit.text())[1]
 
-    def add_tag(self, tag: Tag) -> None:
-        if any(t.id == tag.id for t in self._tags):
+    def query_text(self) -> str:
+        """The whole search as text (chips as tokens), e.g. for saving it."""
+        return " ".join([filter_token(f) for f in self._filters] + ([self.text()] if self.text() else []))
+
+    def set_query_text(self, text: str) -> None:
+        """Replace the search with a saved one."""
+        self._filters = []
+        self.edit.blockSignals(True)
+        self.edit.setText(text)
+        self.edit.blockSignals(False)
+        self._commit_tokens()
+        self._rebuild_chips()
+        self.changed.emit()
+
+    def add_tag(self, tag: Tag, exclude: bool = False) -> None:
+        self.add_filter(TagFilter((tag,), exclude))
+
+    def add_filter(self, tag_filter: TagFilter) -> None:
+        if tag_filter in self._filters:
             return
-        self._tags.append(tag)
+        self._filters.append(tag_filter)
+        self._rebuild_chips()
+        self.changed.emit()
+
+    def remove_filter(self, tag_filter: TagFilter) -> None:
+        self._filters = [f for f in self._filters if f != tag_filter]
         self._rebuild_chips()
         self.changed.emit()
 
     def remove_tag(self, tag: Tag) -> None:
-        self._tags = [t for t in self._tags if t.id != tag.id]
+        self._filters = [f for f in self._filters if all(t.id != tag.id for t in f.tags)]
+        self._rebuild_chips()
+        self.changed.emit()
+
+    def toggle_filter(self, tag_filter: TagFilter) -> None:
+        """Switch a chip between "has" and "doesn't have"."""
+        self._filters = [TagFilter(f.tags, not f.exclude) if f == tag_filter else f for f in self._filters]
         self._rebuild_chips()
         self.changed.emit()
 
     def clear(self) -> None:
-        had_anything = bool(self._tags or self.edit.text())
-        self._tags = []
+        had_anything = bool(self._filters or self.edit.text())
+        self._filters = []
         self._rebuild_chips()
         self.edit.blockSignals(True)
         self.edit.clear()
         self.edit.blockSignals(False)
-        self._update_clear_button()
+        self._update_buttons()
         if had_anything:
             self.changed.emit()
 
@@ -381,68 +554,74 @@ class TagSearchBar(QFrame):
             widget = self._chip_row.takeAt(0).widget()
             if widget is not None:
                 widget.deleteLater()
-        for tag in self._tags:
-            chip = TagChip(tag, removable=True)
-            chip.remove_clicked.connect(self.remove_tag)
+        for tag_filter in self._filters:
+            chip = FilterChip(tag_filter)
+            chip.remove_clicked.connect(self.remove_filter)
+            chip.toggle_clicked.connect(self.toggle_filter)
             self._chip_row.addWidget(chip)
-        self._update_clear_button()
+        self._update_buttons()
 
-    def _update_clear_button(self) -> None:
-        self.btn_clear.setVisible(bool(self._tags or self.edit.text()))
+    def _update_buttons(self) -> None:
+        active = bool(self._filters or self.edit.text().strip())
+        self.btn_clear.setVisible(active)
+        self.btn_save.setVisible(active)
 
     def _on_text_changed(self, text: str) -> None:
-        self._update_clear_button()
-        # "tag:" + Space completes a token as soon as it's typed
+        self._update_buttons()
+        # "tag:..." + Space completes a token as soon as it's typed
         if text.endswith(" ") and _TAG_TOKEN.search(text):
             self._commit_tokens(report_unknown=False)
             return
-        prefix = text.rsplit(" ", 1)[-1]
-        if prefix.lower().startswith("tag:"):
-            # Just "tag:" lists every tag; more letters narrow it down
-            self.completer.setCompletionPrefix(prefix[4:].strip('"'))
+        word = text.rsplit(" ", 1)[-1]
+        if word.lower().startswith(("tag:", "-tag:")):
+            # Just "tag:" lists every tag; more letters narrow it down (after | for "any of")
+            typed = word.split(":", 1)[1].rsplit("|", 1)[-1]
+            self.completer.setCompletionPrefix(typed.strip('"'))
             self.completer.complete()
         else:
             self.completer.popup().hide()
         self.changed.emit()
 
     def _commit_tokens(self, report_unknown: bool = True) -> None:
-        names, rest = parse_search_text(self.edit.text())
-        added = False
-        for name in names:
-            tag = self._find(name)
-            if tag is None:
-                if report_unknown:
-                    self.unknown_tag.emit(name)
-                continue
-            if all(t.id != tag.id for t in self._tags):
-                self._tags.append(tag)
-                added = True
-        if names:
+        tokens, rest = parse_search_text(self.edit.text())
+        for token in tokens:
+            tags = []
+            for name in token.names:
+                tag = self._find(name)
+                if tag is None:
+                    if report_unknown:
+                        self.unknown_tag.emit(name)
+                elif tag not in tags:
+                    tags.append(tag)
+            if tags:
+                tag_filter = TagFilter(tuple(tags), token.exclude)
+                if tag_filter not in self._filters:
+                    self._filters.append(tag_filter)
+        if tokens:
             self.edit.blockSignals(True)
             self.edit.setText(rest + (" " if rest else ""))
             self.edit.blockSignals(False)
             self._rebuild_chips()
-        if added or names:
             self.changed.emit()
 
     def _on_completion(self, name: str) -> None:
-        tag = self._find(name)
-        if tag is None:
+        if self._find(name) is None:
             return
-        # Drop the half-typed "tag:..." word the suggestion was picked for
+        # Finish the half-typed token with the picked name, then turn it into a chip
         words = self.edit.text().split(" ")
-        if words and words[-1].lower().startswith("tag:"):
-            words = words[:-1]
+        token = words[-1] if words and words[-1].lower().startswith(("tag:", "-tag:")) else "tag:"
+        head = token[: max(token.rfind("|"), token.find(":")) + 1]
+        words[-1:] = [head + _quote(name)]
         self.edit.blockSignals(True)
         self.edit.setText(" ".join(w for w in words if w))
         self.edit.blockSignals(False)
-        self.add_tag(tag)
-        self._update_clear_button()
+        self._commit_tokens()
+        self._update_buttons()
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.edit and event.type() == event.Type.KeyPress:
-            if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._tags:
-                self.remove_tag(self._tags[-1])
+            if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._filters:
+                self.remove_filter(self._filters[-1])
                 return True
             if shortcuts.matches("search.clear", event) and not self.completer.popup().isVisible():
                 self.clear()
@@ -470,6 +649,7 @@ class TagAssetsDialog(QDialog):
         self.repo = repo
         self.asset_ids = list(asset_ids)
         self.changed = False  # True once tags were applied or created
+        self.last_change = TagChange()  # what Apply did, for undo
         count = len(self.asset_ids)
         self.setWindowTitle("Tag File" if count == 1 else f"Tag {count} Files")
         self.setMinimumSize(380, 460)
@@ -498,6 +678,7 @@ class TagAssetsDialog(QDialog):
         self.txt_new.setMaxLength(MAX_TAG_NAME_LENGTH)
         self.txt_new.returnPressed.connect(self._on_create)
         btn_create = QPushButton("+ Create")
+        btn_create.setToolTip("Create the tag and tick it for these files (or press Enter)")
         btn_create.clicked.connect(self._on_create)
         new_row.addWidget(self.txt_new, 1)
         new_row.addWidget(btn_create)
@@ -509,8 +690,10 @@ class TagAssetsDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setToolTip("Close without changing any tags")
         btn_cancel.clicked.connect(self.reject)
         self.btn_apply = QPushButton("Apply")
+        self.btn_apply.setToolTip("Apply the ticked and unticked tags to the files")
         self.btn_apply.setObjectName("primaryBtn")
         self.btn_apply.setDefault(False)
         self.btn_apply.setAutoDefault(False)
@@ -605,7 +788,7 @@ class TagAssetsDialog(QDialog):
     def _on_apply(self) -> None:
         add, remove = self._changes()
         try:
-            self.repo.apply_tag_changes(self.asset_ids, add, remove)
+            self.last_change = self.repo.apply_tag_changes(self.asset_ids, add, remove)
         except TagError as exc:
             QMessageBox.warning(self, "Can't Apply Tags", str(exc))
             return

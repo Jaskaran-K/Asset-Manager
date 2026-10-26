@@ -33,4 +33,11 @@ def qapp():
     """
     from PySide6.QtWidgets import QApplication
 
-    return QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
+    yield app
+    # Like the app does on quit: let background jobs finish before Python tears Qt down,
+    # or the process can crash after all tests have passed
+    from ui.tag_widgets import wait_for_background
+
+    wait_for_background()
+    app.processEvents()

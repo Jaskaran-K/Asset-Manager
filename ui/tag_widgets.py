@@ -183,6 +183,17 @@ _db_pool: Optional[QThreadPool] = None
 _slow_pool: Optional[QThreadPool] = None
 
 
+def wait_for_background(timeout_ms: int = 5000) -> bool:
+    """Drop queued background jobs and wait for running ones (call before the app quits:
+    Qt objects being torn down under a running job crash the process). True if all finished."""
+    finished = True
+    for pool in (_db_pool, _slow_pool):
+        if pool is not None:
+            pool.clear()
+            finished = pool.waitForDone(timeout_ms) and finished
+    return finished
+
+
 def run_in_background(
     repo: TagRepository,
     fn: Callable[[TagRepository], Any],

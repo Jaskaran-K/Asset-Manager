@@ -98,7 +98,7 @@ from ui.duplicates_dialog import DuplicatesDialog
 from ui.icons import app_icon, category_icon, color_dot_icon, resolve_category_colors
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
-from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background
+from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, wait_for_background
 from ui.themes import apply_theme
 from ui.undo import UndoHistory, UndoStep
 from ui.viewer import AssetViewerDialog, ViewerTarget
@@ -1530,6 +1530,11 @@ class MainWindow(QMainWindow):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.quit()
             self.scan_thread.wait(1000)
+        # Stop background work before Qt is torn down: a job still running then crashes the process
+        self._meta_generation += 1  # ends the file-details reading chain
+        self.watcher.clear()
+        self.thumbnail_manager.shutdown()
+        wait_for_background()
         super().closeEvent(event)
 
 

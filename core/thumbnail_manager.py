@@ -516,6 +516,12 @@ class ThumbnailManager(QObject):
         self._cache[path_str] = pixmap
         self.thumbnail_loaded.emit(path_str, pixmap)
 
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Drop queued thumbnail jobs and wait for the running ones (before the app quits)."""
+        self._thread_pool.clear()
+        self._pending.clear()
+        return self._thread_pool.waitForDone(timeout_ms)
+
     def invalidate(self, path_str: str) -> None:
         """Forget one file's thumbnail (it was edited)."""
         self._cache.pop(path_str, None)

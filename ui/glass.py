@@ -13,6 +13,7 @@ from __future__ import annotations
 import weakref
 from typing import Optional
 
+import shiboken6
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import QGraphicsBlurEffect, QGraphicsScene, QWidget
@@ -39,7 +40,10 @@ def set_frost(percent: int) -> None:
     global _frost
     _frost = max(0, min(100, int(percent))) / 100.0
     for panel in list(_panels):
-        panel.refresh_frost()
+        if shiboken6.isValid(panel):
+            panel.refresh_frost()
+        else:
+            _panels.discard(panel)  # its window was closed: the Python side outlived the widget
 
 
 def blur_radius(strength: float) -> float:

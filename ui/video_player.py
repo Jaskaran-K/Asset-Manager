@@ -71,6 +71,7 @@ from core.settings import (
 from core.video_tools import PROXY_HEIGHT, ProxyJob, cached_proxy, find_ffmpeg
 from ui import shortcuts
 from ui.animations import AnimatedButton, PlayPauseButton
+from ui.duotone import set_icon
 
 PREVIEW_SIZE = QSize(192, 108)
 CONTROLS_HIDE_DELAY_MS = 2500
@@ -645,7 +646,7 @@ class VideoPlayer(QWidget):
         self.btn_speed.clicked.connect(self._show_speed_popup)
         row.addWidget(self.btn_speed)
 
-        self.btn_loop = media_button("A-B", width=54)
+        self.btn_loop = media_button("A-B", width=66)
         self.btn_loop.setCheckable(True)
         self.btn_loop.clicked.connect(lambda: self.cycle_loop())
         row.addWidget(self.btn_loop)
@@ -822,6 +823,7 @@ class VideoPlayer(QWidget):
     def _update_loop_ui(self) -> None:
         start, end = self._loop
         self.slider_seek.set_loop(start, end)
+        set_icon(self.btn_loop, "check" if end is not None else None, size=12)
         if start is None:
             self.btn_loop.setText("A-B")
             self.btn_loop.setToolTip("Loop part of the video: click (or press L) at the start, then at the end")
@@ -829,7 +831,7 @@ class VideoPlayer(QWidget):
             self.btn_loop.setText("A-…")
             self.btn_loop.setToolTip("Click (or press L) at the end of the part to loop")
         else:
-            self.btn_loop.setText("A-B ✓")
+            self.btn_loop.setText("A-B")
             self.btn_loop.setToolTip(f"Looping {format_time(start)} to {format_time(end)}: click (or press L) to stop")
         self.btn_loop.setChecked(end is not None)
 

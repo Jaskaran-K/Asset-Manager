@@ -50,22 +50,25 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("main.undo", MAIN, "Ctrl+Z", "Undo the last tag, favorite or rating change", "Ctrl+Z"),
     Shortcut("main.redo", MAIN, "Ctrl+Y", "Redo it", "Ctrl+Y"),
     Shortcut("main.favorite", MAIN, "F", "Add / remove the selected files from Favorites", "F"),
-    Shortcut("main.rate_1", MAIN, "1", "Rate the selected files ★", "1"),
-    Shortcut("main.rate_2", MAIN, "2", "Rate ★★", "2"),
-    Shortcut("main.rate_3", MAIN, "3", "Rate ★★★", "3"),
-    Shortcut("main.rate_4", MAIN, "4", "Rate ★★★★", "4"),
-    Shortcut("main.rate_5", MAIN, "5", "Rate ★★★★★", "5"),
+    Shortcut("main.rate_1", MAIN, "1", "Rate the selected files ★", "1"),  # glyph-ok: rating text
+    Shortcut("main.rate_2", MAIN, "2", "Rate ★★", "2"),  # glyph-ok
+    Shortcut("main.rate_3", MAIN, "3", "Rate ★★★", "3"),  # glyph-ok
+    Shortcut("main.rate_4", MAIN, "4", "Rate ★★★★", "4"),  # glyph-ok
+    Shortcut("main.rate_5", MAIN, "5", "Rate ★★★★★", "5"),  # glyph-ok
     Shortcut("main.rate_0", MAIN, "0", "Clear the rating", "0"),
     Shortcut("main.multi_select", MAIN, "Ctrl+Click / Shift+Click", "Select several files"),
     Shortcut("main.context_menu", MAIN, "Right-click", "File actions (preview, tag, open, copy path...)"),
     Shortcut("main.drag_out", MAIN, "Drag files out of the grid", "Copy them into Explorer, Blender, Photoshop, Unreal..."),
+    Shortcut("main.sidebar", MAIN, "Ctrl+B", "Show / hide the sidebar (or click the menu button)", "Ctrl+B"),
+    Shortcut("main.close_sidebar", MAIN, "Esc / click beside it", "Close the floating sidebar (unpinned with the pin button)", "Esc"),
+    Shortcut("main.sidebar_resize", MAIN, "Drag the sidebar's right edge", "Make the sidebar wider or narrower"),
 
     # Search bar
     Shortcut("search.tag_token", SEARCH, "tag:name then Enter or Space", "Add a tag filter (tag:\"two words\" for spaces)"),
     Shortcut("search.exclude_token", SEARCH, "-tag:name", "Only files that don't have the tag"),
     Shortcut("search.any_token", SEARCH, "tag:a|b", "Files with any of the tags"),
     Shortcut("search.toggle_chip", SEARCH, "Click a tag chip", "Switch it between has / doesn't have"),
-    Shortcut("search.save", SEARCH, "Click ☆ in the search box", "Save the search as a sidebar collection"),
+    Shortcut("search.save", SEARCH, "Click the star in the search box", "Save the search as a sidebar collection"),
     Shortcut("search.details", SEARCH, "is:fav  rating:>=3  ext:png", "Favorites, star rating, file type"),
     Shortcut("search.details_size", SEARCH, "res:>=2048  size:>10mb", "Image / video resolution (res:4k = 4096), file size"),
     Shortcut("search.details_media", SEARCH, "dur:<30s  poly:<10k", "Video length, 3D model faces"),

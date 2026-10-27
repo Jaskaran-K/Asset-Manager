@@ -12,6 +12,9 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - video_speed:      playback speed (0.25-3.0)
 - video_positions:  where recently watched videos were left, to resume there
 - motion:           "auto" (follow Windows), "on" or "off" for UI animations
+- background_texture: pattern behind windows and the grid (see ui.backgrounds)
+- sidebar:          {"open", "pinned", "width"} of the slide-out sidebar
+- glass_frost:      0-100, how frosted glass panels (the sidebar) are
 """
 
 from __future__ import annotations
@@ -324,6 +327,58 @@ def get_motion() -> str:
 
 def set_motion(mode: str) -> None:
     _update_config("motion", mode if mode in MOTION_MODES else "auto")
+
+
+# ui.backgrounds.TEXTURES has their names and drawings
+TEXTURE_IDS = ("none", "grain", "dots", "grid", "diagonal", "hexagon", "carbon", "topo")
+
+
+def get_background_texture() -> str:
+    texture = _load_raw_config().get("background_texture")
+    return texture if texture in TEXTURE_IDS else "none"
+
+
+def set_background_texture(texture_id: str) -> None:
+    _update_config("background_texture", texture_id if texture_id in TEXTURE_IDS else "none")
+
+
+DEFAULT_GLASS_FROST = 70
+
+
+def get_glass_frost() -> int:
+    frost = _load_raw_config().get("glass_frost")
+    return max(0, min(100, frost)) if isinstance(frost, int) and not isinstance(frost, bool) else DEFAULT_GLASS_FROST
+
+
+def set_glass_frost(percent: int) -> None:
+    _update_config("glass_frost", max(0, min(100, int(percent))))
+
+
+SIDEBAR_WIDTH_RANGE = (180, 480)
+DEFAULT_SIDEBAR_WIDTH = 240
+
+
+def get_sidebar_state() -> dict[str, Any]:
+    """{"open": bool, "pinned": bool, "width": int}: pinned docks it beside the grid, else it floats over it."""
+    raw = _load_raw_config().get("sidebar")
+    raw = raw if isinstance(raw, dict) else {}
+    width = raw.get("width")
+    lo, hi = SIDEBAR_WIDTH_RANGE
+    return {
+        "open": raw.get("open") if isinstance(raw.get("open"), bool) else True,
+        "pinned": raw.get("pinned") if isinstance(raw.get("pinned"), bool) else True,
+        "width": max(lo, min(hi, width)) if isinstance(width, int) else DEFAULT_SIDEBAR_WIDTH,
+    }
+
+
+def set_sidebar_state(**changes: Any) -> None:
+    """Update some of open / pinned / width."""
+    state = get_sidebar_state()
+    state.update({k: v for k, v in changes.items() if k in state})
+    lo, hi = SIDEBAR_WIDTH_RANGE
+    state["width"] = max(lo, min(hi, int(state["width"])))
+    state["open"], state["pinned"] = bool(state["open"]), bool(state["pinned"])
+    _update_config("sidebar", state)
 
 
 def get_thumbnail_size() -> int:

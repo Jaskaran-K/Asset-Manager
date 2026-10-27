@@ -113,7 +113,7 @@ def star_polygon(center: QPointF, outer: float, inner_ratio: float = 0.45) -> QP
 
 
 def rating_text(rating: int) -> str:
-    return "★" * rating + "☆" * (5 - rating)
+    return "★" * rating + "☆" * (5 - rating)  # glyph-ok: rating text
 
 
 class AssetCardDelegate(QStyledItemDelegate):
@@ -145,7 +145,7 @@ class AssetCardDelegate(QStyledItemDelegate):
             painter.setBrush(STAR_COLOR)
             painter.drawPolygon(star_polygon(center, size))
         if marks.rating:
-            text = "★" * marks.rating
+            text = "★" * marks.rating  # glyph-ok: rating text
             font = QFont("Segoe UI", 7, QFont.Weight.Bold)
             painter.setFont(font)
             width = painter.fontMetrics().horizontalAdvance(text) + 8

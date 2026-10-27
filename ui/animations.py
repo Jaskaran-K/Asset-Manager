@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -50,6 +50,7 @@ POPUP_SLIDE_PX = 8
 
 
 _motion_enabled = True
+_motion_listeners: list[Callable[[bool], None]] = []
 
 
 def windows_animations_enabled() -> bool:
@@ -72,6 +73,14 @@ def set_motion_mode(mode: str) -> None:
     _motion_enabled = {"on": True, "off": False}.get(mode, None)
     if _motion_enabled is None:
         _motion_enabled = windows_animations_enabled()
+    for listener in list(_motion_listeners):
+        listener(_motion_enabled)
+
+
+def on_motion_changed(listener: Callable[[bool], None]) -> None:
+    """Call listener(enabled) whenever the Animations setting changes."""
+    if listener not in _motion_listeners:
+        _motion_listeners.append(listener)
 
 
 def motion_enabled() -> bool:

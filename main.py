@@ -62,8 +62,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QStatusBar,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -77,7 +77,9 @@ from core.scanner import AssetItem, AssetScanner
 from core.settings import (
     category_extensions,
     get_categories,
+    get_background_texture,
     get_file_extensions,
+    get_glass_frost,
     get_motion,
     get_scan_folders,
     get_theme,
@@ -94,14 +96,18 @@ from core.video_tools import apply_media_backend
 from core.version import APP_NAME, APP_VERSION
 from ui.animations import install_popup_animations, set_motion_mode
 from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, rating_text
+from ui.duotone import set_icon
 from ui.duplicates_dialog import DuplicatesDialog
+from ui.glass import set_frost
 from ui.icons import app_icon, category_icon, color_dot_icon, resolve_category_colors
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
+from ui.sidebar import SidebarHost
 from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, wait_for_background
 from ui.themes import apply_theme
 from ui.undo import UndoHistory, UndoStep
 from ui.viewer import AssetViewerDialog, ViewerTarget
+from ui.views import install_view_effects
 
 # ----------------------------------------------------------------------
 # Background Scanner Thread
@@ -227,17 +233,14 @@ class MainWindow(QMainWindow):
         control_bar = self._build_control_bar()
         main_layout.addWidget(control_bar)
 
-        # 2. Main Splitter (Sidebar + Thumbnail Grid)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(2)
-
-        splitter.addWidget(self._build_sidebar())
-
+        # 2. Thumbnail grid with the slide-out sidebar beside (or over) it
+        sidebar_tree = self._build_sidebar()
         self.grid_container = self._build_grid_view()
-        splitter.addWidget(self.grid_container)
-
-        splitter.setSizes([240, 980])
-        main_layout.addWidget(splitter, 1)
+        self.sidebar = SidebarHost(sidebar_tree, self.grid_container)
+        self.sidebar.watch(self.list_grid.viewport())
+        self.sidebar.open_changed.connect(self.btn_sidebar.setChecked)
+        self.btn_sidebar.setChecked(self.sidebar.is_open())
+        main_layout.addWidget(self.sidebar, 1)
 
         # 3. Status Bar
         self._build_status_bar()
@@ -250,6 +253,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(10)
 
+        # Shows / hides the sidebar
+        self.btn_sidebar = QPushButton()
+        set_icon(self.btn_sidebar, "menu", size=18)
+        self.btn_sidebar.setCheckable(True)
+        self.btn_sidebar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_sidebar.setToolTip("Show / hide the sidebar (Ctrl+B)")
+        self.btn_sidebar.setShortcut(shortcuts.sequence("main.sidebar"))
+        self.btn_sidebar.clicked.connect(lambda: self.sidebar.toggle())
+        layout.addWidget(self.btn_sidebar)
+
         # "Open Folder" button: browse a single folder outside the library
         self.btn_open_folder = QPushButton("Open Folder")
         self.btn_open_folder.setObjectName("primaryBtn")
@@ -258,18 +271,27 @@ class MainWindow(QMainWindow):
         self.btn_open_folder.clicked.connect(self._on_choose_folder)
         layout.addWidget(self.btn_open_folder)
 
-        # "Library" button: return to scanning all library folders
-        self.btn_library = QPushButton("Library")
+        # "Library" split button: the main part returns to the library (all library folders);
+        # its menu also adds / removes the folder being browsed
+        self.btn_library = QToolButton()
+        self.btn_library.setObjectName("splitBtn")
+        self.btn_library.setText("Library")
+        self.btn_library.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_library.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.btn_library.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_library.setToolTip("Show assets from all library folders")
+        set_icon(self.btn_library, "home", size=16)
         self.btn_library.clicked.connect(self._load_library)
+        library_menu = QMenu(self.btn_library)
+        library_menu.setToolTipsVisible(True)
+        self.action_library = library_menu.addAction("Library")
+        self.action_library.setToolTip("Show assets from all library folders (Settings > Folders)")
+        set_icon(self.action_library, "home")
+        self.action_library.triggered.connect(self._load_library)
+        self.action_library_toggle = library_menu.addAction("Add to Library")
+        set_icon(self.action_library_toggle, "star")
+        self.action_library_toggle.triggered.connect(self._on_toggle_library_folder)
+        self.btn_library.setMenu(library_menu)
         layout.addWidget(self.btn_library)
-
-        # "Add to Library" toggle for the browsed folder
-        self.btn_library_toggle = QPushButton("☆ Add to Library")
-        self.btn_library_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_library_toggle.clicked.connect(self._on_toggle_library_folder)
-        layout.addWidget(self.btn_library_toggle)
 
         # "Refresh" button
         self.btn_refresh = QPushButton("Refresh")
@@ -288,7 +310,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_view_asset)
 
         # "Tag" button: tag the selected files
-        self.btn_tag = QPushButton("🏷 Tag")
+        self.btn_tag = QPushButton("Tag")
+        set_icon(self.btn_tag, "tag")
         self.btn_tag.setEnabled(False)
         self.btn_tag.setToolTip("Add or remove tags on the selected files (Ctrl+T)")
         self.btn_tag.setShortcut(shortcuts.sequence("main.tag"))
@@ -322,7 +345,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_tools)
 
         # Settings
-        self.btn_settings = QPushButton("⚙ Settings")
+        self.btn_settings = QPushButton("Settings")
+        set_icon(self.btn_settings, "settings")
         self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_settings.setToolTip("Settings (Ctrl+,)")
         self.btn_settings.setShortcut(shortcuts.sequence("main.settings"))
@@ -485,6 +509,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QTreeWidget:
         """Build the category navigation sidebar; rows come from the Categories settings."""
         tree = QTreeWidget()
+        tree.setObjectName("sidebarTree")
         tree.setHeaderHidden(True)
         tree.setIconSize(QSize(16, 16))
         tree.setIndentation(16)
@@ -592,7 +617,7 @@ class MainWindow(QMainWindow):
         # Saved searches
         self.item_collections = QTreeWidgetItem(tree, ["Collections"])
         self.item_collections.setIcon(0, color_dot_icon("#fbbf24"))
-        self.item_collections.setToolTip(0, "Saved searches: search for something, then click ☆ in the search box")
+        self.item_collections.setToolTip(0, "Saved searches: search for something, then click the star in the search box")
         self.item_collections.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self.item_collections.setExpanded(True)
         self._rebuild_collections()
@@ -770,30 +795,42 @@ class MainWindow(QMainWindow):
 
     def _update_library_controls(self) -> None:
         """Update the path field and library buttons for the current mode."""
-        if self.browse_folder is None:
+        in_library_mode = self.browse_folder is None
+        toggle = self.action_library_toggle
+        if in_library_mode:
             folders = get_scan_folders()
             self.txt_path.setText("; ".join(str(f) for f in folders))
             self.txt_path.setToolTip("\n".join(str(f) for f in folders))
-            self.btn_library.setEnabled(False)
-            self.btn_library_toggle.hide()
-            return
-
-        self.txt_path.setText(str(self.browse_folder))
-        self.txt_path.setToolTip(str(self.browse_folder))
-        self.btn_library.setEnabled(True)
-        self.btn_library_toggle.show()
-        if is_scan_folder(self.browse_folder):
-            self.btn_library_toggle.setText("★ In Library")
-            self.btn_library_toggle.setObjectName("defaultActiveBtn")
-            self.btn_library_toggle.setToolTip("This folder is in the library. Click to remove it.")
+            self.btn_library.setToolTip(
+                "Showing your library: every folder in Settings > Folders. Click to scan it again.\n"
+                "Use Open Folder to look at another folder; the arrow can then add it to the library."
+            )
+            toggle.setText("Add to Library")
+            toggle.setToolTip("Open a folder first (Open Folder), then add it here")
+            toggle.setEnabled(False)
+            set_icon(toggle, "star")
         else:
-            self.btn_library_toggle.setText("☆ Add to Library")
-            self.btn_library_toggle.setObjectName("")
-            self.btn_library_toggle.setToolTip("Add this folder to the library so it's scanned on startup")
-
-        # Re-apply stylesheet to update button style ID
-        self.btn_library_toggle.style().unpolish(self.btn_library_toggle)
-        self.btn_library_toggle.style().polish(self.btn_library_toggle)
+            self.txt_path.setText(str(self.browse_folder))
+            self.txt_path.setToolTip(str(self.browse_folder))
+            toggle.setEnabled(True)
+            if is_scan_folder(self.browse_folder):
+                toggle.setText("Remove from Library")
+                toggle.setToolTip("This folder is in the library; stop scanning it on startup")
+                set_icon(toggle, "close")
+                state = "This folder is in the library."
+            else:
+                toggle.setText("Add to Library")
+                toggle.setToolTip("Add this folder to the library so it's scanned on startup")
+                set_icon(toggle, "star")
+                state = "This folder isn't in the library."
+            self.btn_library.setToolTip(
+                f"Back to your library (every folder in Settings > Folders).\n{state} "
+                "Click the arrow to add or remove it."
+            )
+        # Highlighted while the library is what's shown
+        self.btn_library.setProperty("active", in_library_mode)
+        self.btn_library.style().unpolish(self.btn_library)
+        self.btn_library.style().polish(self.btn_library)
 
     def _on_toggle_library_folder(self) -> None:
         """Add or remove the browsed folder from the library folders."""
@@ -1033,6 +1070,8 @@ class MainWindow(QMainWindow):
         elif data:
             self.filter_mode, self.filter_value = data
             self._refresh_grid_display()
+        if data:
+            self.sidebar.close_if_floating()
 
     def _on_search_changed(self) -> None:
         """Filter the grid as the search text or tag chips change."""
@@ -1216,7 +1255,7 @@ class MainWindow(QMainWindow):
         tag_line = f"<br>Tags: {', '.join(t.name for t in tags)}" if tags else ""
         marks = self._marks_of(asset)
         if marks.favorite or marks.rating:
-            parts = (["★ Favorite"] if marks.favorite else []) + ([f"Rating: {rating_text(marks.rating)}"] if marks.rating else [])
+            parts = (["★ Favorite"] if marks.favorite else []) + ([f"Rating: {rating_text(marks.rating)}"] if marks.rating else [])  # glyph-ok: tooltip text
             tag_line += "<br>" + " • ".join(parts)
         return (
             f"<b>{asset.name}</b><br>"
@@ -1699,9 +1738,11 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setWindowIcon(app_icon())
-    apply_theme(get_theme(), app)
     set_motion_mode(get_motion())
+    apply_theme(get_theme(), app, get_background_texture())
+    set_frost(get_glass_frost())
     install_popup_animations(app)
+    install_view_effects(app)
 
     # Hang watchdog: if the UI thread stops ticking, crash_log dumps every thread's stack
     heartbeat = QTimer(app)

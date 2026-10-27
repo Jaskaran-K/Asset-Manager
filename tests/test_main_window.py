@@ -10,7 +10,7 @@ from PIL import Image
 from PySide6.QtCore import QEvent, QItemSelectionModel, Qt
 from PySide6.QtGui import QKeyEvent
 
-from core.settings import set_scan_folders
+from core.settings import get_scan_folders, set_scan_folders
 
 
 def pump(qapp, condition=lambda: False, seconds=10.0):
@@ -155,4 +155,48 @@ def test_second_launch_shows_the_snapshot_before_scanning(library, qapp, monkeyp
     monkeypatch.setattr(main.MainWindow, "_start_scan", spy)
     window = open_window(qapp)
     assert started == [["big_wall.png", "chair.fbx", "small_brick.png"]]
+    window.close()
+
+
+def test_sidebar_toggles_and_the_floating_one_closes_after_a_pick(library, qapp):
+    from ui.animations import set_motion_mode
+
+    set_motion_mode("off")
+    try:
+        window = open_window(qapp)
+        assert window.sidebar.is_open() and window.btn_sidebar.isChecked()
+        window.btn_sidebar.click()  # ☰ / Ctrl+B
+        assert not window.sidebar.is_open() and not window.btn_sidebar.isChecked()
+        window.btn_sidebar.click()
+        window.sidebar.set_pinned(False)
+        png = next(row for row, _name, exts in window._sidebar_rows if exts == frozenset({".png"}))
+        window._on_sidebar_item_clicked(png, 0)
+        assert names_in_grid(window) == ["big_wall.png", "small_brick.png"]
+        assert not window.sidebar.is_open()  # floating: slides away after picking
+        window.close()
+    finally:
+        set_motion_mode("on")
+
+
+def test_library_split_button(library, qapp, tmp_path):
+    window = open_window(qapp)
+    toggle = window.action_library_toggle
+    assert window.btn_library.property("active") is True  # showing the library
+    assert not toggle.isEnabled()  # nothing browsed to add yet
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "c.png").write_bytes(b"x")
+    window.browse_folder = other
+    window._update_library_controls()
+    assert window.btn_library.property("active") is False
+    assert toggle.isEnabled() and toggle.text() == "Add to Library"
+    toggle.trigger()
+    assert other.resolve() in [f.resolve() for f in get_scan_folders()]
+    assert toggle.text() == "Remove from Library"
+    toggle.trigger()
+    assert other.resolve() not in [f.resolve() for f in get_scan_folders()]
+
+    window.btn_library.click()  # the main part: back to the library
+    assert window.browse_folder is None and window.btn_library.property("active") is True
     window.close()

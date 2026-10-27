@@ -28,5 +28,26 @@ freezes or crashes the app. Methods defined with `def` on a QObject are queued t
 Every button gets a hover tooltip (`setToolTip`) saying what it does, plus its shortcut if it
 has one. `tests/test_tooltips.py` fails on buttons without one.
 
+## Icons
+Every icon is a duotone "Gradient" icon drawn in code in `ui/duotone.py`. Never use emoji or
+symbol characters (☰ ⚙ ✕ ▶ ...) as icons, and don't ship icon image files.
+
+- Style: draw on a 24 x 24 grid. The **body** (main shape) is filled with `_body()`: a vertical
+  gradient of the secondary color, 95% opaque at the top fading to 45% at the bottom. The
+  **details** (a door, a check mark, an x) are drawn on top in the primary color: round-capped
+  strokes about 1.6-2.3 wide, or small solid fills. Keep details few and legible at 16 px.
+- Colors come from a tone, looked up when painted so icons follow the theme: `accent` (default:
+  the theme's `accent_text` / `accent`), `text`, `success`, `danger`, `warning`, `light` (on a
+  colored button), or a `(primary, secondary)` pair of theme tokens / `#hex` colors.
+- Add one by writing `_name(p, primary, secondary)` and registering it in `ICONS`; use it with
+  `set_icon(button_or_action, "name")`, `duotone_icon(...)`, or `IconLabel` for icon + text lines.
+- `tests/test_icons.py` fails on emoji / symbol characters in `main.py` and `ui/`. Where one is
+  text rather than an icon (rating stars), mark the line `# glyph-ok: <why>`.
+
+## Views
+`ui.views.install_view_effects` styles every item view: trees get `RowHighlightDelegate` for
+hover / selection, and wheels scroll smoothly. Don't give `::item` a background in the stylesheet
+for trees: Qt paints it into the indentation too (a stray square left of the row).
+
 ## Tests
 `python -m pytest` (dev setup: `pip install -r requirements-dev.txt`). Run it before finishing a change.

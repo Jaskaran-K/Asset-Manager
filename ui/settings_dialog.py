@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -59,7 +60,9 @@ from core.settings import (
     PREVIEWABLE_EXTENSIONS,
     THUMBNAIL_SIZE_RANGE,
     category_extensions,
+    get_background_texture,
     get_categories,
+    get_glass_frost,
     get_ffmpeg_path,
     get_file_extensions,
     get_media_backend,
@@ -70,7 +73,9 @@ from core.settings import (
     import_category_icon,
     parse_extension_list,
     remove_unused_category_icons,
+    set_background_texture,
     set_categories,
+    set_glass_frost,
     set_ffmpeg_path,
     set_file_extensions,
     set_media_backend,
@@ -92,6 +97,9 @@ from core.updater import (
 from core.version import APP_NAME, APP_VERSION, GITHUB_URL
 from core.video_tools import CACHE_ROOT, cache_size_bytes, clear_video_cache, find_ffmpeg
 from ui.animations import set_motion_mode
+from ui.backgrounds import TEXTURES, render_tile
+from ui.duotone import IconLabel, set_icon
+from ui.glass import set_frost
 from ui.icons import (
     MAIN_CATEGORY_COLORS,
     SUB_CATEGORY_COLORS,
@@ -102,7 +110,7 @@ from ui.icons import (
 )
 from ui import shortcuts
 from ui.tag_widgets import next_tag_color
-from ui.themes import THEMES, apply_theme
+from ui.themes import THEMES, apply_theme, current_theme_id
 
 # Data roles on category tree items
 EXTENSIONS_ROLE = Qt.ItemDataRole.UserRole
@@ -223,9 +231,8 @@ class FilesPage(QWidget):
         self.lbl_count.setObjectName("pageHint")
         layout.addWidget(self.lbl_count)
 
-        self.lbl_warning = QLabel()
-        self.lbl_warning.setObjectName("warningLabel")
-        self.lbl_warning.setWordWrap(True)
+        self.lbl_warning = IconLabel(box_name="warningLabel")
+        self.lbl_warning.set_icon("warning", "danger")
         layout.addWidget(self.lbl_warning)
 
         self.lbl_note = QLabel()
@@ -255,7 +262,7 @@ class FilesPage(QWidget):
         if errors:
             shown = errors[:6]
             more = f"\n…and {len(errors) - 6} more" if len(errors) > 6 else ""
-            self.lbl_warning.setText("⚠ Invalid format:\n• " + "\n• ".join(shown) + more)
+            self.lbl_warning.setText("Invalid format:\n• " + "\n• ".join(shown) + more)
             self.lbl_warning.show()
         else:
             self.lbl_warning.hide()
@@ -340,10 +347,12 @@ class CategoriesPage(QWidget):
         left_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
-        self.btn_up = QPushButton("▲ Up")
+        self.btn_up = QPushButton("Up")
+        set_icon(self.btn_up, "arrow_up", size=14)
         self.btn_up.setToolTip("Move the selected category up")
         self.btn_up.clicked.connect(lambda: self._move_current(-1))
-        self.btn_down = QPushButton("▼ Down")
+        self.btn_down = QPushButton("Down")
+        set_icon(self.btn_down, "arrow_down", size=14)
         self.btn_down.setToolTip("Move the selected category down")
         self.btn_down.clicked.connect(lambda: self._move_current(1))
         btn_reset = QPushButton("Reset to Defaults")
@@ -611,6 +620,16 @@ class CategoriesPage(QWidget):
 # ----------------------------------------------------------------------
 # General > Appearance
 # ----------------------------------------------------------------------
+def _theme_background(theme_id: str, width: int, height: int) -> QBrush:
+    """Brush for a theme's window background (the purple theme's is a gradient)."""
+    if theme_id == "dark_purple":
+        background = QLinearGradient(0, 0, width, height)
+        background.setColorAt(0.0, QColor("#241338"))
+        background.setColorAt(1.0, QColor("#0c0716"))
+        return QBrush(background)
+    return QBrush(QColor(THEMES[theme_id]["window_bg"]))
+
+
 def _theme_swatch(theme_id: str, width: int = 64, height: int = 40) -> QPixmap:
     """Miniature preview of a theme: background, toolbar strip, sidebar and accent."""
     t = THEMES[theme_id]
@@ -619,13 +638,7 @@ def _theme_swatch(theme_id: str, width: int = 64, height: int = 40) -> QPixmap:
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    if theme_id == "dark_purple":
-        background = QLinearGradient(0, 0, width, height)
-        background.setColorAt(0.0, QColor("#241338"))
-        background.setColorAt(1.0, QColor("#0c0716"))
-        p.setBrush(background)
-    else:
-        p.setBrush(QColor(t["window_bg"]))
+    p.setBrush(_theme_background(theme_id, width, height))
     p.setPen(QColor(t["button_border"]))
     p.drawRoundedRect(0, 0, width - 1, height - 1, 6, 6)
 
@@ -643,6 +656,26 @@ def _theme_swatch(theme_id: str, width: int = 64, height: int = 40) -> QPixmap:
     return pix
 
 
+def _texture_swatch(theme_id: str, texture_id: str, width: int = 56, height: int = 36) -> QPixmap:
+    """A background texture over the theme's window background."""
+    t = THEMES[theme_id]
+    pix = QPixmap(width, height)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QColor(t["button_border"]))
+    p.setBrush(_theme_background(theme_id, width, height))
+    p.drawRoundedRect(0, 0, width - 1, height - 1, 6, 6)
+    tile = render_tile(texture_id, QColor(t["texture_ink"]))
+    if tile is not None:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QPixmap.fromImage(tile)))
+        for _ in range(3):  # stronger than the real thing, so it shows at this size
+            p.drawRoundedRect(1, 1, width - 3, height - 3, 5, 5)
+    p.end()
+    return pix
+
+
 _PREVIEW_SAMPLES = [
     ("Hero_Character.fbx", ".fbx", "3D Models", "FBX"),
     ("Crate.obj", ".obj", "3D Models", "OBJ"),
@@ -656,17 +689,20 @@ class AppearancePage(QWidget):
     """Theme, grid size and category color / icon options."""
 
     theme_selected = Signal(str)
+    texture_selected = Signal(str)
 
     def __init__(
         self,
         categories_page: CategoriesPage,
         theme_id: str,
         thumbnail_size: int,
+        texture_id: str = "none",
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self.categories_page = categories_page
         self._theme_id = theme_id
+        self._texture_id = texture_id
         # Maps mirror tree items to the CategoriesPage items they represent
         self._source_items: dict[int, QTreeWidgetItem] = {}
 
@@ -708,6 +744,64 @@ class AppearancePage(QWidget):
         hint = QLabel("Themes apply instantly so you can preview them; Cancel restores the previous theme.")
         hint.setObjectName("pageHint")
         layout.addWidget(hint)
+        layout.addSpacing(14)
+
+        # --- Background texture ---
+        layout.addWidget(self._section_title("Background Texture"))
+        texture_grid = QGridLayout()
+        texture_grid.setHorizontalSpacing(8)
+        texture_grid.setVerticalSpacing(8)
+        self.texture_group = QButtonGroup(self)
+        self.texture_group.setExclusive(True)
+        self.texture_buttons: dict[str, QPushButton] = {}
+        for i, (texture, label) in enumerate(TEXTURES.items()):
+            btn = QPushButton(label)
+            btn.setObjectName("textureCard")
+            btn.setCheckable(True)
+            btn.setIconSize(QSize(56, 36))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(
+                "Plain theme background, no texture" if texture == "none"
+                else f"A faint {label.lower()} pattern behind the window and the grid (previewed now; Save keeps it)"
+            )
+            btn.clicked.connect(lambda _checked=False, t=texture: self._on_texture_clicked(t))
+            self.texture_group.addButton(btn)
+            self.texture_buttons[texture] = btn
+            texture_grid.addWidget(btn, i // 4, i % 4)
+        self.texture_buttons.get(texture_id, self.texture_buttons["none"]).setChecked(True)
+        layout.addLayout(texture_grid)
+        self._refresh_texture_swatches()
+        layout.addSpacing(14)
+
+        # --- Glass frost ---
+        layout.addWidget(self._section_title("Glass Frost"))
+        frost_row = QHBoxLayout()
+        lbl_clear = QLabel("Clear")
+        lbl_clear.setObjectName("pageHint")
+        self.slider_frost = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frost.setRange(0, 100)
+        self.slider_frost.setSingleStep(5)
+        self.slider_frost.setPageStep(20)
+        self.slider_frost.setValue(get_glass_frost())
+        self.slider_frost.setToolTip("How frosted the sidebar's glass is: blur, milkiness and grain (previewed now)")
+        self.slider_frost.valueChanged.connect(self._on_frost_changed)
+        lbl_frosted = QLabel("Frosted")
+        lbl_frosted.setObjectName("pageHint")
+        self.lbl_frost = QLabel()
+        self.lbl_frost.setFixedWidth(60)
+        self.lbl_frost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        frost_row.addWidget(lbl_clear)
+        frost_row.addWidget(self.slider_frost, 1)
+        frost_row.addWidget(lbl_frosted)
+        frost_row.addWidget(self.lbl_frost)
+        layout.addLayout(frost_row)
+        frost_hint = QLabel(
+            "The sidebar is glass: unpin it (the pin button) to float it over the grid and see the thumbnails blur through."
+        )
+        frost_hint.setObjectName("pageHint")
+        frost_hint.setWordWrap(True)
+        layout.addWidget(frost_hint)
+        self._on_frost_changed(self.slider_frost.value())
         layout.addSpacing(14)
 
         # --- Grid size ---
@@ -824,8 +918,29 @@ class AppearancePage(QWidget):
             self._theme_id = theme_id
             self.theme_selected.emit(theme_id)
 
+    def texture_id(self) -> str:
+        return self._texture_id
+
+    def frost(self) -> int:
+        return self.slider_frost.value()
+
+    def _on_frost_changed(self, value: int) -> None:
+        self.lbl_frost.setText(f"{value}%")
+        set_frost(value)  # live preview; the dialog restores the saved value on Cancel
+
+    def _on_texture_clicked(self, texture_id: str) -> None:
+        if texture_id != self._texture_id:
+            self._texture_id = texture_id
+            self.texture_selected.emit(texture_id)
+
+    def _refresh_texture_swatches(self) -> None:
+        theme = self._theme_id if self._theme_id in THEMES else current_theme_id()
+        for texture, btn in self.texture_buttons.items():
+            btn.setIcon(QIcon(_texture_swatch(theme, texture)))
+
     def refresh_preview(self) -> None:
         """Re-render the sample cards (after a size or theme change)."""
+        self._refresh_texture_swatches()
         size = self.slider_size.value()
         self.grid_preview.clear()
         self.grid_preview.setIconSize(QSize(size, size))
@@ -981,10 +1096,8 @@ class VideoPage(QWidget):
         row.addWidget(self.txt_ffmpeg, 1)
         row.addWidget(btn_browse)
         layout.addLayout(row)
-        self.lbl_ffmpeg_status = QLabel()
-        self.lbl_ffmpeg_status.setObjectName("pageHint")
-        self.lbl_ffmpeg_status.setWordWrap(True)
-        self.lbl_ffmpeg_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_ffmpeg_status = IconLabel(text_name="pageHint")
+        self.lbl_ffmpeg_status.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.lbl_ffmpeg_status)
 
         layout.addSpacing(10)
@@ -1046,12 +1159,15 @@ class VideoPage(QWidget):
     def _update_ffmpeg_status(self) -> None:
         found = find_ffmpeg(self.ffmpeg_path())
         if found:
-            self.lbl_ffmpeg_status.setText(f"✔ Using {found}")
+            self.lbl_ffmpeg_status.set_icon("check", "success")
+            self.lbl_ffmpeg_status.setText(f"Using {found}")
         elif self.ffmpeg_path():
-            self.lbl_ffmpeg_status.setText("✖ No ffmpeg.exe at that location.")
+            self.lbl_ffmpeg_status.set_icon("close", "danger")
+            self.lbl_ffmpeg_status.setText("No ffmpeg.exe at that location.")
         else:
+            self.lbl_ffmpeg_status.set_icon("close", "danger")
             self.lbl_ffmpeg_status.setText(
-                "✖ ffmpeg isn't on the system PATH. Install it (for example: winget install ffmpeg) "
+                "ffmpeg isn't on the system PATH. Install it (for example: winget install ffmpeg) "
                 "or browse to ffmpeg.exe. Videos still play; only thumbnails and preview copies need it."
             )
 
@@ -1538,6 +1654,7 @@ class SettingsDialog(QDialog):
         self._orig_extensions = get_file_extensions()
         self._orig_categories = get_categories()
         self._orig_theme = get_theme()
+        self._orig_texture = get_background_texture()
         self._orig_thumbnail_size = get_thumbnail_size()
         self._orig_ffmpeg_path = get_ffmpeg_path()
         self._orig_media_backend = get_media_backend()
@@ -1552,8 +1669,11 @@ class SettingsDialog(QDialog):
         self.page_folders = FoldersPage(self._orig_folders)
         self.page_files = FilesPage(self._orig_extensions)
         self.page_categories = CategoriesPage(self._orig_categories, self._orig_extensions)
-        self.page_appearance = AppearancePage(self.page_categories, self._orig_theme, self._orig_thumbnail_size)
+        self.page_appearance = AppearancePage(
+            self.page_categories, self._orig_theme, self._orig_thumbnail_size, self._orig_texture
+        )
         self.page_appearance.theme_selected.connect(self._on_theme_selected)
+        self.page_appearance.texture_selected.connect(self._on_texture_selected)
         self.page_video = VideoPage(self._orig_ffmpeg_path, self._orig_media_backend)
         self.page_tags = TagsPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
@@ -1647,11 +1767,16 @@ class SettingsDialog(QDialog):
         apply_theme(theme_id)
         self.page_appearance.refresh_preview()
 
+    def _on_texture_selected(self, texture_id: str) -> None:
+        apply_theme(self.page_appearance.theme_id(), texture_id=texture_id)  # live preview, like themes
+
     def reject(self) -> None:
         if self.page_about.is_busy():
             return
-        if get_theme() != self.page_appearance.theme_id():
-            apply_theme(get_theme())
+        chosen = (self.page_appearance.theme_id(), self.page_appearance.texture_id())
+        if chosen != (get_theme(), get_background_texture()):
+            apply_theme(get_theme(), texture_id=get_background_texture())
+        set_frost(get_glass_frost())
         # Discard icon images imported during this session
         remove_unused_category_icons(get_categories())
         # Tag edits are saved as they're made; Cancel undoes them
@@ -1697,6 +1822,10 @@ class SettingsDialog(QDialog):
         remove_unused_category_icons(categories)
         if self.theme_changed:
             set_theme(theme_id)
+        if self.page_appearance.texture_id() != self._orig_texture:
+            set_background_texture(self.page_appearance.texture_id())
+        if self.page_appearance.frost() != get_glass_frost():
+            set_glass_frost(self.page_appearance.frost())
         if self.thumbnail_size_changed:
             set_thumbnail_size(thumbnail_size)
         motion = self.page_appearance.cb_motion.currentData()

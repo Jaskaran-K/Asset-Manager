@@ -30,6 +30,12 @@ and are never touched by installing, updating or uninstalling.
 - **Undo:** **Ctrl+Z** / **Ctrl+Y** undo and redo tag, favorite and rating changes.
 - **Viewer:** **Page Up** / **Page Down** (or Alt+Left / Alt+Right, or the ‹ › buttons) step through the files
   shown in the grid without closing the viewer.
+- **Sidebar:** the menu button (or **Ctrl+B**) slides it in and out, and dragging its right edge resizes it. With the pin button it stays
+  docked beside the grid. Unpinned, it floats over the grid on frosted glass and slides away after you pick a
+  category (or press Esc, or click beside it).
+- **Looks:** **Settings > Appearance** has the themes and a background texture (grain, dots, grid, lines,
+  hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
+  their colors from the theme. Lists scroll smoothly, and categories slide open.
 
 ## Video playback
 
@@ -76,7 +82,7 @@ Tags let you find groups of files without relying on file names. They're stored 
   - `res:>=2048` (image or video resolution, `res:4k` = 4096), `dur:<30s`, `poly:<10k` (3D model faces). These
     details are read in the background after a scan; files not read yet don't match.
   - plus any file name text. Backspace removes the last chip; Esc or ✕ clears everything.
-- **Collections:** click ☆ in the search box to save the search in the sidebar. Right-click one to rename or delete it.
+- **Collections:** click the star in the search box to save the search in the sidebar. Right-click one to rename or delete it.
 - **Backups:** the database is backed up automatically before upgrades and app updates (the last 10 are kept).
   **Tools** also has Back Up Library Now, Restore Library Backup..., and Export / Import Tags (a `.json` file with
   your tags, favorites, ratings and collections, for moving to another PC).

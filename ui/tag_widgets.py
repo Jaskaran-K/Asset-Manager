@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagChange, TagError, TagRepository
 from ui import shortcuts
+from ui.duotone import Tone, set_icon
 from ui.icons import MAIN_CATEGORY_COLORS, SUB_CATEGORY_COLORS, color_swatch_icon
 
 # Colors handed out to new custom tags, in order
@@ -225,6 +226,11 @@ def _text_color_for(background: QColor) -> str:
     return "#111827" if luminance > 160 else "#ffffff"
 
 
+def _chip_tone(bg: str, fg: str) -> Tone:
+    """Icon colors for a chip's remove button: a body in its text color, the x cut out in its background."""
+    return (bg, fg) if bg.startswith("#") and fg.startswith("#") else ("input_bg", "text")
+
+
 def chip_colors(tag: Tag) -> tuple[str, str, str]:
     """(background, text, border) for a chip: the tag's color for custom tags,
     a neutral outline for default (file type) tags that reads on light and dark themes."""
@@ -255,7 +261,7 @@ class TagChip(QFrame):
         layout.addWidget(QLabel(tag.name))
         if removable:
             btn = QToolButton()
-            btn.setText("✕")
+            set_icon(btn, "close", _chip_tone(bg, fg), size=11)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(f"Remove the {tag.name} filter")
             btn.clicked.connect(lambda: self.remove_clicked.emit(self.tag))
@@ -302,7 +308,7 @@ class FilterChip(QFrame):
         layout.setSpacing(4)
         layout.addWidget(QLabel(text))
         btn = QToolButton()
-        btn.setText("✕")
+        set_icon(btn, "close", _chip_tone(bg, fg), size=11)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip("Remove this filter")
         btn.clicked.connect(lambda: self.remove_clicked.emit(self.tag_filter))
@@ -436,7 +442,7 @@ class TagSearchBar(QFrame):
         layout.addWidget(self.edit, 1)
 
         self.btn_save = QToolButton()
-        self.btn_save.setText("☆")
+        set_icon(self.btn_save, "star", size=16)
         self.btn_save.setToolTip("Save this search as a collection in the sidebar")
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_save.setAutoRaise(True)
@@ -445,7 +451,7 @@ class TagSearchBar(QFrame):
         layout.addWidget(self.btn_save)
 
         self.btn_clear = QToolButton()
-        self.btn_clear.setText("✕")
+        set_icon(self.btn_clear, "close", "text", size=14)
         self.btn_clear.setToolTip("Clear search and tag filters (Esc)")
         self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear.setAutoRaise(True)

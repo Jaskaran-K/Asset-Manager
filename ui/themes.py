@@ -6,10 +6,14 @@ cover, like color pickers and message boxes) and the thumbnail card colors.
 
 The 3D and texture viewports keep their dark canvas in every theme, as most DCC
 tools do, so models and textures read the same regardless of UI theme.
+
+A background texture (ui.backgrounds) can be tiled behind windows, dialogs and the
+grid; the glass_* tokens color the frosted sidebar (ui.sidebar).
 """
 
 from __future__ import annotations
 
+import re
 from string import Template
 
 from PySide6.QtGui import QColor, QPalette
@@ -60,6 +64,7 @@ THEMES: dict[str, dict[str, str]] = {
         "info_text": "#93c5fd", "info_bg": "#172554", "info_border": "#1e40af",
         "thumb_card": "#1a1c24", "thumb_border": "#2e3240",
         "thumb_badge": "#12141a", "thumb_badge_text": "#ffffff",
+        "glass_tint": "#b81a1b23", "glass_edge": "#24ffffff", "texture_ink": "#ffffff",
     },
     "light": {
         "label": "Light Mode",
@@ -102,6 +107,7 @@ THEMES: dict[str, dict[str, str]] = {
         "info_text": "#1e40af", "info_bg": "#eff6ff", "info_border": "#bfdbfe",
         "thumb_card": "#f3f4f6", "thumb_border": "#e5e7eb",
         "thumb_badge": "#ffffff", "thumb_badge_text": "#1f2937",
+        "glass_tint": "#bcf9fafb", "glass_edge": "#1f000000", "texture_ink": "#1e293b",
     },
     "dark_purple": {
         "label": "Dark Purple",
@@ -144,6 +150,7 @@ THEMES: dict[str, dict[str, str]] = {
         "info_text": "#ddd6fe", "info_bg": "#2e1065", "info_border": "#6d28d9",
         "thumb_card": "#1e1332", "thumb_border": "#3b2a5c",
         "thumb_badge": "#140b24", "thumb_badge_text": "#ffffff",
+        "glass_tint": "#8c180d2c", "glass_edge": "#33c4b5fd", "texture_ink": "#e9ddff",
     },
 }
 
@@ -183,8 +190,21 @@ QPushButton:disabled { color: $text_faint; background-color: $button_disabled; b
 
 #primaryBtn { background-color: $accent; border: 1px solid $accent_border; color: #ffffff; font-weight: bold; }
 #primaryBtn:hover { background-color: $accent_hover; }
-#defaultActiveBtn { background-color: #d97706; border: 1px solid #f59e0b; color: #ffffff; font-weight: bold; }
-#defaultActiveBtn:hover { background-color: #b45309; }
+/* Split button (main part + a menu arrow), e.g. Library */
+QToolButton#splitBtn {
+    background-color: $button; border: 1px solid $button_border; border-radius: 6px;
+    padding: 4px 30px 5px 10px; font-weight: 500; color: $text;
+}
+QToolButton#splitBtn:hover { background-color: $button_hover; border-color: $button_border_hover; }
+QToolButton#splitBtn:pressed { background-color: $button_pressed; }
+QToolButton#splitBtn[active="true"] { background-color: $accent_soft; border-color: $accent; color: $card_selected_text; }
+QToolButton#splitBtn::menu-button {
+    width: 22px; border: none; border-left: 1px solid $button_border;
+    border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+}
+QToolButton#splitBtn::menu-button:hover { background-color: $hover; }
+QToolButton#splitBtn[active="true"]::menu-button { border-left-color: $accent; }
+
 #viewBtn { background-color: #059669; border: 1px solid #10b981; color: #ffffff; font-weight: bold; }
 #viewBtn:hover { background-color: #047857; }
 #primaryBtn:disabled, #viewBtn:disabled {
@@ -235,9 +255,9 @@ QTreeWidget {
     show-decoration-selected: 0;
     outline: 0;
 }
-QTreeWidget::item { padding: 6px 8px; border-radius: 5px; margin: 1px 4px; }
-QTreeWidget::item:hover { background: $hover; }
-QTreeWidget::item:selected { background: $accent; color: #ffffff; }
+/* No item backgrounds here: Qt would paint them into the indentation left of each row too.
+   ui.views.RowHighlightDelegate draws the hover / selection highlight instead. */
+QTreeWidget::item { padding: 6px 8px; margin: 1px 4px; }
 
 QListWidget {
     background-color: $input_bg;
@@ -265,6 +285,13 @@ QListWidget::item:selected { background-color: $accent; color: #ffffff; }
 }
 #assetGrid::item:hover { background: $card_hover; border-color: $card_hover_border; }
 #assetGrid::item:selected { background: $card_selected; border: 1px solid $accent_border; color: $card_selected_text; }
+
+/* Slide-out sidebar (ui.sidebar): the panel paints its own frosted background */
+#sidebarTree { background: transparent; border: none; padding: 2px 4px 8px 4px; }
+#sidebarTitle { color: $text_faint; font-size: 11px; font-weight: bold; letter-spacing: 1px; }
+#sidebarPin { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; }
+#sidebarPin:hover { background: $hover; }
+#sidebarPin:checked { background: $accent_soft; border-color: $accent; }
 
 #emptyState { color: $text_faint; font-size: 14px; padding: 40px; }
 #welcomePanel { background: $grid_bg; }
@@ -295,11 +322,13 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #sectionTitle { font-size: 14px; font-weight: bold; color: $text_strong; }
 #pageHint { color: $text_muted; }
 #warningLabel { color: $warn_text; background-color: $warn_bg; border: 1px solid $warn_border; border-radius: 6px; padding: 8px 10px; }
+#warningLabel QLabel { color: $warn_text; background: transparent; border: none; padding: 0px; }
 #noteLabel { color: $note_text; background-color: $note_bg; border: 1px solid $note_border; border-radius: 6px; padding: 8px 10px; }
 #comingSoon { color: $info_text; background-color: $info_bg; border: 1px solid $info_border; border-radius: 6px; padding: 8px 10px; }
 #settingsFooter { background: $surface; border-top: 1px solid $border; }
 #footerWarning { color: $warn_text; }
 #themeCard { padding: 10px 14px; text-align: left; }
+#textureCard { padding: 6px 10px; text-align: left; }
 
 /* Asset viewer */
 #headerBar { background: $surface; border-bottom: 1px solid $border; }
@@ -339,7 +368,19 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #speedPreset:checked { background-color: $accent; color: #ffffff; font-weight: bold; }
 """)
 
+# Background texture tile (ui.backgrounds), tiled behind dialogs and the main window's grid area.
+# The grid's stays put while it scrolls, like a desk under the cards. Only one layer anywhere:
+# the main window itself gets none, or it would show through see-through grids (Dark Purple)
+# as a second, offset copy; dialogs' own grids (the Appearance preview) get none for the same reason.
+TEXTURE_QSS_TEMPLATE = Template("""
+QDialog, QMainWindow #assetGrid, #welcomePanel, #emptyState {
+    background-image: url("$tile"); background-repeat: repeat-xy;
+}
+QMainWindow #assetGrid { background-attachment: fixed; }
+""")
+
 _current_theme_id = DEFAULT_THEME
+_current_texture_id = "none"
 
 
 def theme_tokens(theme_id: str) -> dict[str, str]:
@@ -350,8 +391,39 @@ def current_theme_id() -> str:
     return _current_theme_id
 
 
-def build_stylesheet(theme_id: str) -> str:
-    return APP_QSS_TEMPLATE.substitute(theme_tokens(theme_id))
+def current_texture_id() -> str:
+    return _current_texture_id
+
+
+def build_stylesheet(theme_id: str, texture_id: str = "none") -> str:
+    from ui.backgrounds import tile_path
+
+    tokens = theme_tokens(theme_id)
+    sheet = APP_QSS_TEMPLATE.substitute(tokens)
+    tile = tile_path(texture_id, QColor(tokens["texture_ink"]))
+    if tile is not None:
+        sheet += TEXTURE_QSS_TEMPLATE.substitute(tile=tile.as_posix())
+    return sheet
+
+
+_RGBA = re.compile(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)")
+
+
+def parse_color(value: str) -> QColor:
+    """QColor for a token: "#rgb" / "#aarrggbb" / names, or rgba() with 0-1 alpha.
+
+    Gradients aren't colors: they give an invalid QColor.
+    """
+    match = _RGBA.fullmatch(value.strip())
+    if match:
+        r, g, b, a = match.groups()
+        return QColor(int(r), int(g), int(b), round(float(a) * 255))
+    return QColor(value)
+
+
+def theme_color(name: str) -> QColor:
+    """A color token of the current theme (for widgets that paint themselves)."""
+    return parse_color(theme_tokens(_current_theme_id)[name])
 
 
 def _solid(color: str, fallback: str) -> QColor:
@@ -360,13 +432,18 @@ def _solid(color: str, fallback: str) -> QColor:
     return c if c.isValid() else QColor(fallback)
 
 
-def apply_theme(theme_id: str, app: QApplication | None = None) -> None:
-    """Install the theme's stylesheet, palette and thumbnail colors application-wide."""
-    global _current_theme_id
+def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str | None = None) -> None:
+    """Install the theme's stylesheet, palette and thumbnail colors application-wide.
+
+    texture_id: background texture (ui.backgrounds.TEXTURES); None keeps the current one.
+    """
+    global _current_theme_id, _current_texture_id
     app = app or QApplication.instance()
     if theme_id not in THEMES:
         theme_id = DEFAULT_THEME
     _current_theme_id = theme_id
+    if texture_id is not None:
+        _current_texture_id = texture_id
     t = THEMES[theme_id]
 
     base = _solid(t["input_bg"], "#15161b")
@@ -386,7 +463,7 @@ def apply_theme(theme_id: str, app: QApplication | None = None) -> None:
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
     palette.setColor(QPalette.ColorRole.Link, QColor(t["accent_text"]))
     app.setPalette(palette)
-    app.setStyleSheet(build_stylesheet(theme_id))
+    app.setStyleSheet(build_stylesheet(theme_id, _current_texture_id))
 
     set_thumbnail_card_style(
         QColor(t["thumb_card"]), QColor(t["thumb_border"]),

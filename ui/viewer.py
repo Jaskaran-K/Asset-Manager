@@ -72,6 +72,7 @@ from core.model_loader import Mesh3D, load_3d_model
 from core.scanner import AssetItem
 from core.tag_repository import Tag
 from ui import shortcuts
+from ui.duotone import set_icon
 from ui.tag_widgets import tag_chip_cloud
 from ui.video_player import VideoPlayer, control_icon
 
@@ -1028,20 +1029,23 @@ class AssetViewerDialog(QDialog):
             cb_mode.currentTextChanged.connect(viewport.set_render_mode)
             tb_layout.addWidget(cb_mode)
 
-            btn_grid = QPushButton("⊞ Ground Grid")
+            btn_grid = QPushButton("Ground Grid")
+            set_icon(btn_grid, "grid")
             btn_grid.setCheckable(True)
             btn_grid.setChecked(True)
             btn_grid.setToolTip("Toggle 3D ground plane reference grid (or press 'G')")
             btn_grid.toggled.connect(viewport.toggle_ground_grid)
             tb_layout.addWidget(btn_grid)
 
-            btn_turntable = QPushButton("▶ Auto Rotate")
+            btn_turntable = QPushButton("Auto Rotate")
+            set_icon(btn_turntable, "play")
             btn_turntable.setToolTip("Spin the model slowly to see it from every side")
             btn_turntable.setCheckable(True)
 
             def on_turntable_toggled(checked: bool):
                 viewport.toggle_turntable(checked)
-                btn_turntable.setText("⏸ Pause" if checked else "▶ Auto Rotate")
+                btn_turntable.setText("Pause" if checked else "Auto Rotate")
+                set_icon(btn_turntable, "pause" if checked else "play")
 
             btn_turntable.toggled.connect(on_turntable_toggled)
             tb_layout.addWidget(btn_turntable)

@@ -103,6 +103,7 @@ from ui.duotone import set_icon
 from ui.duplicates_dialog import DuplicatesDialog
 from ui.glass import set_frost
 from ui.icons import app_icon, category_icon, color_dot_icon, resolve_category_colors
+from ui import main_thread_gc
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SidebarHost
@@ -1831,6 +1832,7 @@ def main() -> None:
     set_frost(get_glass_frost())
     install_popup_animations(app)
     install_view_effects(app)
+    main_thread_gc.install(app)  # a collection on a worker thread can free UI objects there, and crash
 
     # Hang watchdog: if the UI thread stops ticking, crash_log dumps every thread's stack
     heartbeat = QTimer(app)

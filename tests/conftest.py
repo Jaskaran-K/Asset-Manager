@@ -49,7 +49,10 @@ def qapp():
     """
     from PySide6.QtWidgets import QApplication
 
+    from ui import main_thread_gc
+
     app = QApplication.instance() or QApplication([])
+    main_thread_gc.install(app)  # as the app does: garbage is only collected on this thread
     yield app
     # Like the app does on quit: let background jobs finish before Python tears Qt down,
     # or the process can crash after all tests have passed

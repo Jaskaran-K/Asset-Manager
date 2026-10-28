@@ -39,9 +39,20 @@ MODEL = "3D Model Viewer"
 IMAGE = "Image Viewer"
 VIDEO = "Video Player"
 TAG_DIALOG = "Tag Dialog"
-CATEGORIES = (MAIN, SEARCH, VIEWER, MODEL, IMAGE, VIDEO, TAG_DIALOG)
+VIEWS = "Views"
+ARTBOOK = "Artbook"
+PAGES = "Artbook Pages"
+CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, PAGES, VIEWER, MODEL, IMAGE, VIDEO, TAG_DIALOG)
 
 SHORTCUTS: tuple[Shortcut, ...] = (
+    # Views (both windows)
+    Shortcut("view.asset", VIEWS, "Ctrl+1", "Asset View: the asset browser", "Ctrl+1"),
+    Shortcut("view.artbook", VIEWS, "Ctrl+2", "Artbook View: your reference boards", "Ctrl+2"),
+    Shortcut("view.split", VIEWS, "Ctrl+3", "Split View: assets and Artbook side by side", "Ctrl+3"),
+    Shortcut("view.separate", VIEWS, "Ctrl+4", "Separate View: the Artbook in its own window", "Ctrl+4"),
+    Shortcut("view.switch", VIEWS, "Click View", "Switch between Asset and Artbook view (the arrow lists every view)"),
+    Shortcut("view.split_drag", VIEWS, "Drag the divider", "Split View: give one side more room (remembered)"),
+
     # Asset browser (main window)
     Shortcut("main.preview", MAIN, "Space", "Preview the selected asset", "Space"),
     Shortcut("main.open", MAIN, "Double-click", "Open an asset in the viewer"),
@@ -59,7 +70,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("main.multi_select", MAIN, "Ctrl+Click / Shift+Click", "Select several files"),
     Shortcut("main.context_menu", MAIN, "Right-click", "File actions (preview, tag, open, copy path...)"),
     Shortcut("main.drag_out", MAIN, "Drag files out of the grid", "Copy them into Explorer, Blender, Photoshop, Unreal..."),
-    Shortcut("main.sidebar", MAIN, "Ctrl+B", "Show / hide the sidebar (or click the menu button)", "Ctrl+B"),
+    Shortcut("main.sidebar", MAIN, "Ctrl+B", "Show / hide the sidebar (or click the menu button). In Split View: the side you're working in", "Ctrl+B"),
     Shortcut("main.close_sidebar", MAIN, "Esc / click beside it", "Close the floating sidebar (unpinned with the pin button)", "Esc"),
     Shortcut("main.sidebar_resize", MAIN, "Drag the sidebar's right edge", "Make the sidebar wider or narrower"),
 
@@ -74,6 +85,45 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("search.details_media", SEARCH, "dur:<30s  poly:<10k", "Video length, 3D model faces"),
     Shortcut("search.remove_last_chip", SEARCH, "Backspace (empty box)", "Remove the last tag filter", "Backspace"),
     Shortcut("search.clear", SEARCH, "Esc", "Clear the search text and all tag filters", "Esc"),
+
+    # Artbook board (while it has the keyboard focus)
+    Shortcut("artbook.drop", ARTBOOK, "Drop / drag images in", "From Explorer, a web browser or the asset grid"),
+    Shortcut("artbook.paste", ARTBOOK, "Ctrl+V", "Paste an image, image files or an image link", "Ctrl+V"),
+    Shortcut("artbook.copy", ARTBOOK, "Ctrl+C", "Copy the selected image", "Ctrl+C"),
+    Shortcut("artbook.pan", ARTBOOK, "Middle-drag", "Pan around the board"),
+    Shortcut("artbook.pan_key", ARTBOOK, "Hold Space + drag", "Pan with the left button", "Space"),
+    Shortcut("artbook.zoom", ARTBOOK, "Mouse wheel", "Zoom toward the cursor"),
+    Shortcut("artbook.move", ARTBOOK, "Drag an image", "Move it (and everything selected with it)"),
+    Shortcut("artbook.select", ARTBOOK, "Click / drag a box", "Select images (click empty space to clear)"),
+    Shortcut("artbook.multi_select", ARTBOOK, "Shift+Click / Ctrl+Click", "Add an image to the selection, or take it out"),
+    Shortcut("artbook.scale", ARTBOOK, "Drag a corner handle", "Scale the selection (keeps its shape)"),
+    Shortcut("artbook.rotate", ARTBOOK, "Drag the round handle", "Rotate the image (Shift: 15° steps)"),
+    Shortcut("artbook.zoom_to", ARTBOOK, "Double-click an image", "Zoom to it"),
+    Shortcut("artbook.fit", ARTBOOK, "F", "Frame the selection, or everything", "F"),
+    Shortcut("artbook.zoom_100", ARTBOOK, "Ctrl+0", "Zoom to 100%", "Ctrl+0"),
+    Shortcut("artbook.flip_h", ARTBOOK, "H", "Flip the selection horizontally", "H"),
+    Shortcut("artbook.flip_v", ARTBOOK, "V", "Flip the selection vertically", "V"),
+    Shortcut("artbook.front", ARTBOOK, "]", "Bring the selection to the front", "]"),
+    Shortcut("artbook.back", ARTBOOK, "[", "Send the selection to the back", "["),
+    Shortcut("artbook.reset", ARTBOOK, "R", "Reset rotation, flips and size", "R"),
+    Shortcut("artbook.delete", ARTBOOK, "Delete", "Remove the selection from the page", "Del"),
+    Shortcut("artbook.select_all", ARTBOOK, "Ctrl+A", "Select everything", "Ctrl+A"),
+    Shortcut("artbook.deselect", ARTBOOK, "Esc", "Clear the selection", "Esc"),
+    Shortcut("artbook.undo", ARTBOOK, "Ctrl+Z", "Undo a change to the page", "Ctrl+Z"),
+    Shortcut("artbook.redo", ARTBOOK, "Ctrl+Y", "Redo it", "Ctrl+Y"),
+    Shortcut("artbook.context_menu", ARTBOOK, "Right-click", "Board actions (paste, flip, order, delete...)"),
+
+    # Artbook Pages sidebar
+    Shortcut("pages.sidebar", PAGES, "Ctrl+B", "Show / hide the Pages sidebar (while you're working in the Artbook)", "Ctrl+B"),
+    Shortcut("pages.close_sidebar", PAGES, "Esc / click beside it", "Close the floating Pages sidebar", "Esc"),
+    Shortcut("pages.open", PAGES, "Click a page", "Open it (the page you were on is saved first)"),
+    Shortcut("pages.rename", PAGES, "F2", "Rename the selected page or folder", "F2"),
+    Shortcut("pages.rename_mouse", PAGES, "Click the pencil (or double-click a page)", "Rename a page or folder: the pencil shows on the hovered or selected row"),
+    Shortcut("pages.toggle_folder", PAGES, "Click a folder", "Open or close it"),
+    Shortcut("pages.drag", PAGES, "Drag a page or folder", "Reorder it, or drop it on a folder to move it inside"),
+    Shortcut("pages.delete", PAGES, "Delete", "Send the selected page to the Recycle Bin (asks first)", "Del"),
+    Shortcut("pages.context_menu", PAGES, "Right-click", "New page / folder, rename, duplicate, move, delete"),
+    Shortcut("pages.sidebar_resize", PAGES, "Drag the sidebar's right edge", "Make the Pages sidebar wider or narrower"),
 
     # Asset viewer window
     Shortcut("viewer.fullscreen", VIEWER, "F11", "Toggle full screen", "F11"),

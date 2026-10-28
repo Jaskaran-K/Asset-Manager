@@ -2,7 +2,8 @@
 
 - RowHighlightDelegate: the rounded hover / selection highlight of tree rows. The stylesheet
   can't draw it: Qt also paints item backgrounds into the indentation left of the row,
-  which showed up as a stray square beside hovered and selected rows.
+  which showed up as a stray square beside hovered and selected rows. It also gives
+  rename-in-place editors the row's full height (the row's padding would clip their text).
 - Smooth wheel scrolling: each wheel notch glides to its target instead of jumping there.
   Touchpads already send smooth pixel deltas, so they're left alone.
 - Trees animate expanding and collapsing: sub-rows slide out instead of popping in.
@@ -15,12 +16,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, Qt
-from PySide6.QtGui import QPainter, QPainterPath, QPalette
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRect, QRectF, Qt
+from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
     QApplication,
+    QLineEdit,
     QPlainTextEdit,
     QScrollBar,
     QStyle,
@@ -42,10 +44,38 @@ MIN_NOTCH_PX = 100  # about three rows of text per wheel notch, like Windows' de
 # Row highlight
 # ----------------------------------------------------------------------
 class RowHighlightDelegate(QStyledItemDelegate):
-    """Rounded hover / selection pill behind a row (spanning all its columns)."""
+    """Rounded hover / selection pill behind a row (spanning all its columns).
+
+    An icon with a Selected-mode pixmap shows that on the pill (e.g. a light version of an
+    accent-colored icon, which would vanish on the accent pill)."""
 
     INSET = 4
     RADIUS = 5.0
+    _selected_row = False
+
+    def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
+        super().initStyleOption(option, index)
+        icon = option.icon
+        if self._selected_row and not icon.isNull() and icon.availableSizes(QIcon.Mode.Selected):
+            ratio = option.widget.devicePixelRatioF() if option.widget is not None else 1.0
+            option.icon = QIcon(icon.pixmap(option.decorationSize, ratio, QIcon.Mode.Selected))
+
+    def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index) -> QWidget:
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            editor.setObjectName("inlineEditor")  # slim: see the stylesheet
+        return editor
+
+    def updateEditorGeometry(self, editor: QWidget, option: QStyleOptionViewItem, index) -> None:
+        # From where the text starts to the end of the row, the row's full height
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = option.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        text = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        row = option.rect
+        left = max(row.left(), text.left() - 4)
+        editor.setGeometry(QRect(left, row.top() + 2, row.right() - self.INSET - left, row.height() - 4))
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         state = option.state
@@ -70,7 +100,11 @@ class RowHighlightDelegate(QStyledItemDelegate):
         if selected:
             for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText):
                 opt.palette.setColor(role, Qt.GlobalColor.white)
-        super().paint(painter, opt, index)
+        self._selected_row = selected  # initStyleOption (called by paint) can't see it: it's cleared above
+        try:
+            super().paint(painter, opt, index)
+        finally:
+            self._selected_row = False
 
 
 # ----------------------------------------------------------------------

@@ -227,6 +227,109 @@ def _pause(p, primary, secondary):
         _line(p, primary, 1.6, (x + 1.6, 7), (x + 1.6, 10))
 
 
+def _picture(p, primary, x, y, w, h):
+    """A tiny landscape picture (mountain and sun) in the primary color."""
+    _line(p, primary, 1.6, (x, y + h), (x + w * 0.38, y + h * 0.35), (x + w * 0.62, y + h * 0.7),
+          (x + w * 0.78, y + h * 0.5), (x + w, y + h))
+    p.fillPath(_circle(x + w * 0.8, y + h * 0.05, 1.3), primary)
+
+
+def _view_assets(p, primary, secondary):
+    _body(p, _rounded(2.5, 3.5, 19, 17, 3), secondary)
+    for x in (6, 13.5):
+        for y in (7, 13.5):
+            p.fillPath(_rounded(x, y, 4.5, 4, 1), primary)
+
+
+def _view_artbook(p, primary, secondary):
+    _body(p, _rounded(2.5, 3.5, 19, 17, 3), secondary)
+    _picture(p, primary, 5.5, 8.5, 13, 8.5)
+
+
+def _view_split(p, primary, secondary):
+    _body(p, _rounded(2, 4, 9.2, 16, 2.5), secondary)
+    _body(p, _rounded(12.8, 4, 9.2, 16, 2.5), secondary)
+    for y in (7.5, 12.5):
+        p.fillPath(_rounded(4.3, y, 4.6, 3.4, 0.8), primary)
+    _picture(p, primary, 14.2, 9.5, 6.4, 6.5)
+
+
+def _view_separate(p, primary, secondary):
+    back = _rounded(2, 3, 13, 11, 2.5)
+    _body(p, back, secondary)
+    front = _rounded(8.5, 9, 13.5, 12, 2.5)
+    _body(p, front, secondary)
+    _outline(p, front, primary, 1.4)
+    _line(p, primary, 1.6, (8.5, 12.3), (22, 12.3))  # the front window's title bar
+
+
+def _folder(p, primary, secondary):
+    _body(p, _polygon((3, 5.5), (9.5, 5.5), (11.5, 7.5), (21, 7.5), (21, 19), (3, 19)), secondary, round_corners=2.0)
+    _line(p, primary, 1.7, (3.5, 11), (20.5, 11))
+
+
+def _refresh(p, primary, secondary):
+    _body(p, _circle(12, 12, 9.5), secondary)
+    arc = QPainterPath()
+    arc.arcMoveTo(QRectF(6.5, 6.5, 11, 11), 60)
+    arc.arcTo(QRectF(6.5, 6.5, 11, 11), 60, 270)
+    _outline(p, arc, primary, 2.0)
+    p.fillPath(_polygon((14.2, 4.6), (18.6, 7.3), (13.9, 9.4)), primary)  # the arrowhead
+
+
+def _eye(p, primary, secondary):
+    almond = QPainterPath(QPointF(2, 12))
+    almond.quadTo(QPointF(12, 1.5), QPointF(22, 12))
+    almond.quadTo(QPointF(12, 22.5), QPointF(2, 12))
+    _body(p, almond, secondary)
+    p.fillPath(_circle(12, 12, 3.4), primary)
+
+
+def _tools(p, primary, secondary):
+    head = _circle(8, 8, 5.6)
+    handle = QTransform().translate(8, 8).rotate(-45).map(_rounded(-2, 0, 4, 15, 2))
+    notch = QTransform().translate(8, 8).rotate(-45).map(_rounded(-1.6, -7, 3.2, 5, 0.8))
+    _body(p, head.united(handle).subtracted(notch), secondary)
+    p.fillPath(_circle(16.8, 16.8, 1.4), primary)
+
+
+def _fit(p, primary, secondary):
+    _body(p, _rounded(7, 7, 10, 10, 2.2), secondary)
+    for (x, y), (dx, dy) in (((3.5, 3.5), (1, 1)), ((20.5, 3.5), (-1, 1)), ((20.5, 20.5), (-1, -1)), ((3.5, 20.5), (1, -1))):
+        _line(p, primary, 1.9, (x, y + 4.5 * dy), (x, y), (x + 4.5 * dx, y))  # the frame's corners
+
+
+def _page(p, primary, secondary):
+    _body(p, _polygon((5, 3), (14.5, 3), (19, 7.5), (19, 21), (5, 21)), secondary, round_corners=1.6)
+    p.fillPath(_polygon((14.5, 3), (19, 7.5), (14.5, 7.5)), primary)  # the folded corner
+    _line(p, primary, 1.7, (8.5, 12.5), (15.5, 12.5))
+    _line(p, primary, 1.7, (8.5, 16.5), (13, 16.5))
+
+
+def _new_page(p, primary, secondary):
+    _body(p, _polygon((3.5, 2.5), (12.5, 2.5), (16.5, 6.5), (16.5, 19.5), (3.5, 19.5)), secondary, round_corners=1.6)
+    p.fillPath(_polygon((12.5, 2.5), (16.5, 6.5), (12.5, 6.5)), primary)
+    p.fillPath(_circle(17.5, 17.5, 5), primary)
+    _line(p, secondary, 1.8, (17.5, 15), (17.5, 20))  # the plus, cut out of the badge
+    _line(p, secondary, 1.8, (15, 17.5), (20, 17.5))
+
+
+def _new_folder(p, primary, secondary):
+    _body(p, _polygon((2.5, 4.5), (8.5, 4.5), (10.5, 6.5), (19, 6.5), (19, 17), (2.5, 17)), secondary, round_corners=2.0)
+    _line(p, primary, 1.7, (3, 9.5), (13, 9.5))
+    p.fillPath(_circle(17.5, 17.5, 5), primary)
+    _line(p, secondary, 1.8, (17.5, 15), (17.5, 20))
+    _line(p, secondary, 1.8, (15, 17.5), (20, 17.5))
+
+
+def _edit(p, primary, secondary):
+    turn = QTransform().translate(13, 11).rotate(45)  # a pencil leaning to the right
+    _body(p, turn.map(_rounded(-3.2, -10, 6.4, 14.5, 1.6)), secondary)
+    p.fillPath(turn.map(_polygon((-3.2, 5.3), (3.2, 5.3), (0, 10.5))), primary)  # the tip
+    ends = [turn.map(QPointF(x, -5.5)) for x in (-3.2, 3.2)]
+    _line(p, primary, 1.8, *((e.x(), e.y()) for e in ends))  # the band near the top
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -243,6 +346,19 @@ ICONS: dict[str, IconPainter] = {
     "grid": _grid,
     "play": _play,
     "pause": _pause,
+    "view_assets": _view_assets,
+    "view_artbook": _view_artbook,
+    "view_split": _view_split,
+    "view_separate": _view_separate,
+    "folder": _folder,
+    "refresh": _refresh,
+    "eye": _eye,
+    "tools": _tools,
+    "fit": _fit,
+    "page": _page,
+    "new_page": _new_page,
+    "new_folder": _new_folder,
+    "edit": _edit,
 }
 
 

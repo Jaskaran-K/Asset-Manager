@@ -220,6 +220,8 @@ QLineEdit, QComboBox {
     color: $text;
 }
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border: 1px solid $accent_border; }
+/* Renaming in a list (ui.views.RowHighlightDelegate): as tall as the row, so no padding to clip the text */
+QLineEdit#inlineEditor { padding: 0px 6px; border-radius: 5px; border: 1px solid $accent_border; }
 QComboBox QAbstractItemView {
     background-color: $input_bg;
     color: $text;
@@ -240,6 +242,9 @@ QPlainTextEdit[invalid="true"] { border: 1px solid $danger; }
 QMenu { background-color: $surface; border: 1px solid $border; padding: 4px; }
 QMenu::item { padding: 6px 18px; border-radius: 4px; }
 QMenu::item:selected { background-color: $accent; color: #ffffff; }
+/* Actions that can't be done right now: greyed out, and no highlight when hovered */
+QMenu::item:disabled { color: $text_faint; }
+QMenu::item:disabled:selected { background-color: transparent; color: $text_faint; }
 QMenu::separator { height: 1px; background: $border; margin: 4px 6px; }
 
 QSplitter::handle { background-color: $border; }
@@ -292,8 +297,17 @@ QListWidget::item:selected { background-color: $accent; color: #ffffff; }
 #sidebarPin { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; }
 #sidebarPin:hover { background: $hover; }
 #sidebarPin:checked { background: $accent_soft; border-color: $accent; }
+#sidebarAction { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; }
+#sidebarAction:hover { background: $hover; }
+#sidebarAction:pressed { background: $accent_soft; }
+/* The Pages list draws a rename pencil at the right of the hovered / selected row: keep text clear of it */
+#sidebarTree[pencil="true"]::item { padding: 6px 30px 6px 8px; }
 
 #emptyState { color: $text_faint; font-size: 14px; padding: 40px; }
+#artbookBoard { background: $grid_bg; }
+#panelTitle { color: $text_strong; font-size: 14px; font-weight: bold; }
+#boardHint { color: $text_faint; font-size: 14px; background: transparent; }
+#boardToast { color: $text_strong; background-color: $surface; border: 1px solid $border; border-radius: 8px; padding: 6px 12px; }
 #welcomePanel { background: $grid_bg; }
 #welcomeTitle { color: $text_strong; font-size: 22px; font-weight: bold; }
 #welcomeText { color: $text_muted; font-size: 14px; }
@@ -373,7 +387,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 # the main window itself gets none, or it would show through see-through grids (Dark Purple)
 # as a second, offset copy; dialogs' own grids (the Appearance preview) get none for the same reason.
 TEXTURE_QSS_TEMPLATE = Template("""
-QDialog, QMainWindow #assetGrid, #welcomePanel, #emptyState {
+QDialog, QMainWindow #assetGrid, #welcomePanel, #emptyState, #artbookBoard {
     background-image: url("$tile"); background-repeat: repeat-xy;
 }
 QMainWindow #assetGrid { background-attachment: fixed; }

@@ -29,6 +29,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QThread,
+    QTimer,
     QUrl,
     Signal,
 )
@@ -62,6 +63,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QStatusBar,
     QToolButton,
     QTreeWidget,
@@ -95,6 +97,7 @@ from core.updater import cleanup_after_update
 from core.video_tools import apply_media_backend
 from core.version import APP_NAME, APP_VERSION
 from ui.animations import install_popup_animations, set_motion_mode
+from ui.artbook import ArtbookPanel
 from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, rating_text
 from ui.duotone import set_icon
 from ui.duplicates_dialog import DuplicatesDialog
@@ -105,7 +108,9 @@ from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SidebarHost
 from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, wait_for_background
 from ui.themes import apply_theme
+from ui.toolbar import CompactToolbar
 from ui.undo import UndoHistory, UndoStep
+from ui.view_modes import ViewModes, ViewSwitchButton
 from ui.viewer import AssetViewerDialog, ViewerTarget
 from ui.views import install_view_effects
 
@@ -229,21 +234,95 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. Top Control Bar
-        control_bar = self._build_control_bar()
-        main_layout.addWidget(control_bar)
-
-        # 2. Thumbnail grid with the slide-out sidebar beside (or over) it
+        # 1. The asset panel: its toolbar, then the grid with the slide-out sidebar beside (or over) it
+        self.asset_panel = QWidget()
+        asset_layout = QVBoxLayout(self.asset_panel)
+        asset_layout.setContentsMargins(0, 0, 0, 0)
+        asset_layout.setSpacing(0)
+        asset_layout.addWidget(self._build_control_bar())
         sidebar_tree = self._build_sidebar()
         self.grid_container = self._build_grid_view()
         self.sidebar = SidebarHost(sidebar_tree, self.grid_container)
         self.sidebar.watch(self.list_grid.viewport())
         self.sidebar.open_changed.connect(self.btn_sidebar.setChecked)
         self.btn_sidebar.setChecked(self.sidebar.is_open())
-        main_layout.addWidget(self.sidebar, 1)
+        asset_layout.addWidget(self.sidebar, 1)
+        # Ctrl+B while working in the asset side (the Artbook has its own, for its Pages sidebar)
+        toggle_sidebar = QAction(self.asset_panel)
+        toggle_sidebar.setShortcut(shortcuts.sequence("main.sidebar"))
+        toggle_sidebar.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        toggle_sidebar.triggered.connect(self.sidebar.toggle)
+        self.asset_panel.addAction(toggle_sidebar)
+
+        # 2. The Artbook panel, and the views that show either or both (ui.view_modes)
+        self.artbook_panel = ArtbookPanel()
+        self.view_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.view_splitter.setChildrenCollapsible(False)
+        self.view_splitter.setHandleWidth(3)
+        self.view_splitter.addWidget(self.asset_panel)
+        self.view_splitter.addWidget(self.artbook_panel)
+        main_layout.addWidget(self.view_splitter, 1)
+        self.view_modes = ViewModes(
+            self, self.view_splitter, self.asset_panel, self.artbook_panel,
+            self.asset_toolbar_slot, self.artbook_panel.toolbar_slot, self._build_window_controls,
+        )
+        self._view_restored = False
+        # Narrow asset side (Split View): icon-only buttons and a narrower search box
+        self.asset_toolbar = CompactToolbar(
+            self.asset_panel, self.control_bar,
+            [
+                (self.btn_open_folder, "Open Folder"), (self.btn_library, "Library"), (self.btn_refresh, "Refresh"),
+                (self.btn_view_asset, "Preview"), (self.btn_tag, "Tag"), (self.btn_tools, "Tools"),
+            ],
+            on_change=self._on_toolbar_compact,
+        )
+        self.asset_panel.installEventFilter(self)  # its resizes: see eventFilter
+        # The shared View / Settings buttons moving in or out changes what the toolbar needs
+        self.view_modes.mode_changed.connect(self._on_view_mode_changed)
 
         # 3. Status Bar
         self._build_status_bar()
+
+    def _on_view_mode_changed(self, mode: str) -> None:
+        self.asset_toolbar.update()
+        self.artbook_panel.toolbar.update()
+        # Keys like Ctrl+B act on the side with the keyboard focus: keep it on a side you can see
+        focus = QApplication.focusWidget()
+        if mode == "artbook" and not (focus and self.artbook_panel.isAncestorOf(focus)):
+            self.artbook_panel.board.setFocus()
+        elif mode in ("asset", "separate") and not (focus and self.asset_panel.isAncestorOf(focus)):
+            # The grid, or (an empty library shows the welcome screen instead) the first thing that takes focus
+            candidates = [self.list_grid, *self.asset_panel.findChildren(QWidget)]
+            target = next(
+                (w for w in candidates if w.isVisible() and w.isEnabled() and w.focusPolicy() & Qt.FocusPolicy.TabFocus),
+                None,
+            )
+            if target is not None:
+                target.setFocus()
+
+    def _build_window_controls(self, modes: ViewModes) -> QWidget:
+        """The View and Settings buttons, at the top right of whichever toolbar is rightmost."""
+        controls = QWidget()
+        layout = QHBoxLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.btn_view = ViewSwitchButton(modes)
+        layout.addWidget(self.btn_view)
+        self.btn_settings = QPushButton("Settings")
+        set_icon(self.btn_settings, "settings")
+        self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_settings.setToolTip("Settings (Ctrl+,)")
+        self.btn_settings.setShortcut(shortcuts.sequence("main.settings"))
+        self.btn_settings.clicked.connect(self._open_settings)
+        layout.addWidget(self.btn_settings)
+        return controls
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._view_restored:
+            # Once the window has its size, so a split gets its proportions right
+            self._view_restored = True
+            QTimer.singleShot(0, self.view_modes.restore)
 
     def _build_control_bar(self) -> QWidget:
         """Build top toolbar with folder picker, library toggle, refresh, preview, search, and settings."""
@@ -252,6 +331,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(10)
+        self.control_bar = bar
 
         # Shows / hides the sidebar
         self.btn_sidebar = QPushButton()
@@ -259,12 +339,12 @@ class MainWindow(QMainWindow):
         self.btn_sidebar.setCheckable(True)
         self.btn_sidebar.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_sidebar.setToolTip("Show / hide the sidebar (Ctrl+B)")
-        self.btn_sidebar.setShortcut(shortcuts.sequence("main.sidebar"))
         self.btn_sidebar.clicked.connect(lambda: self.sidebar.toggle())
         layout.addWidget(self.btn_sidebar)
 
         # "Open Folder" button: browse a single folder outside the library
         self.btn_open_folder = QPushButton("Open Folder")
+        set_icon(self.btn_open_folder, "folder", "light")
         self.btn_open_folder.setObjectName("primaryBtn")
         self.btn_open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_open_folder.setToolTip("Browse a single folder without adding it to the library")
@@ -295,6 +375,7 @@ class MainWindow(QMainWindow):
 
         # "Refresh" button
         self.btn_refresh = QPushButton("Refresh")
+        set_icon(self.btn_refresh, "refresh")
         self.btn_refresh.setToolTip("Scan the folders again (changes are also picked up automatically while the app is open)")
         self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_refresh.clicked.connect(self._rescan_current_folder)
@@ -302,6 +383,7 @@ class MainWindow(QMainWindow):
 
         # "Preview" button
         self.btn_view_asset = QPushButton("Preview")
+        set_icon(self.btn_view_asset, "eye", "light")
         self.btn_view_asset.setObjectName("viewBtn")
         self.btn_view_asset.setEnabled(False)
         self.btn_view_asset.setToolTip("Open lightweight viewer for selected asset (or press Space)")
@@ -339,19 +421,16 @@ class MainWindow(QMainWindow):
 
         # Tools: library maintenance
         self.btn_tools = QPushButton("Tools")
+        set_icon(self.btn_tools, "tools")
         self.btn_tools.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_tools.setToolTip("Find duplicates; back up, restore, export or import your tags")
         self.btn_tools.setMenu(self._build_tools_menu())
         layout.addWidget(self.btn_tools)
 
-        # Settings
-        self.btn_settings = QPushButton("Settings")
-        set_icon(self.btn_settings, "settings")
-        self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_settings.setToolTip("Settings (Ctrl+,)")
-        self.btn_settings.setShortcut(shortcuts.sequence("main.settings"))
-        self.btn_settings.clicked.connect(self._open_settings)
-        layout.addWidget(self.btn_settings)
+        # The window's View / Settings buttons sit here unless the Artbook is on the right
+        self.asset_toolbar_slot = QHBoxLayout()
+        self.asset_toolbar_slot.setSpacing(10)
+        layout.addLayout(self.asset_toolbar_slot)
 
         return bar
 
@@ -1349,7 +1428,14 @@ class MainWindow(QMainWindow):
         ("main.rate_3", 3), ("main.rate_4", 4), ("main.rate_5", 5),
     )
 
+    SEARCH_WIDTH = (280, 150)  # normal, compact toolbar
+
+    def _on_toolbar_compact(self, compact: bool) -> None:
+        self.search_bar.setMinimumWidth(self.SEARCH_WIDTH[compact])
+
     def eventFilter(self, obj, event) -> bool:
+        if obj is self.asset_panel and event.type() == event.Type.Resize:
+            self.asset_toolbar.update()
         if obj is self.list_grid and event.type() == event.Type.KeyPress:
             if shortcuts.matches("main.favorite", event):
                 self._toggle_favorite()
@@ -1571,9 +1657,11 @@ class MainWindow(QMainWindow):
             self.scan_thread.wait(1000)
         # Stop background work before Qt is torn down: a job still running then crashes the process
         self._meta_generation += 1  # ends the file-details reading chain
+        self.view_modes.shutdown()  # the separate Artbook window closes with the app
         self.watcher.clear()
         self.thumbnail_manager.shutdown()
         wait_for_background()
+        self.artbook_panel.save_now()  # after background jobs, so an older autosave can't land on top
         super().closeEvent(event)
 
 

@@ -1,17 +1,17 @@
 """Slide-out sidebar with a frosted-glass background.
 
-SidebarHost is the main window's content area: the sidebar panel on the left and the
-content (the asset grid) beside it. The sidebar is either docked beside the content
+SidebarHost is a content area with a sidebar panel on its left: the library's categories
+beside the asset grid, and the Artbook's Pages list beside the board. The sidebar is either docked beside the content
 (pinned) or floats over it and closes again after you pick something (unpinned). Opening
 and closing slide it in from the left; its right edge can be dragged to resize it.
 
 The panel is frosted glass (ui.glass) over what's behind it: the window background when
-docked, the asset grid when floating over it.
+docked, the content (grid / board) when floating over it.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Property, Signal
 from PySide6.QtGui import QAction, QColor, QImage, QLinearGradient, QPainter, QRegion
@@ -94,10 +94,25 @@ class SidebarHost(QWidget):
 
     open_changed = Signal(bool)
 
-    def __init__(self, body: QWidget, content: QWidget, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        body: QWidget,
+        content: QWidget,
+        parent: Optional[QWidget] = None,
+        *,
+        title: str = "CATEGORIES",
+        settings_key: str = "sidebar",
+        header_widgets: Sequence[QWidget] = (),
+        close_shortcut: str = "main.close_sidebar",
+        content_name: str = "the grid",
+        picking: str = "pick a category",
+        toggle_hint: str = "the menu button or Ctrl+B",
+    ):
         super().__init__(parent)
         self.setObjectName("sidebarHost")
-        state = get_sidebar_state()
+        self._settings_key = settings_key
+        self._content_name, self._picking, self._toggle_hint = content_name, picking, toggle_hint
+        state = get_sidebar_state(settings_key)
         self._width: int = state["width"]
         self._pinned: bool = state["pinned"]
         self._open: bool = state["open"] and self._pinned  # a floating one would cover the grid at startup
@@ -116,10 +131,12 @@ class SidebarHost(QWidget):
         panel_layout.setSpacing(0)
         header = QHBoxLayout()
         header.setContentsMargins(14, 2, 8, 2)
-        title = QLabel("CATEGORIES")
-        title.setObjectName("sidebarTitle")
-        header.addWidget(title)
+        title_label = QLabel(title)
+        title_label.setObjectName("sidebarTitle")
+        header.addWidget(title_label)
         header.addStretch(1)
+        for widget in header_widgets:
+            header.addWidget(widget)
         self.btn_pin = QPushButton()
         set_icon(self.btn_pin, "pin", size=16)
         self.btn_pin.setObjectName("sidebarPin")
@@ -133,7 +150,7 @@ class SidebarHost(QWidget):
 
         # Esc closes the floating sidebar while it has the keyboard focus
         close_action = QAction(self.panel)
-        close_action.setShortcut(shortcuts.sequence("main.close_sidebar"))
+        close_action.setShortcut(shortcuts.sequence(close_shortcut))
         close_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         close_action.triggered.connect(self._on_escape)
         self.panel.addAction(close_action)
@@ -174,7 +191,7 @@ class SidebarHost(QWidget):
         if open_ == self._open:
             return
         self._open = open_
-        set_sidebar_state(open=open_)
+        set_sidebar_state(self._settings_key, open=open_)
         if open_:
             self.panel.show()
             self.refresh_backdrop()
@@ -202,7 +219,7 @@ class SidebarHost(QWidget):
         if pinned == self._pinned:
             return
         self._pinned = pinned
-        set_sidebar_state(pinned=pinned)
+        set_sidebar_state(self._settings_key, pinned=pinned)
         self._update_pin_button()
         self._watch_clicks(self._open and self.is_floating())
         self._layout()
@@ -213,7 +230,7 @@ class SidebarHost(QWidget):
         self._width = max(lo, min(hi, int(width)))
         self._layout()
         if save:
-            set_sidebar_state(width=self._width)
+            set_sidebar_state(self._settings_key, width=self._width)
             self.refresh_backdrop()
 
     def _on_pin_clicked(self, checked: bool) -> None:
@@ -227,10 +244,10 @@ class SidebarHost(QWidget):
     def _update_pin_button(self) -> None:
         self.btn_pin.setChecked(self._pinned)
         self.btn_pin.setToolTip(
-            "Docked beside the grid. Click to float it over the grid instead: it then slides away "
-            "after you pick a category (the menu button or Ctrl+B brings it back)"
+            f"Docked beside {self._content_name}. Click to float it over {self._content_name} instead: it then "
+            f"slides away after you {self._picking} ({self._toggle_hint} brings it back)"
             if self._pinned else
-            "Floating over the grid. Click to dock it beside the grid instead"
+            f"Floating over {self._content_name}. Click to dock it beside {self._content_name} instead"
         )
 
     # ------------------ sliding ------------------
@@ -312,7 +329,8 @@ class SidebarHost(QWidget):
             self._grabbing = True
             try:
                 # Children only: the content itself is see-through over the window background
-                self.content.render(painter, QPoint(0, 0), QRegion(size), QWidget.RenderFlag.DrawChildren)
+                # (QWidget's render: a QGraphicsView content, the Artbook board, has its own render())
+                QWidget.render(self.content, painter, QPoint(0, 0), QRegion(size), QWidget.RenderFlag.DrawChildren)
             finally:
                 self._grabbing = False
         painter.end()

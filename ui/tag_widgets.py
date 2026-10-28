@@ -138,7 +138,7 @@ class _CallbackRelay(QObject):
     or on the worker thread) crashes the process when several searches overlap.
     """
 
-    def __init__(self, task: "_DbTask", on_done: Callable[[Any], None], on_failed: Optional[Callable[[str], None]]):
+    def __init__(self, task: "_DbTask | _Job", on_done: Callable[[Any], None], on_failed: Optional[Callable[[str], None]]):
         super().__init__(QCoreApplication.instance())
         self._task = task
         self._on_done, self._on_failed = on_done, on_failed
@@ -178,17 +178,51 @@ class _DbTask(QRunnable):
             self.repo.close_thread_connection()  # never leave a connection on a pool thread
 
 
+class _Job(QRunnable):
+    """A plain background job (no database): see run_job."""
+
+    def __init__(self, fn: Callable[[], Any]):
+        super().__init__()
+        self.setAutoDelete(False)  # owned by its relay, as for _DbTask
+        self.fn = fn
+        self.signals = _TaskSignals()
+
+    def run(self) -> None:
+        try:
+            self.signals.done.emit(self.fn())
+        except Exception as exc:  # pylint: disable=broad-except
+            self.signals.failed.emit(str(exc))
+
+
 _db_pool: Optional[QThreadPool] = None
 
 
 _slow_pool: Optional[QThreadPool] = None
 
 
+_job_pool: Optional[QThreadPool] = None
+
+
+def run_job(
+    fn: Callable[[], Any],
+    on_done: Callable[[Any], None],
+    on_failed: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Run fn() on a worker thread (image decoding, file writes); callbacks run on the UI thread."""
+    global _job_pool
+    if _job_pool is None:
+        _job_pool = QThreadPool()
+        _job_pool.setMaxThreadCount(max(2, min(4, QThreadPool.globalInstance().maxThreadCount() - 1)))
+    job = _Job(fn)
+    _CallbackRelay(job, on_done, on_failed)
+    _job_pool.start(job)
+
+
 def wait_for_background(timeout_ms: int = 5000) -> bool:
     """Drop queued background jobs and wait for running ones (call before the app quits:
     Qt objects being torn down under a running job crash the process). True if all finished."""
     finished = True
-    for pool in (_db_pool, _slow_pool):
+    for pool in (_db_pool, _slow_pool, _job_pool):
         if pool is not None:
             pool.clear()
             finished = pool.waitForDone(timeout_ms) and finished

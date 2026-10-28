@@ -160,3 +160,25 @@ def test_hovered_row_is_highlighted(qapp):
     hovered = image.pixelColor(x, rect.center().y())
     plain = image.pixelColor(x, tree.visualItemRect(first).center().y())
     assert hovered != plain
+
+
+def test_rename_editor_gets_the_rows_full_height(qapp):
+    # The row's padding used to squeeze the editor until its text was cut off (Settings > Categories too)
+    from PySide6.QtWidgets import QLineEdit
+
+    tree = QTreeWidget()
+    tree.setHeaderHidden(True)
+    item = QTreeWidgetItem(tree, ["glTF"])
+    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+    tree.resize(300, 200)
+    tree.show()
+    qapp.processEvents()
+    tree.editItem(item, 0)
+    qapp.processEvents()
+    editor = tree.viewport().findChild(QLineEdit)
+    row = tree.visualItemRect(item)
+    assert editor.objectName() == "inlineEditor"
+    assert editor.height() == row.height() - 4
+    assert editor.height() >= editor.fontMetrics().height() + 4  # the text fits
+    assert editor.geometry().right() >= row.right() - 2 * RowHighlightDelegate.INSET
+    tree.close()

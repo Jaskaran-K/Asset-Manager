@@ -13,8 +13,12 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - video_positions:  where recently watched videos were left, to resume there
 - motion:           "auto" (follow Windows), "on" or "off" for UI animations
 - background_texture: pattern behind windows and the grid (see ui.backgrounds)
-- sidebar:          {"open", "pinned", "width"} of the slide-out sidebar
+- sidebar:          {"open", "pinned", "width"} of the library's slide-out sidebar
+- artbook_sidebar:  the same for the Artbook's Pages sidebar
 - glass_frost:      0-100, how frosted glass panels (the sidebar) are
+- artbook_page:     id of the Artbook page last open (pages themselves: core.artbook_store)
+- view:             {"mode", "split", "window"}: Asset / Artbook / Split / Separate view, the split
+                    ratio, and the separate Artbook window's geometry
 """
 
 from __future__ import annotations
@@ -354,13 +358,49 @@ def set_glass_frost(percent: int) -> None:
     _update_config("glass_frost", max(0, min(100, int(percent))))
 
 
+def get_artbook_page() -> str:
+    page = _load_raw_config().get("artbook_page")
+    return page if isinstance(page, str) else ""
+
+
+def set_artbook_page(page_id: str) -> None:
+    _update_config("artbook_page", page_id)
+
+
+VIEW_MODES = ("asset", "artbook", "split", "separate")
+
+
+def get_view_state() -> dict[str, Any]:
+    """{"mode": one of VIEW_MODES, "split": asset share of a split (0.2-0.8), "window": geometry (base64)}."""
+    raw = _load_raw_config().get("view")
+    raw = raw if isinstance(raw, dict) else {}
+    split = raw.get("split")
+    return {
+        "mode": raw.get("mode") if raw.get("mode") in VIEW_MODES else "asset",
+        "split": min(0.8, max(0.2, float(split))) if isinstance(split, (int, float)) and not isinstance(split, bool) else 0.5,
+        "window": raw.get("window") if isinstance(raw.get("window"), str) else "",
+    }
+
+
+def set_view_state(**changes: Any) -> None:
+    """Update some of mode / split / window."""
+    state = get_view_state()
+    state.update({k: v for k, v in changes.items() if k in state})
+    if state["mode"] not in VIEW_MODES:
+        state["mode"] = "asset"
+    state["split"] = round(min(0.8, max(0.2, float(state["split"]))), 3)
+    _update_config("view", state)
+
+
 SIDEBAR_WIDTH_RANGE = (180, 480)
 DEFAULT_SIDEBAR_WIDTH = 240
 
 
-def get_sidebar_state() -> dict[str, Any]:
-    """{"open": bool, "pinned": bool, "width": int}: pinned docks it beside the grid, else it floats over it."""
-    raw = _load_raw_config().get("sidebar")
+def get_sidebar_state(key: str = "sidebar") -> dict[str, Any]:
+    """{"open": bool, "pinned": bool, "width": int}: pinned docks it beside the grid, else it floats over it.
+
+    key: "sidebar" (the library's) or "artbook_sidebar" (the Pages list)."""
+    raw = _load_raw_config().get(key)
     raw = raw if isinstance(raw, dict) else {}
     width = raw.get("width")
     lo, hi = SIDEBAR_WIDTH_RANGE
@@ -371,14 +411,14 @@ def get_sidebar_state() -> dict[str, Any]:
     }
 
 
-def set_sidebar_state(**changes: Any) -> None:
+def set_sidebar_state(key: str = "sidebar", **changes: Any) -> None:
     """Update some of open / pinned / width."""
-    state = get_sidebar_state()
+    state = get_sidebar_state(key)
     state.update({k: v for k, v in changes.items() if k in state})
     lo, hi = SIDEBAR_WIDTH_RANGE
     state["width"] = max(lo, min(hi, int(state["width"])))
     state["open"], state["pinned"] = bool(state["open"]), bool(state["pinned"])
-    _update_config("sidebar", state)
+    _update_config(key, state)
 
 
 def get_thumbnail_size() -> int:

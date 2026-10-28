@@ -37,6 +37,33 @@ and are never touched by installing, updating or uninstalling.
   hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
   their colors from the theme. Lists scroll smoothly, and categories slide open.
 
+## The Artbook
+
+The Artbook holds reference boards, called **Pages**: endless canvases you fill with images from the library,
+Explorer, a web browser or the clipboard.
+
+- **Views:** the **View** button (top right) switches between Asset View and Artbook View. Its arrow, or
+  **Ctrl+1** to **Ctrl+4**, also offers Split View (both side by side; drag the divider) and Separate View (the
+  Artbook in its own window). The app reopens in the view you left it in.
+- **Getting images in:** drop files or images from a browser (Google Images results too), drag them in from
+  the asset grid, or paste with **Ctrl+V** (image data, files or an image link).
+- **On the board:** drag to move, drag a corner to scale, the round handle to rotate (Shift snaps to 15°).
+  **H** / **V** flip, **]** / **[** bring to front / send to back, **R** resets, **Delete** removes, **Ctrl+Z** /
+  **Ctrl+Y** undo and redo. The wheel zooms toward the cursor, middle-drag (or Space+drag) pans, **F** frames
+  everything, double-click zooms to an image. Right-click for the rest.
+- **Pages sidebar:** the menu button at the top left of the Artbook (or **Ctrl+B** while you're working in it)
+  slides out your pages, each with a small picture of its board. Organize them in folders, which can hold folders.
+  - Click a page to open it. The page you were on is saved first.
+  - The buttons at the top make a new page or folder in the selected folder. The pencil on the hovered or selected row (or **F2**) renames.
+  - Drag pages and folders to reorder them, or drop one on a folder to move it inside.
+  - Right-click to duplicate, move or delete. Deleted pages go to the Recycle Bin. Deleting a folder keeps
+    its pages: they move up a level.
+  - The search box filters pages by name, or by folder name.
+  - Like the library's sidebar, it can be pinned beside the board or float over it on frosted glass.
+- **Saving:** pages save themselves a couple of seconds after each change, and when you switch page or quit.
+  They're stored in `%LOCALAPPDATA%\AssetManager\artbook`, one folder per page. Library images are *linked*
+  (the page keeps a small copy in case the file moves); pasted and web images are stored in the page.
+
 ## Video playback
 
 Videos (`.mp4, .mov, .mkv, .avi, .webm, .m4v`) play inside the asset viewer using Qt Multimedia.

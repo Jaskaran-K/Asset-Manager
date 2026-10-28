@@ -40,9 +40,18 @@ jobs:
           pip install -r requirements-dev.txt pyinstaller
 
       - name: Run tests
+        shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+        run: |
+          python -m pytest -q 2>&1 | Tee-Object -FilePath pytest.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Job logs need a login to read; annotations are public, so the failure shows there too
+            $tail = (Get-Content pytest.log -Tail 40 | ForEach-Object { $_ -replace '%', '%25' }) -join '%0A'
+            Write-Output "::error title=Tests failed (exit code $code)::$tail"
+            exit $code
+          }
 
       - name: Build with PyInstaller (portable exe + folder build)
         run: pyinstaller AssetManager.spec --noconfirm

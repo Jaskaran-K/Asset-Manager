@@ -307,6 +307,16 @@ QListWidget::item:selected { background-color: $accent; color: #ffffff; }
 #artbookBoard { background: $grid_bg; }
 #panelTitle { color: $text_strong; font-size: 14px; font-weight: bold; }
 #boardHint { color: $text_faint; font-size: 14px; background: transparent; }
+#noteBar { background-color: $surface; border: 1px solid $border; border-radius: 8px; }
+#noteBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px; color: $text; }
+#noteBar QToolButton:hover { background: $hover; }
+#noteBar QToolButton:checked { background: $accent_soft; border-color: $accent; }
+#noteBar QComboBox { padding: 2px 6px; }
+#noteBarDivider { background: $border; }
+#colorPopupTitle { color: $text_strong; font-size: 13px; }
+#colorPopup QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px; color: $text; }
+#colorPopup QToolButton:hover { background: $hover; }
+#colorPopup QComboBox, #colorPopup QLineEdit { padding: 3px 6px; }
 #boardToast { color: $text_strong; background-color: $surface; border: 1px solid $border; border-radius: 8px; padding: 6px 12px; }
 #welcomePanel { background: $grid_bg; }
 #welcomeTitle { color: $text_strong; font-size: 22px; font-weight: bold; }

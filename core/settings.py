@@ -19,6 +19,9 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - artbook_page:     id of the Artbook page last open (pages themselves: core.artbook_store)
 - view:             {"mode", "split", "window"}: Asset / Artbook / Split / Separate view, the split
                     ratio, and the separate Artbook window's geometry
+- artbook_window:   {"on_top", "opacity", "click_through_tip"} of the separate Artbook window
+                    (click-through itself is never remembered: the window would start out ignoring
+                    the mouse; click_through_tip: show the heads-up when turning it on)
 """
 
 from __future__ import annotations
@@ -367,6 +370,26 @@ def set_artbook_page(page_id: str) -> None:
     _update_config("artbook_page", page_id)
 
 
+def get_last_import_dir() -> str:
+    """Where boards were last imported from (for the file picker), or ""."""
+    folder = _load_raw_config().get("artbook_import_dir")
+    return folder if isinstance(folder, str) else ""
+
+
+def set_last_import_dir(folder: str) -> None:
+    _update_config("artbook_import_dir", folder)
+
+
+def get_last_export_dir() -> str:
+    """Where pages and pictures were last exported to, or ""."""
+    folder = _load_raw_config().get("artbook_export_dir")
+    return folder if isinstance(folder, str) else ""
+
+
+def set_last_export_dir(folder: str) -> None:
+    _update_config("artbook_export_dir", folder)
+
+
 VIEW_MODES = ("asset", "artbook", "split", "separate")
 
 
@@ -390,6 +413,32 @@ def set_view_state(**changes: Any) -> None:
         state["mode"] = "asset"
     state["split"] = round(min(0.8, max(0.2, float(state["split"]))), 3)
     _update_config("view", state)
+
+
+ARTBOOK_OPACITY_RANGE = (20, 100)  # percent: below 20 the window is too faint to find again
+
+
+def get_artbook_window_state() -> dict[str, Any]:
+    """{"on_top": bool, "opacity": int percent, "click_through_tip": bool} of the separate Artbook window."""
+    raw = _load_raw_config().get("artbook_window")
+    raw = raw if isinstance(raw, dict) else {}
+    opacity = raw.get("opacity")
+    lo, hi = ARTBOOK_OPACITY_RANGE
+    return {
+        "on_top": raw.get("on_top") if isinstance(raw.get("on_top"), bool) else False,
+        "opacity": max(lo, min(hi, opacity)) if isinstance(opacity, int) and not isinstance(opacity, bool) else hi,
+        "click_through_tip": raw.get("click_through_tip") if isinstance(raw.get("click_through_tip"), bool) else True,
+    }
+
+
+def set_artbook_window_state(**changes: Any) -> None:
+    """Update on_top, opacity and / or click_through_tip."""
+    state = get_artbook_window_state()
+    state.update({k: v for k, v in changes.items() if k in state})
+    lo, hi = ARTBOOK_OPACITY_RANGE
+    state["on_top"], state["click_through_tip"] = bool(state["on_top"]), bool(state["click_through_tip"])
+    state["opacity"] = max(lo, min(hi, int(state["opacity"])))
+    _update_config("artbook_window", state)
 
 
 SIDEBAR_WIDTH_RANGE = (180, 480)

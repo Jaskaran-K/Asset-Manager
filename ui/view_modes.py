@@ -5,11 +5,13 @@ The asset browser always stays in the main window; only the Artbook panel moves:
 - Asset View:    the asset panel only
 - Artbook View:  the Artbook panel only
 - Split View:    both, side by side in a splitter (assets left); the divider is remembered
-- Separate View: assets in the main window, the Artbook in its own window. Closing that
-                 window goes back to Asset View; quitting the app closes both.
+- Separate View: assets in the main window, the Artbook in its own window (ui.artbook_window:
+                 always on top, opacity, click-through). Closing that window goes back to
+                 Asset View; quitting the app closes both.
 
 The window's shared controls (the View button and Settings) sit at the right end of the
-rightmost toolbar in the main window. The separate Artbook window gets its own View button.
+rightmost toolbar in the main window. The separate Artbook window gets its own View button,
+and a Window button for its options.
 The mode is saved, so the app reopens in it.
 """
 
@@ -24,8 +26,8 @@ from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QSplitter, QToolB
 
 from core.settings import VIEW_MODES, get_view_state, set_view_state
 from ui import shortcuts
+from ui.artbook_window import CLICK_THROUGH_SHORTCUT, ArtbookWindow, GlobalHotkey, WindowMenu, WindowOptionsButton
 from ui.duotone import set_icon
-from ui.icons import app_icon
 
 # mode: (menu label, icon, shortcut id)
 MODES: dict[str, tuple[str, str, str]] = {
@@ -35,24 +37,6 @@ MODES: dict[str, tuple[str, str, str]] = {
     "separate": ("Separate View", "view_separate", "view.separate"),
 }
 assert tuple(MODES) == VIEW_MODES
-
-
-class ArtbookWindow(QMainWindow):
-    """Separate View's window for the Artbook panel."""
-
-    closed_by_user = Signal()
-
-    def __init__(self, parent_title: str):
-        super().__init__()
-        self.setWindowTitle(f"Artbook - {parent_title}")
-        self.setWindowIcon(app_icon())
-        self.resize(900, 700)
-        self.quitting = False
-
-    def closeEvent(self, event) -> None:
-        if not self.quitting:
-            self.closed_by_user.emit()
-        super().closeEvent(event)
 
 
 class ViewSwitchButton(QToolButton):
@@ -112,6 +96,9 @@ class ViewModes(QObject):
         self.mode = "asset"
         self.separate_window: Optional[ArtbookWindow] = None
         self._separate_switch: Optional[ViewSwitchButton] = None
+        self._window_options: Optional[WindowOptionsButton] = None
+        # Separate View only: turns the Artbook window's click-through on / off from any app
+        self.hotkey = GlobalHotkey(CLICK_THROUGH_SHORTCUT, self._on_click_through_hotkey)
 
         self.actions: dict[str, QAction] = {}
         group = QActionGroup(self)
@@ -201,10 +188,16 @@ class ViewModes(QObject):
         if geometry:
             win.restoreGeometry(QByteArray(base64.b64decode(geometry)))
         win.setCentralWidget(self.artbook_panel)
+        win.hotkey_works = self.hotkey.register()
+        if self._window_options is None:
+            self._window_options = WindowOptionsButton(win)
+        self._window_options.sync()
         if self._separate_switch is None:
             self._separate_switch = ViewSwitchButton(self)
-        self.artbook_slot.addWidget(self._separate_switch)
-        self._separate_switch.show()
+        for button in (self._window_options, self._separate_switch):
+            self.artbook_slot.addWidget(button)
+            button.show()
+        self.artbook_panel.board.window_menu = self._board_window_menu  # the options on right-click too
         self.artbook_panel.show()
         win.show()
 
@@ -213,8 +206,12 @@ class ViewModes(QObject):
         if win is None:
             return
         self._store_window_geometry()
-        if self._separate_switch is not None:
-            self._separate_switch.hide()
+        win.set_click_through(False)
+        self.hotkey.unregister()
+        self.artbook_panel.board.window_menu = None
+        for button in (self._window_options, self._separate_switch):
+            if button is not None:
+                button.hide()
         win.takeCentralWidget()
         self.splitter.insertWidget(1, self.artbook_panel)
         win.quitting = True  # closing it here is part of switching, not the user leaving the view
@@ -224,6 +221,13 @@ class ViewModes(QObject):
     def _on_separate_closed(self) -> None:
         self.set_mode("asset")
 
+    def _board_window_menu(self, parent: QMenu) -> WindowMenu:
+        return WindowMenu(self.separate_window, parent)
+
+    def _on_click_through_hotkey(self) -> None:
+        if self.mode == "separate" and self.separate_window is not None:
+            self.separate_window.toggle_click_through()
+
     def _store_window_geometry(self) -> None:
         if self.separate_window is not None:
             data = bytes(self.separate_window.saveGeometry().data())
@@ -231,6 +235,7 @@ class ViewModes(QObject):
 
     def shutdown(self) -> None:
         """The app is quitting: close the separate window too, keeping the mode for next time."""
+        self.hotkey.unregister()
         if self.separate_window is not None and self.mode == "separate":
             self._store_window_geometry()
             self.separate_window.quitting = True

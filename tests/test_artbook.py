@@ -399,17 +399,60 @@ def test_hover_actually_sets_the_cursor(qapp, panel, pictures):
     assert board.viewport().cursor().shape() == Qt.CursorShape.SizeFDiagCursor  # not reset by Qt afterwards
 
 
+def all_actions(menu):
+    """Every action in a menu and its submenus (submenus themselves included)."""
+    for action in menu.actions():
+        yield action
+        if action.menu():
+            yield from all_actions(action.menu())
+
+
+def menu_layout(menu, depth=0):
+    rows = []
+    for action in menu.actions():
+        if action.isSeparator():
+            rows.append("  " * depth + "---")
+            continue
+        rows.append("  " * depth + action.text() + (" >" if action.menu() else ""))
+        if action.menu():
+            rows += menu_layout(action.menu(), depth + 1)
+    return rows
+
+
+def test_menu_layout(qapp, panel):
+    menu = panel.board.context_menu(QPointF(0, 0))
+    assert menu_layout(menu) == [
+        "Undo", "Redo", "---", "Copy Image", "Paste", "Note", "Colour Picker", "---",
+        "Canvas >", "  Frame Everything", "  Zoom to 100%", "  Grayscale Board", "  ---",
+        "  Export as PNG...", "  Export Page (.artbook)...",
+        "Images >", "  Select All",
+        "  Selection >",
+        "    Crop", "    Grayscale", "    Opacity >", "      ", "    ---",
+        "    Flip Horizontally", "    Flip Vertically",
+        "    Reset >", "      All", "      ---", "      Rotation", "      Size", "      Flips", "      Crop", "    ---",
+        "    Bring to Front", "    Send to Back", "    ---", "    Delete",
+        "  Arrange >", "    Auto-Arrange",
+        "  Align >", "    Left", "    Centers", "    Right", "    Top", "    Middles", "    Bottom", "    ---",
+        "    Distribute Horizontally", "    Distribute Vertically",
+        "  Match Size >", "    Same Height", "    Same Width",
+    ]
+    submenus = [a for a in all_actions(menu) if a.menu()]
+    assert submenus and all(a.isEnabled() for a in submenus)  # always open: greyed items show what's there
+    menu.deleteLater()
+
+
 def test_menu_greys_out_what_cant_be_done(qapp, panel, pictures):
     board = panel.board
 
     def open_menu():
         menu = board.context_menu(QPointF(0, 0))
-        shown = {a.text(): a.isEnabled() for a in menu.actions() if a.text()}
+        shown = {a.text(): a.isEnabled() for a in all_actions(menu) if a.text()}
         menu.deleteLater()
         return shown
 
     QApplication.clipboard().setText("just some words")
     menu = open_menu()
+    assert not menu["Undo"] and not menu["Redo"]
     assert not menu["Paste"] and not menu["Select All"] and not menu["Frame Everything"]
     assert not any(menu[name] for name in ("Copy Image", "Flip Horizontally", "Bring to Front", "Delete"))
 
@@ -417,6 +460,7 @@ def test_menu_greys_out_what_cant_be_done(qapp, panel, pictures):
     (item,) = add_and_wait(qapp, board, [pictures / "wide.png"])
     board._scene.clearSelection()
     menu = open_menu()
+    assert menu["Undo"]  # the image was added
     assert menu["Paste"] and menu["Select All"] and menu["Frame Everything"]
     assert not menu["Delete"] and not menu["Copy Image"]  # nothing selected yet
     item.setSelected(True)
@@ -433,7 +477,7 @@ def test_frame_from_the_menu_matches_the_f_key(qapp, panel, pictures):
     expected = (board.zoom(), board.view_center())
     board.set_view(0.3, QPointF(5000, -5000))
     menu = board.context_menu(QPointF(0, 0))
-    next(a for a in menu.actions() if a.text() == "Frame Selection").trigger()
+    next(a for a in all_actions(menu) if a.text() == "Frame Selection").trigger()
     menu.deleteLater()
     assert board.zoom() == pytest.approx(expected[0])
     assert board.view_center().x() == pytest.approx(expected[1].x(), abs=1)

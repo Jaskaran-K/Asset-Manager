@@ -76,8 +76,10 @@ from core import crash_log
 from core.library_snapshot import load_snapshot, save_snapshot
 from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
 from core.scanner import AssetItem, AssetScanner
+from core import artbook_store
 from core.settings import (
     category_extensions,
+    get_artbook_page,
     get_categories,
     get_background_texture,
     get_file_extensions,
@@ -1561,6 +1563,7 @@ class MainWindow(QMainWindow):
             rating_menu.addAction(action)
 
         menu.addSeparator()
+        self._add_send_to_artbook_menu(menu)
 
         action_copy_path = QAction("Copy Full Path", self)
         action_copy_path.triggered.connect(
@@ -1569,6 +1572,56 @@ class MainWindow(QMainWindow):
         menu.addAction(action_copy_path)
 
         menu.exec(self.list_grid.mapToGlobal(pos))
+
+    def _add_send_to_artbook_menu(self, menu: QMenu) -> None:
+        """Send to Artbook: a new page, or any page (in its folders). Image files only."""
+        paths = [a.path for a in self._selected_assets() if a.path.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
+        send = menu.addMenu("Send to Artbook" if paths else "Send to Artbook (images only)")
+        send.setEnabled(bool(paths))
+        if not paths:
+            return
+        action_new = send.addAction("New Page")
+        set_icon(action_new, "new_page")
+        action_new.triggered.connect(lambda: self._send_to_artbook(paths, None))
+        send.addSeparator()
+        names = {p["id"]: p.get("name") or "Untitled" for p in artbook_store.list_pages()}
+        current = self.artbook_panel.current_page_id() or get_artbook_page()
+
+        def add(target: QMenu, folder: dict) -> None:
+            for sub in folder["folders"]:
+                submenu = target.addMenu(sub["name"])
+                set_icon(submenu.menuAction(), "folder")
+                add(submenu, sub)
+                submenu.setEnabled(not submenu.isEmpty())
+            for page_id in folder["pages"]:
+                action = target.addAction(names.get(page_id, "Untitled"))
+                set_icon(action, "page")
+                if page_id == current:
+                    font = action.font()
+                    font.setBold(True)  # the open page
+                    action.setFont(font)
+                action.triggered.connect(lambda _checked=False, pid=page_id: self._send_to_artbook(paths, pid))
+
+        add(send, artbook_store.page_tree())
+
+    def _send_to_artbook(self, paths: list[Path], page_id: Optional[str]) -> None:
+        """Add image files to an Artbook page (None: a new one), which becomes the open page."""
+        panel = self.artbook_panel
+        try:
+            if page_id is None:
+                page_id = panel.new_page()
+            else:
+                panel.open_page(page_id)
+        except (artbook_store.PageError, OSError) as exc:
+            self.status_label.setText(f"Couldn't open the Artbook page: {exc}")
+            return
+        if panel.current_page_id() != page_id:
+            self.status_label.setText("That Artbook page couldn't be opened.")
+            return
+        count = panel.board.add_files(paths)
+        name = panel.page.get("name") or "Untitled"
+        hint = " Ctrl+2 shows the Artbook." if not panel.isVisible() else ""
+        self.status_label.setText(f'Sent {count} image{"s" if count != 1 else ""} to "{name}".{hint}')
 
     # ------------------------------------------------------------------
     # Tagging

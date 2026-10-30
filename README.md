@@ -46,11 +46,44 @@ Explorer, a web browser or the clipboard.
   **Ctrl+1** to **Ctrl+4**, also offers Split View (both side by side; drag the divider) and Separate View (the
   Artbook in its own window). The app reopens in the view you left it in.
 - **Getting images in:** drop files or images from a browser (Google Images results too), drag them in from
-  the asset grid, or paste with **Ctrl+V** (image data, files or an image link).
-- **On the board:** drag to move, drag a corner to scale, the round handle to rotate (Shift snaps to 15°).
+  the asset grid, or paste with **Ctrl+V** (image data, files or an image link). In the asset grid, right-click
+  > **Send to Artbook** adds the selected images to any page (listed in its folders), or to a new page.
+- **Working over other apps (Separate View):** the **Window** button in the Artbook window (also under
+  **Window** in the board's right-click menu) has:
+  - **Always on Top**, to keep your references over Blender, Photoshop and so on.
+  - **Opacity**, to see through the whole window (20-100%).
+  - **Click-through**: the window ignores the mouse, so clicks go to the app underneath, and it stays on top.
+    Press **Ctrl+Alt+T** (from any app) or click the tray icon to turn it off. A short heads-up explains this
+    when you turn it on (tick "Don't show again" to skip it).
+
+  Always on Top and Opacity are remembered. Click-through always starts off, and leaving Separate View turns it off.
+- **On the board:** drag to move, drag a corner or side handle to scale (the opposite one stays put), the round
+  handle to rotate (Shift snaps to 15°).
   **H** / **V** flip, **]** / **[** bring to front / send to back, **R** resets, **Delete** removes, **Ctrl+Z** /
   **Ctrl+Y** undo and redo. The wheel zooms toward the cursor, middle-drag (or Space+drag) pans, **F** frames
-  everything, double-click zooms to an image. Right-click for the rest.
+  everything, double-click zooms to an image.
+- **Right-click menu:** Undo / Redo, Copy / Paste, then **Canvas** (frame, 100%, grayscale board) and **Images**
+  (Select All, and the Selection, Arrange, Align and Match Size submenus). Greyed-out items need a selection.
+- **Adjusting images:** **C** crops the selected image: drag the handles inward (or back out), Enter or C keeps
+  it, Esc cancels. The whole image is kept, so Right-click > Images > Selection > **Reset** > Crop brings it all
+  back. The same Reset submenu undoes rotation, size, flips or crop one at a time (**R** resets all but the crop). **G** turns grayscale on / off for the selected images, the same menu has an **Opacity** slider, and
+  **Ctrl+G** shows the whole board in grayscale to judge values (remembered per page; page thumbnails stay in
+  colour).
+- **Notes:** **T** adds a note at the cursor and you type straight away; Esc or clicking elsewhere finishes,
+  and double-clicking a note edits it. Notes take the theme's colours. Select one and a format bar appears
+  above it: text colour, highlight, note colour, bold / italic / underline (Ctrl+B / I / U while typing), size,
+  font, and alignment / clear formatting under the chevron. Each colour offers Theme Default, White, Black or
+  **Custom...**: a floating picker (opens beside the note; drag its title to move it) with a colour square,
+  hue and opacity sliders, a screen dropper, HEX / RGB / HSL text and ready-made colours. The note changes as
+  you pick, and the whole pick is one Ctrl+Z. Highlights have rounded corners, like the notes. With text selected while typing, the bar changes
+  that text; otherwise the whole note. Notes move, scale, rotate, arrange and align like images; drag a note's
+  left / right handle to make it wider or narrower. An emptied note is removed; Ctrl+Z brings it back.
+- **Colour picker:** **I**, then click anywhere on the board to copy that colour's hex code (e.g. `#F59E0B`).
+  It stays on for more picks; Esc, I again or a right-click turns it off.
+- **Keys shared with other windows** (G is also the 3D viewer's grid) act on the window you're working in.
+- **Tidying up:** **A** auto-arranges the selection (or everything) into neat rows, keeping each image's size and
+  their reading order. Right-click > **Images** also has Align (left, centers, right, top, middles, bottom,
+  and distribute with equal gaps) and Match Size (same height / width). Each is one Ctrl+Z.
 - **Pages sidebar:** the menu button at the top left of the Artbook (or **Ctrl+B** while you're working in it)
   slides out your pages, each with a small picture of its board. Organize them in folders, which can hold folders.
   - Click a page to open it. The page you were on is saved first.
@@ -59,6 +92,15 @@ Explorer, a web browser or the clipboard.
   - Right-click to duplicate, move or delete. Deleted pages go to the Recycle Bin. Deleting a folder keeps
     its pages: they move up a level.
   - The search box filters pages by name, or by folder name.
+  - **Share a page:** right-click a page > **Export Page...** (or right-click the board > Canvas > Export Page)
+    saves it as one `.artbook` file with its images inside (linked files go in whole), ready to send.
+  - **Import:** the import button at the top (or right-click > Import Pages..., or drop the files on the board)
+    opens `.artbook` files and **PureRef boards** (`.pur`) as new pages. PureRef boards keep their layout:
+    positions, sizes, rotation, flips, crops, opacity and notes. Pick several at once. Groups come in
+    ungrouped (everything keeps its place) and drawings are left out for now. Boards from PureRef 1.x need
+    opening and saving in PureRef 2 first.
+- **Export as PNG:** **Ctrl+E** (or right-click > Canvas) saves the selection, or the whole board, as one picture on
+  the board's colour, as sharp as its images allow (up to 16384 pixels on the longest side).
   - Like the library's sidebar, it can be pinned beside the board or float over it on frosted glass.
 - **Saving:** pages save themselves a couple of seconds after each change, and when you switch page or quit.
   They're stored in `%LOCALAPPDATA%\AssetManager\artbook`, one folder per page. Library images are *linked*

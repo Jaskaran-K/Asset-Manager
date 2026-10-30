@@ -330,6 +330,77 @@ def _edit(p, primary, secondary):
     _line(p, primary, 1.8, *((e.x(), e.y()) for e in ends))  # the band near the top
 
 
+def _window(p, primary, secondary):
+    _body(p, _rounded(3, 4, 18, 16, 2.6), secondary)
+    _line(p, primary, 1.8, (3.8, 8.8), (20.2, 8.8))  # the title bar
+    p.fillPath(_circle(6.6, 6.4, 1.1), primary)
+    _line(p, primary, 1.7, (8, 14.5), (16, 14.5))
+
+
+def _text_color(p, primary, secondary):
+    _body(p, _polygon((5, 18), (10, 4), (14, 4), (19, 18), (15.5, 18), (12, 8), (8.5, 18)), secondary, round_corners=1.2)
+    _line(p, primary, 1.9, (8.6, 13.5), (15.4, 13.5))  # the crossbar
+
+
+def _highlight(p, primary, secondary):
+    turn = QTransform().translate(12.5, 10.5).rotate(40)
+    _body(p, turn.map(_rounded(-3.5, -8, 7, 12, 1.6)), secondary)
+    p.fillPath(turn.map(_polygon((-3.5, 4), (3.5, 4), (1.6, 8.5), (-1.6, 8.5))), primary)  # the chisel tip
+
+
+def _fill(p, primary, secondary):
+    bucket = QTransform().translate(10.5, 11).rotate(-45).map(_rounded(-5, -5, 10, 10, 1.6))
+    _body(p, bucket, secondary)
+    _line(p, primary, 1.7, (4, 11), (10.5, 4.5), (17, 11))
+    drop = _circle(19, 16.5, 2.2).united(_polygon((17.1, 15.4), (19, 11.5), (20.9, 15.4)))
+    p.fillPath(drop, primary)
+
+
+def _aligned(p, primary, secondary, alignment):
+    _body(p, _rounded(3, 4, 18, 16, 2.4), secondary)
+    for y, length in ((8, 12), (12, 8), (16, 12)):
+        start = {"left": 6, "center": 12 - length / 2, "right": 18 - length}[alignment]
+        _line(p, primary, 1.7, (start, y), (start + length, y))
+
+
+def _align_left(p, primary, secondary):
+    _aligned(p, primary, secondary, "left")
+
+
+def _align_center(p, primary, secondary):
+    _aligned(p, primary, secondary, "center")
+
+
+def _align_right(p, primary, secondary):
+    _aligned(p, primary, secondary, "right")
+
+
+def _chevron_down(p, primary, secondary):
+    _body(p, _circle(12, 12, 9.5), secondary)
+    _line(p, primary, 2.1, (7.5, 10.2), (12, 14.6), (16.5, 10.2))
+
+
+
+def _eyedropper(p, primary, secondary):
+    turn = QTransform().translate(12, 12).rotate(45)
+    _body(p, turn.map(_rounded(-2.6, -9.5, 5.2, 13, 1.8)), secondary)  # the glass tube
+    p.fillPath(turn.map(_rounded(-4.2, -10.5, 8.4, 4.2, 1.6)), primary)  # the bulb's collar
+    _line(p, primary, 2.0, turn.map(QPointF(0, 3.5)).toTuple(), turn.map(QPointF(0, 9.5)).toTuple())  # the tip
+
+
+def _copy(p, primary, secondary):
+    _line(p, primary, 1.8, (4.5, 15.5), (4.5, 4.5), (15.5, 4.5))  # the sheet behind
+    _body(p, _rounded(8, 8, 12.5, 13, 2.4), secondary)
+    _line(p, primary, 1.7, (11.5, 12.5), (17, 12.5))
+    _line(p, primary, 1.7, (11.5, 16.5), (15, 16.5))
+
+
+def _import(p, primary, secondary):
+    _body(p, _rounded(3, 12, 18, 9, 2.4), secondary)  # the tray
+    _line(p, primary, 2.1, (12, 3), (12, 14))  # an arrow down into it
+    _line(p, primary, 2.1, (8, 10.5), (12, 14.5), (16, 10.5))
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -359,6 +430,14 @@ ICONS: dict[str, IconPainter] = {
     "new_page": _new_page,
     "new_folder": _new_folder,
     "edit": _edit,
+    "window": _window,
+    "text_color": _text_color,
+    "highlight": _highlight,
+    "fill": _fill,
+    "align_left": _align_left,
+    "align_center": _align_center,
+    "align_right": _align_right,
+    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import,
 }
 
 

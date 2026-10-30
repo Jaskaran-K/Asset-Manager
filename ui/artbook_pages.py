@@ -12,12 +12,14 @@ Recycle Bin, and deleting a folder keeps what was in it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QEvent, QModelIndex, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QLineEdit,
     QMenu,
     QMessageBox,
@@ -30,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from core import artbook_store as store
+from core import artbook_share, pur_import
+from core.settings import get_last_import_dir, set_last_import_dir
 from ui import shortcuts
 from ui.duotone import draw_icon, set_icon
 from ui.themes import theme_color
@@ -228,11 +232,15 @@ class PagesPanel(QWidget):
         self.btn_new_folder = QPushButton()
         set_icon(self.btn_new_folder, "new_folder", size=16)
         self.btn_new_folder.setToolTip("New folder (inside the selected folder)")
-        for button in (self.btn_new_page, self.btn_new_folder):
+        self.btn_import = QPushButton()
+        set_icon(self.btn_import, "import", size=16)
+        self.btn_import.setToolTip("Import pages: shared .artbook pages, or PureRef boards (.pur) with their layouts (or drop them on the board)")
+        for button in (self.btn_new_page, self.btn_new_folder, self.btn_import):
             button.setObjectName("sidebarAction")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_new_page.clicked.connect(self._on_new_page_clicked)
         self.btn_new_folder.clicked.connect(self._on_new_folder_clicked)
+        self.btn_import.clicked.connect(self._on_import_clicked)
 
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -248,7 +256,7 @@ class PagesPanel(QWidget):
             self.tree.addAction(action)
 
     def header_widgets(self) -> list[QWidget]:
-        return [self.btn_new_page, self.btn_new_folder]
+        return [self.btn_new_page, self.btn_new_folder, self.btn_import]
 
     # ------------------ building ------------------
     def rebuild(self) -> None:
@@ -422,6 +430,20 @@ class PagesPanel(QWidget):
     def _on_new_folder_clicked(self) -> None:
         self.new_folder(self._selected_folder())
 
+    def _on_import_clicked(self) -> None:
+        self.import_boards(self._selected_folder())
+
+    def import_boards(self, folder_id: Optional[str]) -> None:
+        """Pick .artbook pages / PureRef boards; each becomes a page in folder_id."""
+        artbook, pur = f"*{artbook_share.SUFFIX}", f"*{pur_import.SUFFIX}"
+        paths, _filter = QFileDialog.getOpenFileNames(
+            self, "Import Pages", get_last_import_dir(),
+            f"Pages and boards ({artbook} {pur});;Artbook pages ({artbook});;PureRef boards ({pur})",
+        )
+        if paths:
+            set_last_import_dir(str(Path(paths[0]).parent))
+            self.artbook.import_boards([Path(p) for p in paths], folder_id)
+
     def new_page(self, folder_id: Optional[str]) -> None:
         """A new page in folder_id: opened, with its name ready to type over."""
         try:
@@ -530,6 +552,8 @@ class PagesPanel(QWidget):
         if item is None:
             menu.addAction("New Page").triggered.connect(lambda: self.new_page(None))
             menu.addAction("New Folder").triggered.connect(lambda: self.new_folder(None))
+            menu.addSeparator()
+            menu.addAction("Import Pages...").triggered.connect(lambda: self.import_boards(None))
         else:
             self.tree.setCurrentItem(item)
             kind, item_id = item.data(0, KIND_ROLE)
@@ -539,6 +563,7 @@ class PagesPanel(QWidget):
                 rename.setShortcut(shortcuts.sequence("pages.rename"))  # a hint: the tree handles the key
                 rename.triggered.connect(lambda: self.tree.editItem(item, 0))
                 menu.addAction("Duplicate").triggered.connect(lambda: self._duplicate(item_id))
+                menu.addAction("Export Page...").triggered.connect(lambda: self.artbook.export_page(item_id))
                 self._add_move_menu(menu, kind, item_id, item)
                 menu.addSeparator()
                 delete = menu.addAction("Delete...")
@@ -547,6 +572,7 @@ class PagesPanel(QWidget):
             else:
                 menu.addAction("New Page Here").triggered.connect(lambda: self.new_page(item_id))
                 menu.addAction("New Folder Here").triggered.connect(lambda: self.new_folder(item_id))
+                menu.addAction("Import Pages Here...").triggered.connect(lambda: self.import_boards(item_id))
                 menu.addSeparator()
                 rename = menu.addAction("Rename")
                 rename.setShortcut(shortcuts.sequence("pages.rename"))

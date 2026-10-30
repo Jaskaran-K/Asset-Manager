@@ -109,6 +109,21 @@ def test_wheel_glides_instead_of_jumping(qapp):
     assert bar.value() >= start + 200
 
 
+def test_a_glide_left_over_from_another_scroll_bar_is_replaced(qapp):
+    """(A glide's animation pointing at a scroll bar that's gone raised "already deleted".)"""
+    from ui import views
+
+    view = long_list(qapp)
+    bar = view.verticalScrollBar()
+    stale = views._glide_for(bar)
+    stale.anim.setTargetObject(None)
+    assert wheel(view.viewport()).isAccepted()
+    pump(qapp, 0.5)
+    assert bar.value() >= 100
+    fresh = views._glide_for(bar)
+    assert fresh is not stale and views._glide_for(bar) is fresh  # (one new glide, kept)
+
+
 def test_wheel_at_the_end_is_left_to_the_parent(qapp):
     view = long_list(qapp)
     bar = view.verticalScrollBar()

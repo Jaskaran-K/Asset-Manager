@@ -1,5 +1,5 @@
 """The bar at the top of the Artbook board while drawing (D): the pen's colour (the theme's,
-white, black, or a custom one), its size, the eraser, and Done.
+white, black, or a custom one), its size, smoothing, the eraser, and Done.
 
 Like the note bar, nothing here takes the keyboard focus. The board (ui.artbook_board) draws.
 """
@@ -42,6 +42,14 @@ class DrawBar(QFrame):
             self.size_box.addItem(f"{size} px", size)
         self.size_box.activated.connect(self._on_size_picked)
         layout.addWidget(self.size_box)
+        self.btn_smooth = QToolButton()
+        set_icon(self.btn_smooth, "smooth", size=16)
+        self.btn_smooth.setCheckable(True)
+        self.btn_smooth.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_smooth.setFixedSize(30, 28)
+        self.btn_smooth.setToolTip("Smoothing: steadies lines drawn with a mouse, as with a pen (on / off)")
+        self.btn_smooth.clicked.connect(board.toggle_smoothing)
+        layout.addWidget(self.btn_smooth)
         self.btn_eraser = QToolButton()
         set_icon(self.btn_eraser, "eraser", size=16)
         self.btn_eraser.setCheckable(True)
@@ -62,14 +70,15 @@ class DrawBar(QFrame):
     def _on_size_picked(self, index: int) -> None:
         self.board.set_pen_width(self.size_box.itemData(index))
 
-    def sync(self, color: QColor, width: int, eraser: bool) -> None:
+    def sync(self, color: QColor, width: int, eraser: bool, smooth: bool = True) -> None:
         self.btn_color.set_color(color)
         index = self.size_box.findData(width)
         if index >= 0:
             self.size_box.setCurrentIndex(index)
-        self.btn_eraser.blockSignals(True)
-        self.btn_eraser.setChecked(eraser)
-        self.btn_eraser.blockSignals(False)
+        for button, on in ((self.btn_eraser, eraser), (self.btn_smooth, smooth)):
+            button.blockSignals(True)
+            button.setChecked(on)
+            button.blockSignals(False)
 
     def avoid_rect(self) -> QRect:
         return QRect(self.mapToGlobal(QPoint(0, 0)), self.size())

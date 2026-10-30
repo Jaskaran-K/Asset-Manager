@@ -39,10 +39,12 @@ from PySide6.QtGui import QImage
 
 from core.thumbnail_manager import _safe_convert_pil_to_rgba, open_image
 
-PAGES_DIR: Path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AssetManager" / "artbook"
+DEFAULT_PAGES_DIR: Path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AssetManager" / "artbook"
+PAGES_DIR: Path = DEFAULT_PAGES_DIR  # set_pages_dir: the folder chosen in Settings
+PAGES_SUBFOLDER = "Artbook Pages"  # made inside a chosen folder that has other things in it
 FORMAT_VERSION = 1
 INDEX_VERSION = 1
-MAX_DECODE_SIDE = 4096  # images are shown at most this big (more detail when zoomed in comes later)
+MAX_DECODE_SIDE = 4096  # a new image is decoded this big (the board loads other sizes as needed)
 FALLBACK_SIDE = 1024  # size of the copy kept for linked files
 MAX_NAME = 120
 
@@ -61,6 +63,83 @@ class PageError(Exception):
 # ----------------------------------------------------------------------
 def pages_dir() -> Path:
     return PAGES_DIR  # read at call time, so tests can point it elsewhere
+
+
+def set_pages_dir(folder: Optional[Path]) -> None:
+    """Keep pages in folder from now on (None: the default folder). Moves nothing: see move_pages."""
+    global PAGES_DIR
+    with _save_lock:
+        PAGES_DIR = Path(folder) if folder else DEFAULT_PAGES_DIR
+        _summaries.clear()
+
+
+def has_pages(folder: Path) -> bool:
+    """Whether a folder already holds Artbook pages (an index, or a page's folder)."""
+    try:
+        return (folder / "index.json").is_file() or any((child / "page.json").is_file() for child in folder.iterdir())
+    except OSError:
+        return False
+
+
+def pages_target(folder: Path) -> Path:
+    """Where pages go when folder is chosen for them: the folder itself if it's empty or already
+    holds pages, otherwise a folder made inside it (so pages don't mix with other files)."""
+    try:
+        empty = not any(folder.iterdir())
+    except OSError:
+        empty = True  # (doesn't exist yet: it's made)
+    if empty or has_pages(folder):
+        return folder
+    return folder / PAGES_SUBFOLDER
+
+
+def same_folder(a: Path, b: Path) -> bool:
+    """Whether two paths are the same folder (any case, any spelling)."""
+    try:
+        return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
+    except OSError:
+        return False
+
+
+def move_pages(target: Path) -> int:
+    """Move every page (and the index) to target, which must hold no pages, and keep pages there
+    from now on. Everything is copied before anything is deleted, so if copying fails the pages
+    stay where they were (and stay in use). Returns how many pages moved. Safe off the UI thread."""
+    with _save_lock:  # (saves wait, then write to the new folder)
+        source = pages_dir()
+        if same_folder(source, target):
+            raise PageError("Your pages are already in that folder.")
+        if has_pages(target):
+            raise PageError("That folder already has Artbook pages.")
+        try:
+            target.resolve().relative_to(source.resolve())
+            raise PageError("Pick a folder outside the current pages folder.")
+        except ValueError:
+            pass
+        names = []
+        if source.is_dir():
+            names = [c.name for c in source.iterdir() if c.is_dir() and (c / "page.json").is_file()]
+        copied: list[Path] = []
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                copied.append(target / name)
+                shutil.copytree(source / name, target / name, ignore=shutil.ignore_patterns("*.tmp"))
+            if (source / "index.json").is_file():
+                copied.append(target / "index.json")
+                shutil.copy2(source / "index.json", target / "index.json")
+        except OSError as exc:
+            for path in copied:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            raise PageError(f"Couldn't copy the pages there: {exc}") from exc
+        set_pages_dir(target)
+        for name in names:  # (best effort: the copies are what's used now)
+            shutil.rmtree(source / name, ignore_errors=True)
+        (source / "index.json").unlink(missing_ok=True)
+        return len(names)
 
 
 def page_dir(page_id: str) -> Path:
@@ -84,7 +163,7 @@ def new_page(name: str) -> dict[str, Any]:
 
 # Saves come from the UI thread (switching page, renaming, quitting) and from autosave jobs:
 # they're written one at a time, and a snapshot taken earlier never replaces a newer one.
-_save_lock = threading.Lock()
+_save_lock = threading.RLock()  # (move_pages switches the folder while holding it)
 _saved_at: dict[str, float] = {}  # page id -> "modified" of the version on disk
 _trashed: set[str] = set()  # deleted: a late save or image mustn't bring the folder back
 
@@ -487,6 +566,8 @@ def blob_path(page_id: str, name: str) -> Path:
 
 
 def _to_qimage(im: Image.Image, max_side: int) -> QImage:
+    if max(im.size) > max_side:
+        im.draft(None, (max_side, max_side))  # JPEG: decoded straight at (about) that size, much faster
     rgba = _safe_convert_pil_to_rgba(im)
     if max(rgba.size) > max_side:
         rgba.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)

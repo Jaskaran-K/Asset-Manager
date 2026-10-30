@@ -23,7 +23,7 @@ from core import artbook_share, pur_import
 from core import artbook_store as store
 from core.settings import get_artbook_page, get_last_export_dir, set_artbook_page, set_last_export_dir
 from ui import shortcuts
-from ui.artbook_board import BoardView
+from ui.artbook_board import BoardView, export_pictures
 from ui.artbook_pages import PagesPanel
 from ui.duotone import DuotoneGlyph, set_icon
 from ui.sidebar import SidebarHost
@@ -195,6 +195,17 @@ class ArtbookPanel(QWidget):
         self.board.load_page(page)
         self.pages.rebuild()
 
+    def leave_pages(self) -> None:
+        """Save and let go of the open page (before the pages folder changes; reload_pages after)."""
+        self.save_now()
+        self._save_timer.stop()
+
+    def reload_pages(self) -> None:
+        """Show the pages from the pages folder again (it changed): the same page if it's there."""
+        current = self.current_page_id() or get_artbook_page()
+        self.page = None
+        self.open_page(current)
+
     def _show_name(self) -> None:
         self.lbl_page.setText(f"·  {self.page.get('name') or 'Untitled'}" if self.page else "")
 
@@ -332,15 +343,24 @@ class ArtbookPanel(QWidget):
         """Ctrl+E: save the selection (or the whole board) as a PNG."""
         if self.page is None:
             return
-        image = self.board.export_image()
-        if image is None:
+        plan = self.board.export_plan()
+        if plan is None:
             self.board.show_message("Nothing to export: the board is empty.")
             return
         stem = self.page.get("name") or "Page"
         path = self._ask_save_path("Export as PNG", stem, ".png", "PNG image (*.png)")
         if path is None:
             return
-        self.board.show_message(f"Exporting {path.name} ({image.width()} x {image.height()})...")
+        self.board.show_message(f"Exporting {path.name}...")
+        page_id, requests = self.page["id"], plan[3]
+        # The sharp pictures are decoded in the background (the board may only have small copies)
+        run_job(lambda: export_pictures(page_id, requests), lambda pictures: self._save_export(path, pictures), self._on_export_failed)
+
+    def _save_export(self, path: Path, pictures: dict) -> None:
+        image = self.board.export_image(pictures)
+        if image is None:
+            self.board.show_message("Nothing to export: the board is empty.")
+            return
 
         def save() -> str:
             if not image.save(str(path), "PNG"):

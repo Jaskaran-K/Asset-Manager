@@ -222,6 +222,9 @@ def test_drawing_strokes_erasing_them_and_saving(qapp, panel, pictures):
     (image,) = add(qapp, board, [pictures / "wide.png"])
     press(board, "artbook.draw")
     assert board.drawing() and board.draw_bar.isVisible()
+    assert board.draw_bar.btn_smooth.isChecked()  # (smoothing starts on)
+    board.draw_bar.btn_smooth.click()  # off: the line goes exactly through the points drawn
+    assert not board.draw_bar.btn_smooth.isChecked()
     drag(board, [(200, 200), (260, 220), (320, 260), (380, 250)])  # over the image: draws, doesn't move it
     strokes = [i for i in board.items_list() if isinstance(i, StrokeItem)]
     assert len(strokes) == 1 and len(strokes[0].points) == 4
@@ -259,3 +262,21 @@ def test_drawing_strokes_erasing_them_and_saving(qapp, panel, pictures):
     assert len(again) == 2
     red = next(i for i in again if i.color == "#ef4444")
     assert red.scale() == 2.0 and len(red.points) == len(second.points)
+
+
+def test_smoothing_steadies_a_shaky_line(qapp, panel):
+    from ui.artbook_board import StrokeItem
+
+    board = panel.board
+    press(board, "artbook.draw")
+    shaky = [(100 + 12 * n, 300 + (9 if n % 2 else -9)) for n in range(30)]  # a hand that shakes
+    drag(board, shaky)
+    (stroke,) = [i for i in board.items_list() if isinstance(i, StrokeItem)]
+    scene = [stroke.mapToScene(p) for p in stroke.points]
+    ys = [board.mapFromScene(p).y() for p in scene]
+    middle = ys[len(ys) // 4: -len(ys) // 4]  # (its ends are where the pointer started and let go)
+    assert max(middle) - min(middle) < 9  # the shake was 18 px up and down
+    end = board.mapFromScene(scene[-1])
+    assert (end.x(), end.y()) == pytest.approx(shaky[-1], abs=1.5)  # it still ends where the pointer let go
+    start = board.mapFromScene(scene[0])
+    assert (start.x(), start.y()) == pytest.approx(shaky[0], abs=1.5)

@@ -195,3 +195,26 @@ def test_right_click_stops_the_picker_without_the_menu(qapp, panel):
     board.contextMenuEvent(event)  # no menu while picking (it would wait for a click here)
     assert event.isAccepted()
     board.stop_picker()
+
+
+def test_new_notes_are_centered_and_stay_so_after_saving(qapp, panel):
+    board = panel.board
+    note = board.add_note()
+    QTest.keyClicks(board, "one")
+    QTest.keyClick(board, Qt.Key.Key_Return)
+    QTest.keyClicks(board, "two")
+    board.finish_note_edit()
+    block = note.document().firstBlock()
+    while block.isValid():
+        assert block.blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter
+        block = block.next()
+    panel.save_now()
+    board.load_page(panel.page)
+    (again,) = notes(board)
+    assert again.document().firstBlock().blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter
+    board._scene.clearSelection()
+    again.setSelected(True)
+    board.set_note_alignment(Qt.AlignmentFlag.AlignLeft)
+    assert not again.document().firstBlock().blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter
+    board.clear_note_format()  # back to how a new note starts
+    assert again.document().firstBlock().blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter

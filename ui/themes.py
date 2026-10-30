@@ -238,6 +238,7 @@ QPlainTextEdit {
     font-family: Consolas, "Courier New", monospace;
 }
 QPlainTextEdit[invalid="true"] { border: 1px solid $danger; }
+#guideText { background-color: $input_bg; border: 1px solid $input_border; border-radius: 8px; padding: 10px 14px; color: $text; }
 
 QMenu { background-color: $surface; border: 1px solid $border; padding: 4px; }
 QMenu::item { padding: 6px 18px; border-radius: 4px; }

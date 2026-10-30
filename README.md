@@ -35,19 +35,22 @@ and are never touched by installing, updating or uninstalling.
   category (or press Esc, or click beside it).
 - **Looks:** **Settings > Appearance** has the themes and a background texture (grain, dots, grid, lines,
   hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
-  their colors from the theme. Lists scroll smoothly, and categories slide open.
+  their colors from the theme. Lists scroll smoothly, categories slide open, and when the window is resized
+  the grid's cards glide into their new rows.
+- **Help:** **Settings > Guide** has the Artbook guide and this Read Me, right in the app.
 
 ## The Artbook
 
 The Artbook holds reference boards, called **Pages**: endless canvases you fill with images from the library,
-Explorer, a web browser or the clipboard.
+Explorer, a web browser or the clipboard. New to it? The [Artbook guide](docs/artbook-guide.md) walks through
+making your first board. The list below is the full reference.
 
 - **Views:** the **View** button (top right) switches between Asset View and Artbook View. Its arrow, or
   **Ctrl+1** to **Ctrl+4**, also offers Split View (both side by side; drag the divider) and Separate View (the
   Artbook in its own window). The app reopens in the view you left it in.
 - **Getting images in:** drop files or images from a browser (Google Images results too), drag them in from
-  the asset grid, or paste with **Ctrl+V** (image data, files or an image link). In the asset grid, right-click
-  > **Send to Artbook** adds the selected images to any page (listed in its folders), or to a new page.
+  the asset grid, or paste with **Ctrl+V** (image data, files or an image link). In the asset grid,
+  right-click > **Send to Artbook** adds the selected images to any page (listed in its folders), or to a new page.
 - **Working over other apps (Separate View):** the **Window** button in the Artbook window (also under
   **Window** in the board's right-click menu) has:
   - **Always on Top**, to keep your references over Blender, Photoshop and so on.
@@ -84,9 +87,10 @@ Explorer, a web browser or the clipboard.
   **Replace Image...** (a new picture that keeps the old one's place, size on the board, crop and adjustments) and
   **Relink Missing Images...** (pick the folder the files are in now: they're found by name, in its folders too).
 - **Draw:** **D** draws freehand strokes, with a bar at the top for the pen's colour (the theme's, white, black or
-  custom), its size and the **eraser** (**E**: drag over strokes to remove them). D again, Esc or Done stops.
+  custom), its size, **smoothing** (on to start with: steadies lines drawn with a mouse, as with a pen; the button
+  turns it off) and the **eraser** (**E**: drag over strokes to remove them). D again, Esc or Done stops.
   Strokes move, scale, rotate, group and undo like everything else, and follow the theme in its colour.
-- **Notes:** **T** adds a note at the cursor and you type straight away; Esc or clicking elsewhere finishes,
+- **Notes:** **T** adds a note at the cursor (its text centered) and you type straight away; Esc or clicking elsewhere finishes,
   and double-clicking a note edits it. Notes take the theme's colours. Select one and a format bar appears
   above it: text colour, highlight, note colour, bold / italic / underline (Ctrl+B / I / U while typing), size,
   font, and alignment / clear formatting under the chevron. Each colour offers Theme Default, White, Black or
@@ -109,6 +113,7 @@ Explorer, a web browser or the clipboard.
   - Right-click to duplicate, move or delete. Deleted pages go to the Recycle Bin. Deleting a folder keeps
     its pages: they move up a level.
   - The search box filters pages by name, or by folder name.
+  - Like the library's sidebar, it can be pinned beside the board or float over it on frosted glass.
   - **Share a page:** right-click a page > **Export Page...** (or right-click the board > Canvas > Export Page)
     saves it as one `.artbook` file with its images inside (linked files go in whole), ready to send.
   - **Import:** the import button at the top (or right-click > Import Pages..., or drop the files on the board)
@@ -118,10 +123,22 @@ Explorer, a web browser or the clipboard.
     opening and saving in PureRef 2 first.
 - **Export as PNG:** **Ctrl+E** (or right-click > Canvas) saves the selection, or the whole board, as one picture on
   the board's colour, as sharp as its images allow (up to 16384 pixels on the longest side).
-  - Like the library's sidebar, it can be pinned beside the board or float over it on frosted glass.
 - **Saving:** pages save themselves a couple of seconds after each change, and when you switch page or quit.
-  They're stored in `%LOCALAPPDATA%\AssetManager\artbook`, one folder per page. Library images are *linked*
-  (the page keeps a small copy in case the file moves); pasted and web images are stored in the page.
+  Library images are *linked* (the page keeps a small copy in case the file moves); pasted and web images are
+  stored in the page.
+- **Where pages are kept:** one folder per page, in `%LOCALAPPDATA%\AssetManager\artbook` unless you choose
+  another folder in Settings > General > **Artbook** (a synced OneDrive or Dropbox folder keeps them backed up).
+  **Change...** moves your pages there: they're copied first and only then removed from the old folder. A folder
+  that already has pages shows those instead (your current ones stay put, to switch back to). **Use Default**
+  moves them back. If the folder isn't there when the app starts (an unplugged drive), the default one is used
+  until it's back.
+- **Big boards:** images load at the detail they're seen at. Zoomed out, each shows a small copy; the ones in
+  view get sharper as you zoom in, up to the full picture (past 4096 pixels), and let it go again once they're
+  well out of view, so even boards with hundreds of large images open quickly and stay light on memory. Small
+  copies are cached (Settings > Video > **Clear Cache** clears them too), so a page opens almost at once the
+  second time. Export as PNG and Copy always use the full pictures, whatever is showing.
+- **Motion:** arranging, aligning, stacking and undoing glide images to their new places, and pictures fade in
+  as they load. The Motion setting in Settings > Appearance turns this off (or follows Windows).
 
 ## Video playback
 

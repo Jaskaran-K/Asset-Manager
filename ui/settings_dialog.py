@@ -6,8 +6,10 @@ Pages:
 - General > Categories:  sidebar main categories / subcategories and their file types
 - General > Appearance:  theme, grid size, category colors & icons
 - General > Video:       ffmpeg location, playback backend, preview cache
+- General > Artbook:     where the Artbook's pages are kept (changed right away, not on Save)
 - General > Tags:        custom tags (create, rename, recolor, delete)
 - General > Shortcuts:   every keyboard shortcut / mouse control (from ui.shortcuts)
+- Guide:                 the Artbook guide and the Read Me (docs/artbook-guide.md, README.md), shown here
 - About:                 application description, version, GitHub update check
 """
 
@@ -15,11 +17,13 @@ from __future__ import annotations
 
 import copy
 import os
+import re
+import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -38,6 +42,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
+    QTextBrowser,
     QProgressDialog,
     QPushButton,
     QScrollArea,
@@ -50,7 +55,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import crash_log
+from core import artbook_store, crash_log
 from core.scanner import AssetItem
 from core.settings import (
     DEFAULT_CATEGORIES,
@@ -79,6 +84,7 @@ from core.settings import (
     set_ffmpeg_path,
     set_file_extensions,
     set_media_backend,
+    set_pages_dir,
     set_motion,
     set_scan_folders,
     set_theme,
@@ -109,8 +115,8 @@ from ui.icons import (
     resolve_category_colors,
 )
 from ui import shortcuts
-from ui.tag_widgets import next_tag_color
-from ui.themes import THEMES, apply_theme, current_theme_id
+from ui.tag_widgets import next_tag_color, run_job
+from ui.themes import THEMES, apply_theme, current_theme_id, theme_color
 
 # Data roles on category tree items
 EXTENSIONS_ROLE = Qt.ItemDataRole.UserRole
@@ -1185,6 +1191,213 @@ class VideoPage(QWidget):
 
 
 # ----------------------------------------------------------------------
+# General > Artbook
+# ----------------------------------------------------------------------
+class ArtbookPage(QWidget):
+    """Where the Artbook's pages are kept. A change happens right away (pages are moved, which
+    can take a while), so it isn't left for Save. artbook: the Artbook panel, saved before a
+    change and shown again after it (None: only the files and the setting change)."""
+
+    def __init__(self, artbook: Optional[QWidget] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.artbook = artbook
+        self._busy = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        layout.addWidget(_page_header(
+            "Artbook",
+            "Each page is a folder with its layout and the images kept in it. Changes here happen "
+            "right away.",
+        ))
+        layout.addWidget(VideoPage._section_label("Pages folder"))
+        self.lbl_folder = QLabel()
+        self.lbl_folder.setObjectName("pageHint")
+        self.lbl_folder.setWordWrap(True)
+        self.lbl_folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.lbl_folder)
+        row = QHBoxLayout()
+        self.btn_change = QPushButton("Change...")
+        self.btn_change.setToolTip("Pick another folder for your pages: they're moved there")
+        self.btn_change.clicked.connect(self._on_change)
+        self.btn_open = QPushButton("Open Folder")
+        self.btn_open.setToolTip("Open the pages folder in Explorer")
+        self.btn_open.clicked.connect(self._on_open)
+        self.btn_default = QPushButton("Use Default")
+        self.btn_default.setToolTip(f"Move your pages back to the default folder ({artbook_store.DEFAULT_PAGES_DIR})")
+        self.btn_default.clicked.connect(self._on_default)
+        for button in (self.btn_change, self.btn_open, self.btn_default):
+            row.addWidget(button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.lbl_status = QLabel()
+        self.lbl_status.setObjectName("pageHint")
+        self.lbl_status.setWordWrap(True)
+        layout.addWidget(self.lbl_status)
+        hint = QLabel(
+            "A folder in a synced place (OneDrive, Dropbox) keeps your pages backed up. If the folder "
+            "isn't there when the app starts (a drive that's unplugged), the default one is used until it's back."
+        )
+        hint.setObjectName("pageHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        self._update()
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def _update(self) -> None:
+        folder = artbook_store.pages_dir()
+        default = artbook_store.same_folder(folder, artbook_store.DEFAULT_PAGES_DIR)
+        self.lbl_folder.setText(f"{folder}{'  (default)' if default else ''}")
+        self.btn_change.setEnabled(not self._busy)
+        self.btn_open.setEnabled(not self._busy)
+        self.btn_default.setEnabled(not self._busy and not default)
+
+    def _on_open(self) -> None:
+        folder = artbook_store.pages_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _on_change(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Pages folder", str(artbook_store.pages_dir().parent))
+        if chosen:
+            self.change_to(artbook_store.pages_target(Path(chosen)))
+
+    def _on_default(self) -> None:
+        self.change_to(artbook_store.DEFAULT_PAGES_DIR)
+
+    def change_to(self, target: Path, ask: bool = True) -> None:
+        """Keep pages in target: move them there, or (if it already has pages) show those."""
+        if artbook_store.same_folder(target, artbook_store.pages_dir()):
+            self.lbl_status.setText("Your pages are already in that folder.")
+            return
+        if artbook_store.has_pages(target):
+            if ask and not self._confirm(
+                "Use These Pages",
+                f"{target} already has Artbook pages.\n\nShow the pages there instead? Your current pages "
+                f"stay where they are ({artbook_store.pages_dir()}), and you can switch back any time.",
+                "Use These Pages",
+            ):
+                return
+            if self.artbook is not None:
+                self.artbook.leave_pages()
+            artbook_store.set_pages_dir(target)
+            self._finish(target, "Now showing the pages in that folder.")
+            return
+        if ask and not self._confirm(
+            "Move Pages",
+            f"Move your pages to {target}?\n\nThey're copied there first and only then removed from "
+            f"{artbook_store.pages_dir()}, so nothing is lost if the copy fails.",
+            "Move Pages",
+        ):
+            return
+        if self.artbook is not None:
+            self.artbook.leave_pages()
+        self._busy = True
+        self._update()
+        self.lbl_status.setText("Moving your pages...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        run_job(lambda: artbook_store.move_pages(target), self._on_moved, self._on_move_failed)
+
+    def _confirm(self, title: str, text: str, action: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Question, title, text, parent=self)
+        yes = box.addButton(action, QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def _on_moved(self, count: int) -> None:
+        QApplication.restoreOverrideCursor()
+        self._busy = False
+        self._finish(artbook_store.pages_dir(), f"Moved {count} page{'s' if count != 1 else ''}.")
+
+    def _on_move_failed(self, error: str) -> None:
+        QApplication.restoreOverrideCursor()
+        self._busy = False
+        self._update()
+        self.lbl_status.setText(f"{error} Your pages are still in {artbook_store.pages_dir()}.")
+        if self.artbook is not None:
+            self.artbook.reload_pages()
+
+    def _finish(self, folder: Path, message: str) -> None:
+        default = artbook_store.same_folder(folder, artbook_store.DEFAULT_PAGES_DIR)
+        set_pages_dir("" if default else str(folder))
+        if self.artbook is not None:
+            self.artbook.reload_pages()
+        self._update()
+        self.lbl_status.setText(message)
+
+
+# ----------------------------------------------------------------------
+# Guide
+# ----------------------------------------------------------------------
+# Bundled with the app (AssetManager.spec): under sys._MEIPASS in the PyInstaller executable
+DOCS_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+GUIDES = {  # page name in Settings -> the Markdown file, from DOCS_ROOT
+    "Artbook Guide": "docs/artbook-guide.md",
+    "Read Me": "README.md",
+}
+
+
+def _slug(text: str) -> str:
+    """A heading's link name, as GitHub makes it ("The Artbook" -> "the-artbook")."""
+    return re.sub(r"[^a-z0-9 -]", "", text.strip().lower()).replace(" ", "-")
+
+
+class GuidePage(QWidget):
+    """One of the guides, shown as formatted text. Links to the other guide (or one of its headings)
+    open it here; web links open in the browser. open_guide(name, heading) switches guides."""
+
+    def __init__(self, name: str, open_guide: Callable[[str, str], None], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.name = name
+        self._open_guide = open_guide
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 12)
+        layout.setSpacing(8)
+        self.text = QTextBrowser()
+        self.text.setObjectName("guideText")
+        self.text.setOpenLinks(False)
+        self.text.anchorClicked.connect(self._on_link)
+        palette = self.text.palette()
+        palette.setColor(palette.ColorRole.Link, QColor(theme_color("accent_text")))
+        self.text.setPalette(palette)
+        path = DOCS_ROOT / GUIDES[name]
+        try:
+            self.text.setMarkdown(path.read_text(encoding="utf-8"))
+        except OSError:
+            self.text.setPlainText(f"The {name} couldn't be found ({path}).")
+        layout.addWidget(self.text, 1)
+
+    def show_heading(self, heading: str) -> bool:
+        """Scroll to the heading with this link name (see _slug); False if there's none."""
+        block = self.text.document().begin()
+        while block.isValid():
+            if block.blockFormat().headingLevel() and _slug(block.text()) == heading:
+                cursor = QTextCursor(block)
+                self.text.setTextCursor(cursor)
+                bar = self.text.verticalScrollBar()
+                bar.setValue(round(self.text.document().documentLayout().blockBoundingRect(block).top()))
+                return True
+            block = block.next()
+        return False
+
+    def _on_link(self, url: QUrl) -> None:
+        if url.scheme() in ("http", "https", "mailto"):
+            QDesktopServices.openUrl(url)
+            return
+        target = url.path().replace("\\", "/").split("/")[-1].lower()
+        for name, file in GUIDES.items():
+            if target and file.lower().endswith(target):
+                self._open_guide(name, url.fragment())
+                return
+        if not target and url.fragment():
+            self.show_heading(url.fragment())
+
+
+# ----------------------------------------------------------------------
 # General > Shortcuts
 # ----------------------------------------------------------------------
 class ShortcutsPage(QWidget):
@@ -1643,7 +1856,7 @@ class AboutPage(QWidget):
 class SettingsDialog(QDialog):
     """Application settings. Saves to the config file when the user clicks Save."""
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, artbook: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Settings")
@@ -1675,6 +1888,7 @@ class SettingsDialog(QDialog):
         self.page_appearance.theme_selected.connect(self._on_theme_selected)
         self.page_appearance.texture_selected.connect(self._on_texture_selected)
         self.page_video = VideoPage(self._orig_ffmpeg_path, self._orig_media_backend)
+        self.page_artbook = ArtbookPage(artbook)
         self.page_tags = TagsPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
         self.page_about = AboutPage()
@@ -1707,6 +1921,7 @@ class SettingsDialog(QDialog):
             ("Categories", self.page_categories),
             ("Appearance", self.page_appearance),
             ("Video", self.page_video),
+            ("Artbook", self.page_artbook),
             ("Tags", self.page_tags),
             ("Shortcuts", self.page_shortcuts),
         ):
@@ -1715,6 +1930,17 @@ class SettingsDialog(QDialog):
             self.nav_items[name] = item
         general.setData(0, Qt.ItemDataRole.UserRole, 0)  # General opens its first page
         general.setExpanded(True)
+
+        guide = QTreeWidgetItem(self.nav, ["Guide"])
+        guide.setFont(0, QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.guide_pages: dict[str, GuidePage] = {}
+        for name in GUIDES:
+            self.guide_pages[name] = GuidePage(name, self.open_guide)
+            item = QTreeWidgetItem(guide, [name])
+            item.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(self.guide_pages[name]))
+            self.nav_items[name] = item
+        guide.setData(0, Qt.ItemDataRole.UserRole, self.nav_items["Artbook Guide"].data(0, Qt.ItemDataRole.UserRole))
+        guide.setExpanded(True)
 
         about = QTreeWidgetItem(self.nav, ["About"])
         about.setFont(0, QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -1754,6 +1980,15 @@ class SettingsDialog(QDialog):
         if name in self.nav_items:
             self.nav.setCurrentItem(self.nav_items[name])
 
+    def open_guide(self, name: str, heading: str = "") -> None:
+        """Show a guide, at one of its headings (a link name, see GuidePage) if given."""
+        self.show_page(name)
+        page = self.guide_pages[name]
+        if heading:
+            page.show_heading(heading)
+        else:
+            page.text.verticalScrollBar().setValue(0)
+
     def _on_nav_changed(self, current: Optional[QTreeWidgetItem], _previous) -> None:
         if current is not None:
             self.stack.setCurrentIndex(current.data(0, Qt.ItemDataRole.UserRole))
@@ -1771,7 +2006,7 @@ class SettingsDialog(QDialog):
         apply_theme(self.page_appearance.theme_id(), texture_id=texture_id)  # live preview, like themes
 
     def reject(self) -> None:
-        if self.page_about.is_busy():
+        if self.page_about.is_busy() or self.page_artbook.is_busy():
             return
         chosen = (self.page_appearance.theme_id(), self.page_appearance.texture_id())
         if chosen != (get_theme(), get_background_texture()):
@@ -1788,7 +2023,7 @@ class SettingsDialog(QDialog):
             self.page_categories.set_available_extensions(self.page_files.extensions())
 
     def _on_save(self) -> None:
-        if self.page_about.is_busy():
+        if self.page_about.is_busy() or self.page_artbook.is_busy():
             return
         if not self.page_files.is_valid():
             self.show_page("Files")

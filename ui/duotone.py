@@ -421,6 +421,13 @@ def _eraser(p, primary, secondary):
     _line(p, primary, 1.8, (6, 20.5), (19, 20.5))  # what's left on the page
 
 
+def _smooth(p, primary, secondary):
+    _body(p, _rounded(3, 3, 18, 18, 5), secondary)
+    wave = QPainterPath(QPointF(6.5, 15.5))  # a steady, flowing line
+    wave.cubicTo(QPointF(9, 6), QPointF(15, 18), QPointF(17.5, 8.5))
+    _outline(p, wave, primary, 2.0)
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -457,7 +464,7 @@ ICONS: dict[str, IconPainter] = {
     "align_left": _align_left,
     "align_center": _align_center,
     "align_right": _align_right,
-    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import, "lock": _lock, "eraser": _eraser,
+    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
 }
 
 

@@ -81,6 +81,7 @@ from core.settings import (
     category_extensions,
     get_artbook_page,
     get_categories,
+    get_pages_dir,
     get_background_texture,
     get_file_extensions,
     get_glass_frost,
@@ -100,7 +101,7 @@ from core.video_tools import apply_media_backend
 from core.version import APP_NAME, APP_VERSION
 from ui.animations import install_popup_animations, set_motion_mode
 from ui.artbook import ArtbookPanel
-from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, rating_text
+from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, GridView, rating_text
 from ui.duotone import set_icon
 from ui.duplicates_dialog import DuplicatesDialog
 from ui.glass import set_frost
@@ -258,7 +259,14 @@ class MainWindow(QMainWindow):
         self.asset_panel.addAction(toggle_sidebar)
 
         # 2. The Artbook panel, and the views that show either or both (ui.view_modes)
+        pages_dir, pages_note = get_pages_dir(), ""
+        if pages_dir and Path(pages_dir).is_dir():
+            artbook_store.set_pages_dir(Path(pages_dir))
+        elif pages_dir:  # (a drive that isn't plugged in: the setting stays, for next time)
+            pages_note = f"Your pages folder ({pages_dir}) isn't available, so the default one is used for now."
         self.artbook_panel = ArtbookPanel()
+        if pages_note:
+            self.artbook_panel.board.show_message(pages_note)
         self.view_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.view_splitter.setChildrenCollapsible(False)
         self.view_splitter.setHandleWidth(3)
@@ -736,7 +744,7 @@ class MainWindow(QMainWindow):
             self._asset_tooltip,
             self,
         )
-        self.list_grid = QListView()
+        self.list_grid = GridView()  # (cards glide into place when the window is resized)
         self.list_grid.setObjectName("assetGrid")
         self.list_grid.setViewMode(QListView.ViewMode.IconMode)
         self.list_grid.setModel(self.grid_model)
@@ -930,7 +938,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         """Open the settings dialog and apply any saved changes."""
-        dialog = SettingsDialog(self)
+        dialog = SettingsDialog(self, artbook=self.artbook_panel)
         accepted = dialog.exec() == SettingsDialog.DialogCode.Accepted
         if dialog.page_tags.changed:
             self._after_tags_changed()

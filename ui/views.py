@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import shiboken6
+
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRect, QRectF, Qt
 from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
@@ -115,16 +117,15 @@ class _Glide(QObject):
 
     def __init__(self, bar: QScrollBar):
         super().__init__(bar)
-        self.bar = bar
         self.target = bar.value()
         self.anim = QPropertyAnimation(bar, b"value", self)
         self.anim.setDuration(SCROLL_MS)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         bar.sliderPressed.connect(self.anim.stop)  # dragging the handle takes over
 
-    def by(self, pixels: int) -> bool:
-        """Glide by pixels; False if already at that end (the wheel then goes to the parent)."""
-        bar = self.bar
+    def by(self, bar: QScrollBar, pixels: int) -> bool:
+        """Glide bar (the live one the wheel event found: a reference kept from earlier can outlive
+        its scroll bar) by pixels; False if already at that end (the wheel then goes to the parent)."""
         if self.anim.state() != QAbstractAnimation.State.Running:
             self.target = bar.value()
         target = max(bar.minimum(), min(bar.maximum(), self.target + pixels))
@@ -139,8 +140,11 @@ class _Glide(QObject):
 
 
 def _glide_for(bar: QScrollBar) -> _Glide:
-    glide = bar.findChild(_Glide, options=Qt.FindChildOption.FindDirectChildrenOnly)
-    return glide or _Glide(bar)
+    for glide in bar.findChildren(_Glide, options=Qt.FindChildOption.FindDirectChildrenOnly):
+        if shiboken6.isValid(glide.anim) and glide.anim.targetObject() is bar:
+            return glide
+        glide.deleteLater()  # (left over, its scroll bar gone: a new one takes over)
+    return _Glide(bar)
 
 
 def _notch_pixels(bar: QScrollBar) -> int:
@@ -164,7 +168,7 @@ def scroll_smoothly(area: QAbstractScrollArea, event) -> bool:
         return False
     # Shift+wheel pages, as in Qt's own scroll bars
     step = bar.pageStep() if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else _notch_pixels(bar)
-    return _glide_for(bar).by(round(-amount / 120 * step))
+    return _glide_for(bar).by(bar, round(-amount / 120 * step))
 
 
 # ----------------------------------------------------------------------

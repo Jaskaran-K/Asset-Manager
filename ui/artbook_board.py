@@ -5,8 +5,12 @@ getting images in (drop, paste, from the asset grid), moving, scaling, rotating,
 stacking order, selecting, panning and zooming. Every change goes on the page's undo stack;
 `changed` fires after each one so the panel can autosave.
 
-Images are decoded off the UI thread (ui.tag_widgets.run_job). An item appears once its
-image is ready; while a saved page loads, its items show as placeholders until then.
+Images are decoded off the UI thread (ui.tag_widgets.run_job), at the detail they're seen at
+(level of detail): every image keeps a small copy (BASE_SIDE), and the ones in or near the view
+get a sharper copy for the zoom they're seen at, up to the full image when zoomed in. Sharper
+copies are let go once an image is well out of view, so a big board doesn't fill the memory.
+Pictures load from the middle of the view outwards; until its picture is in, an image shows as a
+placeholder.
 
 Controls are registered in ui.shortcuts (the Artbook category). While the board has the
 keyboard focus it takes its keys first, so Ctrl+Z undoes board changes, not library ones.
@@ -15,11 +19,13 @@ keyboard focus it takes its keys first, so Ctrl+Z undoes board changes, not libr
 from __future__ import annotations
 
 import base64
+import hashlib
 import html as html_lib
 import io
 import math
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -74,7 +80,7 @@ from PySide6.QtWidgets import (
 from PIL import Image
 
 from core import artbook_store as store
-from core import artbook_share, pur_import
+from core import artbook_share, pur_import, video_tools
 from ui import animations, artbook_layout, file_actions, shortcuts
 from ui.artbook_note_bar import SWATCHES, NoteBar, swatch_icon
 from ui.artbook_draw_bar import DrawBar
@@ -96,6 +102,8 @@ OPEN_FILES_LIMIT = 10  # Open Source File opens at most this many at once
 RELINK_SCAN_LIMIT = 300_000  # files looked at when relinking (a whole drive would take ages)
 STROKE_STEP_PX = 2.0  # a stroke gets a new point every this many pixels the pen moves
 ERASER_PX = 6  # the eraser's reach around the pointer
+SMOOTH_FOLLOW = 0.35  # smoothing on: the line moves this far toward the pointer at each step (steadies a mouse)
+SMOOTH_ROUNDS = 2  # smoothing on: corner-rounding passes over a finished stroke
 MIN_STROKE_WIDTH = 0.001
 MAX_STROKE_WIDTH = 100000.0
 MAX_STROKE_POINTS = 50000
@@ -104,6 +112,8 @@ WHEEL_ZOOM_STEP = 1.2  # per wheel notch
 ZOOM_MS = 140
 FIT_MS = 260
 FIT_MARGIN = 0.08
+MOVE_MS = 220  # images gliding to where a layout (or an undo) puts them
+FADE_MS = 180  # a picture fading in over its placeholder when it arrives
 DROP_GAP = 24.0  # between images dropped together
 HANDLE_PX = 9.0  # on screen, whatever the zoom
 MIN_CROP_PX = 8.0  # a crop keeps at least this much of the image (image pixels)
@@ -120,6 +130,15 @@ _IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)  # a note never loads pict
 ROTATE_HANDLE_PX = 26.0  # how far above the image the rotate handle sits
 SCENE_EXTENT = 1_000_000.0
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+BASE_SIDE = 160  # every image keeps a copy this big (longest side): what shows from far away
+DETAIL_STEP = 1.15  # a sharper copy loads once an image shows this much bigger than the one it has
+DETAIL_MAX_BYTES = 256 * 1024 * 1024  # one image's sharp copy at most (about 8000 x 8000)
+DETAIL_BUDGET = 1024 * 1024 * 1024  # all the sharp copies together; past it, the farthest make do
+NEAR_VIEW = 0.5  # images this far outside the view (of its size) count as in view
+DETAIL_LOADS = 3  # decodes running at the same time
+SMALL_BATCH = 24  # small copies read in one go (they're quick: one at a time, waiting is most of it)
+DETAIL_TICK_MS = 50
+EXPORT_DETAIL_SIDE = 4096  # an export is as sharp as its sharpest image at this size (or its own)
 
 
 # Resize cursors by the direction a corner scales in: 0, 45, 90, 135 degrees (y points down)
@@ -218,8 +237,15 @@ class ImageItem(QGraphicsItem):
         self.item_id = item_id
         self.source = source  # {"path": linked file or None, "blob": file in the page's images/ or None}
         self.natural = (max(1, int(size[0])), max(1, int(size[1])))
-        self.pixmap: Optional[QPixmap] = None
+        self.base: Optional[QPixmap] = None  # the small copy (BASE_SIDE), kept while it's on the board
+        self.base_ok = False  # the small copy is of its current picture
+        self.detail: Optional[QPixmap] = None  # a sharper copy, while it's in view (see BoardView)
+        self.detail_side = 0  # the sharper copy's longest side (0: none)
+        self.loading = 0  # a picture being decoded for it: its longest side (-1: the small copy only)
+        self.load_token = 0  # bumps when its picture changes: decodes still running are dropped
         self._gray_pixmap: Optional[QPixmap] = None
+        self._gray_key = 0
+        self.fade_from: Optional[float] = None  # when its picture started fading in (None: not fading)
         self.crop: Optional[Crop] = None
         self.gray = False
         self.cropping = False  # crop mode: the whole image shows (the cut-away part faintly)
@@ -303,13 +329,60 @@ class ImageItem(QGraphicsItem):
         path = self.linked_path()
         return path.name if path is not None else "Pasted image"
 
+    @property
+    def pixmap(self) -> Optional[QPixmap]:
+        """What it's drawn with: the sharper copy if it has one, else the small one."""
+        return self.detail if self.detail is not None else self.base
+
     def set_image(self, image: QImage) -> None:
-        self.pixmap = QPixmap.fromImage(image)
-        self._gray_pixmap = None
+        """A whole decoded picture (a new image): its small copy is made from it."""
+        self.load_token += 1
+        self.loading = 0
+        self.set_pictures(QPixmap.fromImage(_base_image(image)), None if _fits_base(image) else QPixmap.fromImage(image))
+
+    def set_pictures(self, base: Optional[QPixmap], detail: Optional[QPixmap]) -> None:
+        if base is not None:
+            self.base, self.base_ok = base, True
+        self.detail = detail
+        self.detail_side = max(detail.width(), detail.height()) if detail is not None else 0
         self.update()
 
-    def image(self) -> Optional[QImage]:
-        """The image as it shows on the board: cropped (not flipped, rotated or grayscale)."""
+    def drop_detail(self) -> None:
+        if self.detail is not None:
+            self.detail, self.detail_side = None, 0
+            self.update()
+
+    def pictures(self) -> tuple:
+        """(small copy, whether it's current, sharper copy): for undo (see _ReplaceCommand)."""
+        return self.base, self.base_ok, self.detail
+
+    def restore_pictures(self, pictures: tuple) -> None:
+        self.load_token += 1  # (a decode of the other picture still running is dropped)
+        self.loading = 0
+        base, base_ok, detail = pictures
+        self.base = base
+        self.set_pictures(None, detail)
+        self.base_ok = base_ok and base is not None
+
+    def picture_changed(self) -> None:
+        """Its source changed (relinked): load it again (what it shows stays until then)."""
+        self.load_token += 1
+        self.loading = 0
+        self.base_ok = False
+        self.detail_side = 0  # (kept on screen, but no longer counts as sharp)
+        self.load_failed = False
+
+    def longest_side(self) -> int:
+        return max(self.natural)
+
+    def image(self, sharp: Optional[QImage] = None) -> Optional[QImage]:
+        """The image as it shows on the board: cropped (not flipped, rotated or grayscale).
+        sharp: a better decode of the whole picture to cut it from (default: what's loaded)."""
+        if sharp is not None:
+            w, h = self.natural
+            shown = self.crop_rect()
+            sx, sy = sharp.width() / w, sharp.height() / h
+            return sharp.copy(QRectF((shown.left() + w / 2) * sx, (shown.top() + h / 2) * sy, shown.width() * sx, shown.height() * sy).toAlignedRect())
         if self.pixmap is None:
             return None
         return self.pixmap.toImage().copy(self._pixmap_rect(self.crop_rect()).toAlignedRect())
@@ -377,15 +450,36 @@ class ImageItem(QGraphicsItem):
 
     def _shown_pixmap(self) -> QPixmap:
         scene = self.scene()
+        pixmap = self.pixmap
         if self.gray or (scene is not None and getattr(scene, "gray_all", False)):
-            if self._gray_pixmap is None:
-                self._gray_pixmap = QPixmap.fromImage(_gray_image(self.pixmap.toImage()))
+            if self._gray_pixmap is None or self._gray_key != pixmap.cacheKey():
+                self._gray_pixmap = QPixmap.fromImage(_gray_image(pixmap.toImage()))
+                self._gray_key = pixmap.cacheKey()
             return self._gray_pixmap
-        return self.pixmap
+        self._gray_pixmap = None
+        return pixmap
+
+    def fade(self) -> float:
+        """How far its picture has faded in (1: all the way)."""
+        if self.fade_from is None:
+            return 1.0
+        done = (time.monotonic() - self.fade_from) * 1000 / FADE_MS
+        if done >= 1.0:
+            self.fade_from = None
+            return 1.0
+        return max(0.0, done)
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: Optional[QWidget] = None) -> None:
         shown = self.crop_rect()
+        fade = self.fade()
+        if self.pixmap is None or fade < 1.0:
+            # Still loading (or its file is gone): a quiet placeholder of the right size
+            placeholder = QColor(theme_color("text_faint"))
+            placeholder.setAlpha(40)
+            painter.fillRect(shown, placeholder)
         if self.pixmap is not None:
+            painter.save()
+            painter.setOpacity(painter.opacity() * fade)
             pixmap = self._shown_pixmap()
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, not self.pixelated)
             if self.cropping:
@@ -396,11 +490,7 @@ class ImageItem(QGraphicsItem):
                 painter.drawPixmap(full, pixmap, self._pixmap_rect(full))
                 painter.restore()
             painter.drawPixmap(shown, pixmap, self._pixmap_rect(shown))
-        else:
-            # Still loading (or its file is gone): a quiet placeholder of the right size
-            placeholder = QColor(theme_color("text_faint"))
-            placeholder.setAlpha(40)
-            painter.fillRect(shown, placeholder)
+            painter.restore()
         caption = self.caption_layout()
         if caption:
             box, font, pad = caption
@@ -793,10 +883,10 @@ class _StateCommand(QUndoCommand):
         self.board, self.before, self.after = board, before, after
 
     def redo(self) -> None:
-        self.board.apply_states(self.after)
+        self.board.apply_states(self.after, animate=True)
 
     def undo(self) -> None:
-        self.board.apply_states(self.before)
+        self.board.apply_states(self.before, animate=True)
 
 
 class _AddCommand(QUndoCommand):
@@ -847,7 +937,7 @@ class _TextCommand(QUndoCommand):
 
 class _ReplaceCommand(QUndoCommand):
     """An image's picture swapped for another (its place, size, crop and adjustments kept).
-    before / after: {"source", "natural", "name", "pixmap", "state"}."""
+    before / after: {"source", "natural", "name", "pictures" (ImageItem.pictures), "state"}."""
 
     def __init__(self, item: "ImageItem", before: dict[str, Any], after: dict[str, Any]):
         super().__init__("replace image")
@@ -857,7 +947,8 @@ class _ReplaceCommand(QUndoCommand):
     def _apply(item: "ImageItem", picture: dict[str, Any]) -> None:
         item.prepareGeometryChange()
         item.source, item.natural, item.name = dict(picture["source"]), picture["natural"], picture["name"]
-        item.pixmap, item._gray_pixmap, item.load_failed = picture["pixmap"], None, False
+        item.restore_pictures(picture["pictures"])
+        item.load_failed = False
         item.crop = None  # (the state brings the crop that fits this picture)
         item.apply_state(picture["state"])
         item.update()
@@ -1026,18 +1117,158 @@ def _prepare_web(page_id: str, sources: list[str]) -> dict[str, Any]:
     raise store.PageError(f"Couldn't get the image: {error}")
 
 
-def _decode_saved(page_id: str, source: dict[str, Optional[str]]) -> QImage:
-    """A saved item's image: its linked file if it's still there, otherwise the copy in the page."""
+def smooth_points(points: list[QPointF], rounds: int = SMOOTH_ROUNDS) -> list[QPointF]:
+    """A line's corners rounded off (Chaikin's corner cutting), its ends kept where they are."""
+    for _ in range(rounds):
+        if len(points) < 3:
+            return points
+        rounded = [points[0]]
+        for a, b in zip(points, points[1:]):
+            rounded += [a * 0.75 + b * 0.25, a * 0.25 + b * 0.75]
+        rounded.append(points[-1])
+        points = rounded[: MAX_STROKE_POINTS]
+    return points
+
+
+def _center_text(note: "NoteItem") -> None:
+    """Center every line of a note (what new notes start with; Enter carries it to the next line)."""
+    cursor = QTextCursor(note.document())
+    cursor.select(QTextCursor.SelectionType.Document)
+    block = QTextBlockFormat()
+    block.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    cursor.mergeBlockFormat(block)
+
+
+def _fits_base(image: QImage) -> bool:
+    return max(image.width(), image.height()) <= BASE_SIDE
+
+
+def _base_image(image: QImage) -> QImage:
+    """The small copy every image keeps (the image itself if it's that small already)."""
+    if _fits_base(image):
+        return image
+    return image.scaled(BASE_SIDE, BASE_SIDE, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+
+def _decode_saved(page_id: str, source: dict[str, Optional[str]], side: int = store.MAX_DECODE_SIDE) -> QImage:
+    """An image's picture, at most side big: from its linked file if it's still there, otherwise
+    from the copy in the page. The copy is used for small sizes too, while it's as new as the file
+    (it's quicker to read than a big original, and holds the same picture)."""
     path = source.get("path")
+    blob = source.get("blob")
+    copy = store.blob_path(page_id, blob) if blob else None
     if path and Path(path).is_file():
         try:
-            return store.decode_file(Path(path))[0]
+            if copy is not None and side <= store.FALLBACK_SIDE and copy.stat().st_mtime >= Path(path).stat().st_mtime:
+                return store.decode_file(copy, side)[0]
+        except (OSError, store.PageError):
+            pass
+        try:
+            return store.decode_file(Path(path), side)[0]
         except store.PageError:
             pass
-    blob = source.get("blob")
-    if blob:
-        return store.decode_file(store.blob_path(page_id, blob))[0]
+    if copy is not None:
+        return store.decode_file(copy, side)[0]
     raise store.PageError("The image is missing.")
+
+
+def _load_pictures(page_id: str, requests: list[tuple[dict, int, bool]]) -> list[tuple[Optional[tuple], str]]:
+    """_load_picture for each (source, side, base): [(result or None, error)], one per request."""
+    results = []
+    for source, side, base in requests:
+        try:
+            results.append((_load_picture(page_id, source, side, base), ""))
+        except Exception as exc:  # pylint: disable=broad-except
+            results.append((None, str(exc) or type(exc).__name__))
+    return results
+
+
+def _small_copy_file(page_id: str, source: dict[str, Optional[str]]) -> Optional[Path]:
+    """Where an image's small copy is cached (see video_tools.artbook_cache_dir): named after its
+    file as it is now (its path, size and time), or the copy in the page (named by its content)."""
+    path, blob = source.get("path"), source.get("blob")
+    key = None
+    if path:
+        try:
+            info = Path(path).stat()
+            key = f"file|{os.path.normcase(os.path.abspath(path))}|{info.st_size}|{info.st_mtime_ns}"
+        except OSError:
+            key = None
+    if key is None and blob and store.blob_path(page_id, blob).is_file():
+        key = f"blob|{blob}"
+    if key is None:
+        return None
+    name = hashlib.sha1(f"{key}|{BASE_SIDE}".encode("utf-8")).hexdigest()
+    return video_tools.artbook_cache_dir() / f"{name}.png"
+
+
+def _small_copy(page_id: str, source: dict[str, Optional[str]]) -> QImage:
+    """An image's small copy (BASE_SIDE): from the cache if it's there, else decoded (and cached)."""
+    cached = _small_copy_file(page_id, source)
+    if cached is not None and cached.is_file():
+        image = QImage(str(cached))
+        if not image.isNull():
+            return image
+    image = _decode_saved(page_id, source, BASE_SIDE)
+    _cache_small_copy(cached, image)
+    return image
+
+
+def _cache_small_copy(cached: Optional[Path], image: QImage) -> None:
+    if cached is None or cached.is_file():
+        return
+    try:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        temp = cached.with_name(f"{cached.name}.{uuid.uuid4().hex}.tmp")
+        if image.save(str(temp), "PNG"):
+            os.replace(temp, cached)
+        else:
+            temp.unlink(missing_ok=True)
+    except OSError:
+        pass  # (only a cache: it's decoded again next time)
+
+
+def _load_picture(page_id: str, source: dict[str, Optional[str]], side: int, base: bool) -> tuple[Optional[QImage], Optional[QImage]]:
+    """(sharper copy or None, small copy or None) for an image: side 0 is the small copy only."""
+    if not side:
+        return None, _small_copy(page_id, source)
+    image = _decode_saved(page_id, source, side)
+    if not base:
+        return image, None
+    small = _base_image(image)
+    _cache_small_copy(_small_copy_file(page_id, source), small)
+    return image, small
+
+
+def export_pictures(page_id: Optional[str], requests: list[tuple[str, dict, int]]) -> dict[str, QImage]:
+    """{item id: its picture decoded side big} for BoardView.picture_requests (images that can't be
+    read are left out: they're drawn as loaded). Safe off the UI thread."""
+    pictures = {}
+    for item_id, source, side in requests:
+        try:
+            pictures[item_id] = _decode_saved(page_id or "", source, side)
+        except store.PageError:
+            pass
+    return pictures
+
+
+def detail_side(natural: tuple[int, int], on_screen: float) -> int:
+    """How sharp a copy an image needs (its longest side), shown on_screen pixels big (longest
+    side): 0 if the small copy will do. Powers of two (so zooming doesn't decode at every step),
+    at most the whole image, and at most DETAIL_MAX_BYTES."""
+    longest = max(natural)
+    if longest <= BASE_SIDE or on_screen <= BASE_SIDE * DETAIL_STEP:
+        return 0
+    side = BASE_SIDE * 2
+    while side < on_screen / DETAIL_STEP:
+        side *= 2
+    cap = int(longest * math.sqrt(DETAIL_MAX_BYTES / (4.0 * natural[0] * natural[1])))
+    return min(side, longest, cap)
+
+
+def _detail_bytes(natural: tuple[int, int], side: int) -> int:
+    ratio = side / max(natural)
+    return int(natural[0] * ratio * natural[1] * ratio * 4)
 
 
 # ----------------------------------------------------------------------
@@ -1086,9 +1317,16 @@ class BoardView(QGraphicsView):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._loads = 0  # pictures being decoded (level of detail)
+        self._queue: list[tuple[ImageItem, int]] = []  # what to decode next, most wanted first
+        self._detail_timer = QTimer(self)  # (first: making the view scrolls it)
+        self._detail_timer.setSingleShot(True)
+        self._detail_timer.setInterval(DETAIL_TICK_MS)
+        self._detail_timer.timeout.connect(self.update_detail)
         self.setObjectName("artbookBoard")
         self.setProperty("smoothScroll", False)  # the wheel zooms here (ui.views would scroll)
         self._scene = _BoardScene(-SCENE_EXTENT, -SCENE_EXTENT, 2 * SCENE_EXTENT, 2 * SCENE_EXTENT, self)
+        self._scene.changed.connect(self._schedule_detail)  # (items moved, scaled, added)
         self._scene.group_backdrops = self.group_backdrops
         self._scene.selectionChanged.connect(self._on_selection_changed)
         self.setScene(self._scene)
@@ -1130,7 +1368,7 @@ class BoardView(QGraphicsView):
         self._single_pick = False  # Alt+click: one member of a group, on its own
         self._group_bar: Optional[GroupBar] = None  # floats above the selected group (made when first needed)
         self._image_list: Optional[ImageListPanel] = None  # every image on the page, at the right (L)
-        self._pen: dict[str, Any] = {"color": None, "width": 4, "eraser": False}  # the pen (kept between sessions)
+        self._pen: dict[str, Any] = {"color": None, "width": 4, "eraser": False, "smooth": True}  # the pen (kept between sessions)
         self._draw_on = False  # draw mode (D)
         self._stroke: Optional[dict[str, Any]] = None  # a stroke being drawn (or strokes being erased)
         self._draw_bar: Optional[DrawBar] = None
@@ -1148,6 +1386,17 @@ class BoardView(QGraphicsView):
         self._view_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._view_anim.valueChanged.connect(self._on_view_step)
         self._view_from = self._view_to = (1.0, QPointF())
+        self._move_anim = QVariantAnimation(self)
+        self._move_anim.setDuration(MOVE_MS)
+        self._move_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._move_anim.setStartValue(0.0)
+        self._move_anim.setEndValue(1.0)
+        self._move_anim.valueChanged.connect(self._on_move_step)
+        self._move_anim.finished.connect(self.finish_moves)
+        self._moves: dict[ImageItem, tuple[ItemState, ItemState]] = {}  # gliding: item -> (from, to)
+        self._fade_timer = QTimer(self)  # repaints while pictures fade in
+        self._fade_timer.setInterval(16)
+        self._fade_timer.timeout.connect(self._on_fade_step)
 
         self.hint = QLabel(
             "Drop images here, paste them with Ctrl+V, or drag them in from the asset grid.\n"
@@ -1191,7 +1440,11 @@ class BoardView(QGraphicsView):
             gid: {"fill": meta["fill"]} for gid, meta in (groups.items() if isinstance(groups, dict) else [])
             if _clean_group(gid) and isinstance(meta, dict) and isinstance(meta.get("fill"), str) and QColor(meta["fill"]).isValid()
         }
-        generation = self._generation
+        self._loads = 0  # (results for the last page are dropped)
+        self._queue = []
+        self._move_anim.stop()  # (glides and fades on the last page end here)
+        self._moves = {}
+        self._fade_timer.stop()
         groups = page.get("groups")
         for gid, meta in (groups.items() if isinstance(groups, dict) else []):
             if gid in self._groups and isinstance(meta, dict) and meta.get("locked") is True:
@@ -1207,14 +1460,7 @@ class BoardView(QGraphicsView):
                 continue
             if data.get("kind") != "image":
                 continue
-            item = ImageItem.from_dict(data)
-            self.attach(item)
-            page_id, source = self.page_id, dict(item.source)
-            run_job(
-                lambda page_id=page_id, source=source: _decode_saved(page_id, source),
-                lambda image, item=item, generation=generation: self._on_saved_decoded(item, image, generation),
-                lambda error, item=item, generation=generation: self._on_saved_failed(item, error, generation),
-            )
+            self.attach(ImageItem.from_dict(data))
         self._apply_locks()
         view = page.get("view")
         if isinstance(view, dict):
@@ -1225,6 +1471,7 @@ class BoardView(QGraphicsView):
         self._update_hint()
 
     def page_items(self) -> list[dict[str, Any]]:
+        self.finish_moves()
         return [item.to_dict() for item in sorted(self._items.values(), key=lambda i: i.zValue())]
 
     def page_groups(self) -> dict[str, dict[str, Any]]:
@@ -1234,6 +1481,8 @@ class BoardView(QGraphicsView):
 
     def thumbnail(self, width: int = 160, height: int = 120) -> Optional[QImage]:
         """Everything on the page, fitted into width x height (transparent around it); None if empty."""
+        self.finish_moves()
+        self.end_fades()
         if not self._items:
             return None
         bounds = QRectF()
@@ -1260,10 +1509,13 @@ class BoardView(QGraphicsView):
         if self._items:
             self.export_image_requested.emit()
 
-    def export_image(self) -> Optional[QImage]:
-        """The selection (or everything) as one picture, on the board's colour, with the detail its
-        images were loaded at (within EXPORT_MAX_SIDE / EXPORT_MAX_PIXELS). None if nothing's there."""
+    def export_plan(self) -> Optional[tuple[list, QRectF, float, list[tuple[str, dict, int]]]]:
+        """(items, the board area, output pixels per board unit, pictures to decode for it) for
+        exporting the selection (or everything); None if nothing's there. The output is as sharp
+        as its sharpest image (at up to EXPORT_DETAIL_SIDE), within EXPORT_MAX_SIDE / EXPORT_MAX_PIXELS."""
         self.finish_note_edit()
+        self.finish_moves()
+        self.end_fades()
         if self._crop:
             self.apply_crop()
         items = self.selected() or self.items_list()
@@ -1274,20 +1526,38 @@ class BoardView(QGraphicsView):
             bounds = bounds.united(item.sceneBoundingRect())
         margin = max(bounds.width(), bounds.height()) * EXPORT_MARGIN
         bounds.adjust(-margin, -margin, margin, margin)
-        density = 1.0  # output pixels per board unit: as sharp as the sharpest image shows
+        density = 1.0
         for item in items:
-            if isinstance(item, ImageItem) and item.pixmap is not None and item.scale() > 0:
-                density = max(density, item.pixmap.width() / (item.natural[0] * item.scale()))
+            if isinstance(item, ImageItem) and item.scale() > 0:
+                density = max(density, min(item.longest_side(), EXPORT_DETAIL_SIDE) / (item.longest_side() * item.scale()))
         density = min(
             density, EXPORT_MAX_SIDE / max(bounds.width(), bounds.height()),
             math.sqrt(EXPORT_MAX_PIXELS / (bounds.width() * bounds.height())),
         )
+        requests = self.picture_requests(items, lambda item: math.ceil(item.longest_side() * abs(item.scale()) * density))
+        return items, bounds, density, requests
+
+    def export_image(self, pictures: Optional[dict[str, QImage]] = None) -> Optional[QImage]:
+        """The selection (or everything) as one picture, on the board's colour (see export_plan).
+        pictures: the sharper pictures export_plan asked for (default: decoded here and now)."""
+        plan = self.export_plan()
+        if plan is None:
+            return None
+        items, bounds, density, requests = plan
+        if pictures is None:
+            pictures = export_pictures(self.page_id, requests)
         size = QSize(max(1, round(bounds.width() * density)), max(1, round(bounds.height() * density)))
         image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(theme_color("grid_bg"))
         hidden = [i for i in self.items_list() if i not in items and i.isVisible()]  # (only what's exported shows)
         for item in hidden:
             item.setVisible(False)
+        swapped = {}  # (the sharper pictures, just while it's drawn)
+        for item_id, picture in pictures.items():
+            item = self._items.get(item_id)
+            if isinstance(item, ImageItem):
+                swapped[item] = item.detail
+                item.detail = QPixmap.fromImage(picture)
         painter = QPainter(image)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.TextAntialiasing)
         try:
@@ -1296,6 +1566,8 @@ class BoardView(QGraphicsView):
             painter.end()
             for item in hidden:
                 item.setVisible(True)
+            for item, detail in swapped.items():
+                item.detail = detail
         return image
 
     def view_state(self) -> dict[str, Any]:
@@ -1325,26 +1597,200 @@ class BoardView(QGraphicsView):
             self._scene.removeItem(item)
         self._update_hint()
 
-    def apply_states(self, states: dict[str, ItemState]) -> None:
+    def apply_states(self, states: dict[str, ItemState], animate: bool = False) -> None:
+        """Put items in these states. animate: they glide to their new place, size and turn (the
+        rest changes at once); state() reads the glide's end straight away after finish_moves."""
+        self.finish_moves()
+        animate = animate and animations.motion_enabled() and self.isVisible()
+        moves = {}
         for item_id, state in states.items():
             item = self._items.get(item_id)
-            if item is not None:
-                item.apply_state(state)
+            if item is None:
+                continue
+            start = item.state()
+            item.apply_state(state)
+            if animate and start.crop == state.crop and (start.x, start.y, start.scale, start.rotation) != (state.x, state.y, state.scale, state.rotation):
+                moves[item] = (start, state)
         if any(meta.get("locked") for meta in self._groups.values()):
             self._apply_locks()  # (a group's members may have changed)
+        if moves:
+            self._moves = moves
+            self._on_move_step(0.0)
+            self._move_anim.start()
         self.viewport().update()
 
-    def _on_saved_decoded(self, item: ImageItem, image: QImage, generation: int) -> None:
-        if generation == self._generation:
-            item.load_failed = False
-            item.set_image(image)
-            self.files_changed.emit()
+    def _on_move_step(self, value) -> None:
+        t = float(value)
+        for item, (a, b) in self._moves.items():
+            item.setPos(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+            if a.scale > 0 and b.scale > 0:
+                item.setScale(a.scale * (b.scale / a.scale) ** t)  # (even steps, however big the change)
+            turn = (b.rotation - a.rotation + 180.0) % 360.0 - 180.0  # the short way round
+            item.setRotation(a.rotation + turn * t)
+        self.viewport().update()
 
-    def _on_saved_failed(self, item: ImageItem, error: str, generation: int) -> None:
-        if generation == self._generation:
-            item.load_failed = True
+    def finish_moves(self) -> None:
+        """End any glide now, everything where it's going (before reading or changing states)."""
+        if not self._moves:
+            return
+        moves, self._moves = self._moves, {}
+        self._move_anim.stop()
+        for item, (_start, end) in moves.items():
+            item.setPos(end.x, end.y)
+            item.setScale(end.scale)
+            item.setRotation(end.rotation)
+        self._place_note_bar()
+        self.viewport().update()
+
+    def _start_fade(self, item: ImageItem) -> None:
+        if animations.motion_enabled() and self.isVisible():
+            item.fade_from = time.monotonic()
+            if not self._fade_timer.isActive():
+                self._fade_timer.start()
+
+    def _on_fade_step(self) -> None:
+        fading = [item for item in self._items.values() if isinstance(item, ImageItem) and item.fade_from is not None]
+        for item in fading:
+            item.fade()  # (ends it once it's done)
+            item.update()
+        if all(item.fade_from is None for item in fading):
+            self._fade_timer.stop()
+
+    def end_fades(self) -> None:
+        for item in self._items.values():
+            if isinstance(item, ImageItem):
+                item.fade_from = None
+
+    # ------------------ level of detail ------------------
+    def _schedule_detail(self, *_args) -> None:
+        if not self._detail_timer.isActive():
+            self._detail_timer.start()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        self._schedule_detail()
+
+    def update_detail(self) -> None:
+        """Give each image the picture it needs for how it's seen now (see the module docstring):
+        sharper copies for the ones in or near the view, nearest the middle first and within
+        DETAIL_BUDGET, small copies for the rest; sharper copies out of view are let go."""
+        if self.page_id is None:
+            return
+        view = self.mapToScene(self.viewport().rect()).boundingRect()
+        near = view.adjusted(-view.width() * NEAR_VIEW, -view.height() * NEAR_VIEW, view.width() * NEAR_VIEW, view.height() * NEAR_VIEW)
+        middle = view.center()
+        ratio = self.zoom() * self.devicePixelRatioF()
+        images = []
+        for item in self._items.values():
+            if isinstance(item, ImageItem):
+                box = item.sceneBoundingRect()
+                offset = box.center() - middle
+                images.append((offset.x() ** 2 + offset.y() ** 2, item, box.intersects(near)))
+        images.sort(key=lambda entry: entry[0])
+        budget = DETAIL_BUDGET
+        wanted: list[tuple[ImageItem, int]] = []  # what to decode, most wanted first
+        small: list[tuple[ImageItem, int]] = []  # small copies for images out of view (after those)
+        for _distance, item, in_view in images:
+            if not in_view:
+                item.drop_detail()
+                if not item.base_ok and not item.load_failed:
+                    small.append((item, 0))
+                continue
+            side = detail_side(item.natural, item.longest_side() * abs(item.scale()) * ratio)
+            if side and _detail_bytes(item.natural, side) > budget:
+                side = 0
+            budget -= _detail_bytes(item.natural, side) if side else 0
+            if not side:
+                item.drop_detail()
+                if not item.base_ok and not item.load_failed:
+                    wanted.append((item, 0))
+            elif not item.load_failed and not (side <= item.detail_side <= side * 4):
+                wanted.append((item, side))
+        self._queue = wanted + small
+        self._load_next()
+
+    def _load_next(self) -> None:
+        """Start decodes from the queue update_detail made, up to DETAIL_LOADS at once."""
+        while self._queue and self._loads < DETAIL_LOADS:
+            batch: list[tuple[ImageItem, int]] = []
+            while self._queue and len(batch) < SMALL_BATCH:
+                item, side = self._queue[0]
+                if item.loading or item.load_failed or self._items.get(item.item_id) is not item:
+                    self._queue.pop(0)
+                    continue
+                if side and batch:
+                    break  # (a sharper copy goes on its own)
+                batch.append(self._queue.pop(0))
+                if side:
+                    break
+            if batch:
+                self._load(batch)
+
+    def _load(self, batch: list[tuple[ImageItem, int]]) -> None:
+        """Decode pictures in the background: one sharper copy, or a few small ones (quick to read)."""
+        self._loads += 1
+        page_id, generation = self.page_id, self._generation
+        jobs = []
+        for item, side in batch:
+            item.loading = side or -1
+            jobs.append((item, item.load_token, dict(item.source), side, not item.base_ok))
+        requests = [(source, side, base) for _item, _token, source, side, base in jobs]
+        run_job(
+            lambda: _load_pictures(page_id, requests),
+            lambda results: self._on_pictures_loaded(jobs, generation, results),
+            lambda error: self._on_pictures_loaded(jobs, generation, [(None, error)] * len(jobs)),
+        )
+
+    def _on_pictures_loaded(self, jobs: list, generation: int, results: list) -> None:
+        if generation != self._generation:
+            return
+        self._loads -= 1
+        failures = []
+        changed = False
+        for (item, token, _source, _side, _base), (result, error) in zip(jobs, results):
+            if token != item.load_token:
+                continue  # (its picture changed meanwhile)
+            item.loading = 0
+            if self._items.get(item.item_id) is not item:
+                continue
+            if result is None:
+                if not item.load_failed:
+                    item.load_failed = True  # (not tried again until it's relinked or the page reopens)
+                    failures.append(error)
+                    changed = True
+                continue
+            detail, base = result
+            if not item.base_ok:
+                changed = True
+                if item.pixmap is None:
+                    self._start_fade(item)
+            item.load_failed = False
+            item.set_pictures(
+                QPixmap.fromImage(base) if base is not None else None,
+                QPixmap.fromImage(detail) if detail is not None else item.detail,
+            )
+        if changed:
             self.files_changed.emit()
-            self.show_message(f"An image couldn't be loaded: {error}")
+        if failures:
+            more = f" (and {len(failures) - 1} more)" if len(failures) > 1 else ""
+            self.show_message(f"An image couldn't be loaded: {failures[0]}{more}")
+        self._load_next()  # (the next straight away; the view's next tick redoes the list)
+
+    def sharp_pictures(self, items: list, side_for: Callable[[ImageItem], int]) -> dict[str, QImage]:
+        """Pictures of these images decoded side_for(item) big, where that's sharper than what's
+        loaded (on this thread: see export_pictures for doing it in the background)."""
+        return export_pictures(self.page_id, self.picture_requests(items, side_for))
+
+    def picture_requests(self, items: list, side_for: Callable[[ImageItem], int]) -> list[tuple[str, dict, int]]:
+        """(item id, source, side) for each image whose loaded picture is less sharp than side_for(item)."""
+        requests = []
+        for item in items:
+            if isinstance(item, ImageItem) and not item.load_failed:
+                side = min(side_for(item), item.longest_side())
+                loaded = item.pixmap
+                if loaded is None or max(loaded.width(), loaded.height()) < side:
+                    requests.append((item.item_id, dict(item.source), side))
+        return requests
 
     def _on_undo_index_changed(self, _index: int) -> None:
         if not self._loading:
@@ -1371,6 +1817,7 @@ class BoardView(QGraphicsView):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._place_overlays()
+        self._schedule_detail()
         if self._image_list is not None and self._image_list.isVisible():
             self._image_list.place()
 
@@ -1542,6 +1989,7 @@ class BoardView(QGraphicsView):
         self.setTransform(QTransform.fromScale(zoom, zoom))
         self.centerOn(center)
         self.zoom_changed.emit(zoom)
+        self._schedule_detail()
 
     def zoom_at(self, zoom: float, anchor: QPointF) -> None:
         """Zoom keeping the board point under `anchor` (a viewport position) where it is."""
@@ -1552,6 +2000,7 @@ class BoardView(QGraphicsView):
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + moved.x())
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + moved.y())
         self.zoom_changed.emit(zoom)
+        self._schedule_detail()
 
     def wheelEvent(self, event) -> None:
         notches = event.angleDelta().y() / 120.0
@@ -1717,6 +2166,11 @@ class BoardView(QGraphicsView):
         self._pen["width"] = max(1, int(width))
         self._sync_draw_bar()
 
+    def toggle_smoothing(self) -> None:
+        """Draw: smoothing on / off (steadies lines drawn with a mouse)."""
+        self._pen["smooth"] = not self._pen["smooth"]
+        self._sync_draw_bar()
+
     def toggle_eraser(self) -> None:
         """E (while drawing): drag over strokes to remove them."""
         self._pen["eraser"] = not self._pen["eraser"]
@@ -1725,7 +2179,7 @@ class BoardView(QGraphicsView):
     def _sync_draw_bar(self) -> None:
         if self._draw_bar is not None or self._draw_on:
             color = QColor(self._pen["color"]) if self._pen["color"] else theme_color("text_strong")
-            self.draw_bar.sync(color, self._pen["width"], self._pen["eraser"])
+            self.draw_bar.sync(color, self._pen["width"], self._pen["eraser"], self._pen["smooth"])
 
     def _begin_stroke(self, pos: QPointF) -> None:
         if self._pen["eraser"]:
@@ -1749,11 +2203,15 @@ class BoardView(QGraphicsView):
                 self._erase_at(last + (pos - last) * (n / steps))
             stroke["last"] = pos
             return
+        stroke["end"] = self.mapToScene(pos.toPoint())  # (where the pointer is: smoothing trails behind it)
         if math.hypot(pos.x() - stroke["last"].x(), pos.y() - stroke["last"].y()) < STROKE_STEP_PX:
             return
         stroke["last"] = pos
         item = stroke["item"]
-        item.set_points(item.points + [self.mapToScene(pos.toPoint()) - item.pos()])
+        point = self.mapToScene(pos.toPoint()) - item.pos()
+        if self._pen["smooth"]:
+            point = item.points[-1] + (point - item.points[-1]) * SMOOTH_FOLLOW  # (trails the pointer: no wobble)
+        item.set_points(item.points + [point])
 
     def _erase_at(self, pos: QPointF) -> None:
         reach = ERASER_PX
@@ -1773,7 +2231,11 @@ class BoardView(QGraphicsView):
             if stroke["erased"]:
                 self.undo_stack.push(_RemoveCommand(self, stroke["erased"], "erase"))
             return
-        self.undo_stack.push(_AddCommand(self, [stroke["item"]], "draw"))
+        item = stroke["item"]
+        if self._pen["smooth"] and len(item.points) > 2:
+            ends = [stroke["end"] - item.pos()] if "end" in stroke else []
+            item.set_points(smooth_points(item.points + ends))  # (to where the pointer let go, corners rounded)
+        self.undo_stack.push(_AddCommand(self, [item], "draw"))
 
     # ------------------ files: copy path, Explorer, open, replace, relink ------------------
     def _images_in_order(self) -> list[ImageItem]:
@@ -1844,9 +2306,11 @@ class BoardView(QGraphicsView):
             * QTransform().scale(scale, scale) * QTransform().rotate(state.rotation)
         )
         position = middle_now - shape.map(middle)
-        before = {"source": dict(item.source), "natural": item.natural, "name": item.name, "pixmap": item.pixmap, "state": state}
+        before = {"source": dict(item.source), "natural": item.natural, "name": item.name, "pictures": item.pictures(), "state": state}
+        image = result["image"]
         after = {
-            "source": result["source"], "natural": (new_w, new_h), "name": "", "pixmap": QPixmap.fromImage(result["image"]),
+            "source": result["source"], "natural": (new_w, new_h), "name": "",
+            "pictures": (QPixmap.fromImage(_base_image(image)), True, None if _fits_base(image) else QPixmap.fromImage(image)),
             "state": replace(state, x=position.x(), y=position.y(), scale=scale, crop=crop),
         }
         self.undo_stack.push(_ReplaceCommand(item, before, after))
@@ -1900,12 +2364,8 @@ class BoardView(QGraphicsView):
             if item is None:
                 continue
             item.source = dict(source)
-            page_id, generation = self.page_id, self._generation
-            run_job(
-                lambda page_id=page_id, source=dict(source): _decode_saved(page_id, source),
-                lambda image, item=item, generation=generation: self._on_saved_decoded(item, image, generation),
-                lambda error, item=item, generation=generation: self._on_saved_failed(item, error, generation),
-            )
+            item.picture_changed()
+        self._schedule_detail()
         self.files_changed.emit()
 
     # ------------------ a group's colour and lock (and its bar) ------------------
@@ -2067,6 +2527,7 @@ class BoardView(QGraphicsView):
         return None
 
     def _snapshot(self, items: list[ImageItem]) -> dict[str, ItemState]:
+        self.finish_moves()
         return {item.item_id: item.state() for item in items}
 
     def _push_states(self, before: dict[str, ItemState], text: str) -> None:
@@ -2142,9 +2603,12 @@ class BoardView(QGraphicsView):
     def _move_by(self, moves: dict[str, QPointF], text: str) -> None:
         items = self._unlocked([self._items[item_id] for item_id in moves])  # (a locked group stays put)
         before = self._snapshot(items)
-        for item in items:
-            item.setPos(item.pos() + moves[item.item_id])
-        self._push_states(before, text)  # one undo step
+        after = {
+            item.item_id: replace(before[item.item_id], x=before[item.item_id].x + moves[item.item_id].x(), y=before[item.item_id].y + moves[item.item_id].y())
+            for item in items
+        }
+        if after != before:
+            self.undo_stack.push(_StateCommand(self, before, after, text))  # one undo step (they glide there)
 
     @staticmethod
     def _boxes(items: list[ImageItem]) -> list[tuple[str, QRectF]]:
@@ -2243,6 +2707,7 @@ class BoardView(QGraphicsView):
             under = self.viewport().mapFromGlobal(QCursor.pos())
             at = self.mapToScene(under) if self.viewport().rect().contains(under) else self.view_center()
         note = NoteItem(uuid.uuid4().hex)
+        _center_text(note)
         note.setScale(min(8.0, max(0.05, 1.0 / self.zoom())))  # reads the same size on screen at any zoom
         box = note.boundingRect()
         note.setPos(at - QPointF(box.width(), box.height()) * note.scale() / 2)
@@ -2430,12 +2895,13 @@ class BoardView(QGraphicsView):
         self._sync_note_bar()
 
     def clear_note_format(self) -> None:
-        """Plain text in the theme's colours (alignment and all formatting gone)."""
+        """Plain text in the theme's colours, centered (as a new note is): all formatting gone."""
         note = self.note_bar_target()
         if note is None:
             return
         before = note.content()
         note.setPlainText(note.toPlainText())
+        _center_text(note)
         note.fill = None
         note.update()
         if not note.editing() and note.content() != before:
@@ -2633,10 +3099,11 @@ class BoardView(QGraphicsView):
         if items and isinstance(items[-1], NoteItem):
             QApplication.clipboard().setText(items[-1].toPlainText())
             return True
-        image = items[-1].image() if items else None
-        if image is None:
+        if not items or not isinstance(items[-1], ImageItem) or items[-1].pixmap is None:
             return False
-        QApplication.clipboard().setImage(image)
+        item = items[-1]
+        sharp = self.sharp_pictures([item], lambda i: EXPORT_DETAIL_SIDE).get(item.item_id)  # (not just what's loaded)
+        QApplication.clipboard().setImage(item.image(sharp))
         return True
 
     # ------------------ the selection frame ------------------
@@ -2734,6 +3201,7 @@ class BoardView(QGraphicsView):
 
     # ------------------ mouse ------------------
     def mousePressEvent(self, event) -> None:
+        self.finish_moves()  # (a glide ends where it's going before anything is grabbed)
         self.setFocus()
         pos = event.position()
         button = event.button()
@@ -3189,6 +3657,7 @@ class BoardView(QGraphicsView):
     }
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        self.finish_moves()
         key = self._key_id(event)
         if self._editing:
             typing_key = next((k for k in self.TYPING_KEYS if shortcuts.matches(k, event)), None)

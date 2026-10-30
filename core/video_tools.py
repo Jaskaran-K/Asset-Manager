@@ -295,18 +295,23 @@ def probe_video(source: Path) -> Optional[tuple[int, int, int]]:
     return ms, width, height
 
 
+def artbook_cache_dir() -> Path:
+    """Small copies of the Artbook's images, so a page shows straight away (ui.artbook_board)."""
+    return CACHE_ROOT / "artbook-small"  # (read at call time, so tests can point it elsewhere)
+
+
 def cache_size_bytes() -> int:
-    """Total size of cached proxies, poster frames and grid thumbnails."""
+    """Total size of cached proxies, poster frames, grid thumbnails and Artbook copies."""
     total = 0
-    for folder in (PROXY_DIR, POSTER_DIR, THUMB_DIR):
+    for folder in (PROXY_DIR, POSTER_DIR, THUMB_DIR, artbook_cache_dir()):
         if folder.is_dir():
             total += sum(f.stat().st_size for f in folder.iterdir() if f.is_file())
     return total
 
 
 def clear_video_cache() -> None:
-    """Delete all cached proxies, poster frames and grid thumbnails (files in use are skipped)."""
-    for folder in (PROXY_DIR, POSTER_DIR, THUMB_DIR):
+    """Delete all cached proxies, poster frames, grid thumbnails and Artbook copies (files in use are skipped)."""
+    for folder in (PROXY_DIR, POSTER_DIR, THUMB_DIR, artbook_cache_dir()):
         if not folder.is_dir():
             continue
         for file in folder.iterdir():

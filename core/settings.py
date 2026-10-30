@@ -17,6 +17,7 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - artbook_sidebar:  the same for the Artbook's Pages sidebar
 - glass_frost:      0-100, how frosted glass panels (the sidebar) are
 - artbook_page:     id of the Artbook page last open (pages themselves: core.artbook_store)
+- artbook_pages_dir: where the Artbook's pages are kept ("" = the default folder)
 - view:             {"mode", "split", "window"}: Asset / Artbook / Split / Separate view, the split
                     ratio, and the separate Artbook window's geometry
 - artbook_window:   {"on_top", "opacity", "click_through_tip"} of the separate Artbook window
@@ -368,6 +369,16 @@ def get_artbook_page() -> str:
 
 def set_artbook_page(page_id: str) -> None:
     _update_config("artbook_page", page_id)
+
+
+def get_pages_dir() -> str:
+    """The folder the Artbook's pages are kept in, or "" for the default one (core.artbook_store)."""
+    folder = _load_raw_config().get("artbook_pages_dir")
+    return folder if isinstance(folder, str) else ""
+
+
+def set_pages_dir(folder: str) -> None:
+    _update_config("artbook_pages_dir", folder)
 
 
 def get_last_import_dir() -> str:

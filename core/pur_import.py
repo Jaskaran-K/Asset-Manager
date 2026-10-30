@@ -15,8 +15,8 @@ in this format. What a version-2 file holds, as found in the files themselves:
   each byte above 127 was saved as two UTF-8 bytes, so they're turned back into bytes first.
 
 Every item is placed relative to its parent (a group, or an image for a note attached to it), so
-the importer follows each chain to the board. Groups and drawings aren't on the Artbook yet:
-grouped items keep their places, ungrouped; drawings are left out (and counted). The whole board
+the importer follows each chain to the board. Groups come over as Artbook groups (the outermost
+one an item is in), with their colour. Drawings aren't on the Artbook yet: left out (and counted). The whole board
 is scaled so its images are near their real size (the layout is unchanged), since boards can be
 far bigger than the Artbook zooms out to.
 """
@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import struct
 import time
+import urllib.parse
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -68,6 +69,9 @@ class ImportedImage:
     crop: Optional[tuple[float, float, float, float]]  # in its pixels
     order: tuple[float, ...]
     opacity: float
+    group: Optional[int] = None  # the outermost group it's in (a board item id)
+    name: str = ""  # what it's called (the image list shows it)
+    path: Optional[str] = None  # the file it came from, when that's still on this computer
 
 
 @dataclass
@@ -77,13 +81,15 @@ class ImportedNote:
     matrix: Affine  # the note's top-left corner to the board
     order: tuple[float, ...]
     opacity: float
+    group: Optional[int] = None
 
 
 @dataclass
 class Board:
     images: list[ImportedImage] = field(default_factory=list)
     notes: list[ImportedNote] = field(default_factory=list)
-    skipped: Counter = field(default_factory=Counter)  # drawings, groups (ungrouped), missing images
+    groups: dict[int, Optional[str]] = field(default_factory=dict)  # group id -> its colour (None: the theme's)
+    skipped: Counter = field(default_factory=Counter)  # drawings, missing images
 
 
 # ----------------------------------------------------------------------
@@ -247,6 +253,27 @@ def _ext(fmt: str, data: bytes) -> str:
     return {".jpeg": ".jpg", ".tiff": ".tif"}.get(detected, detected) if detected != "." else ".png"
 
 
+def _image_name(name: str, origin: str) -> str:
+    """An image's name: its own, unless that's just an id (32 hex digits); then the last part of
+    where it came from, if that looks like a file name."""
+    name = name.strip()
+    if name and not re.fullmatch(r"[0-9a-fA-F]{32}", name):
+        return name[:200]
+    last = urllib.parse.unquote(urllib.parse.urlsplit(origin).path).replace("\\", "/").rsplit("/", 1)[-1]
+    return last[:200] if re.fullmatch(r"[^/?#]{1,200}\.[A-Za-z0-9]{2,5}", last) else ""
+
+
+def _local_file(origin: str) -> Optional[str]:
+    """origin, if it's a file on this computer that's still there (the image links to it again)."""
+    if re.match(r"^[A-Za-z]:[/\\]", origin):
+        try:
+            if Path(origin).is_file():
+                return str(Path(origin))
+        except OSError:
+            pass
+    return None
+
+
 def read_board(path: Path) -> Board:
     """Everything on a board, placed on it (see the module docstring)."""
     con = open_database(path)
@@ -264,12 +291,18 @@ def _read(con: sqlite3.Connection) -> Board:
     for item_id, parent, transform, z, opacity in con.execute("select id, parent, transform, z, opacity from items"):
         items[item_id] = {"parent": parent, "matrix": _transform(transform), "z": float(z or 0), "opacity": opacity}
 
-    def placed(item_id: int) -> tuple[Affine, tuple[float, ...], float]:
-        """(the item's corner to the board, its stacking order, its opacity) through every parent."""
-        matrix, order, opacity, seen = IDENTITY, (), 1.0, set()
+    for group_id, background in con.execute("select id, background_color from items_groups"):
+        board.groups[group_id] = _color(background)
+
+    def placed(item_id: int) -> tuple[Affine, tuple[float, ...], float, Optional[int]]:
+        """(the item's corner to the board, its stacking order, its opacity, its outermost group)
+        through every parent."""
+        matrix, order, opacity, group, seen = IDENTITY, (), 1.0, None, set()
         current: Optional[int] = item_id
         while current is not None and current in items and current not in seen:
             seen.add(current)
+            if current != item_id and current in board.groups:
+                group = current
             item = items[current]
             matrix = combine(matrix, item["matrix"])
             order = (item["z"],) + order  # children above their parent, then by z among siblings
@@ -277,11 +310,12 @@ def _read(con: sqlite3.Connection) -> Board:
             opacity *= float(value) if isinstance(value, (int, float)) and 0 < value <= 1 else 1.0
             parent = item["parent"]
             current = parent if isinstance(parent, int) and parent >= 0 else None
-        return matrix, order, opacity
+        return matrix, order, opacity, group
 
     pictures = {}
-    for image_id, fmt, data, width, height, source in con.execute("select id, format, data, width, height, source from images"):
-        pictures[image_id] = (_text(fmt), data, width, height, _text(source))
+    for image_id, fmt, data, width, height, origin in con.execute("select id, format, data, width, height, origin from images"):
+        pictures[image_id] = (_text(fmt), data, width, height, _text(origin))
+    names = {item_id: _text(name) for item_id, name in con.execute("select id, name from items")}
 
     rows = con.execute("select id, image, image_transform, image_bounds from items_images").fetchall()
     for item_id, image_id, image_transform, bounds in rows:
@@ -298,7 +332,7 @@ def _read(con: sqlite3.Connection) -> Board:
                 board.skipped["missing image"] += 1
                 continue
         pixels = _transform(image_transform)  # the picture's pixels in the item
-        matrix, order, opacity = placed(item_id)
+        matrix, order, opacity, group = placed(item_id)
         crop = None
         outline = _path_points(bounds)
         if outline:
@@ -310,18 +344,19 @@ def _read(con: sqlite3.Connection) -> Board:
             bottom = min(float(height), max(y for _, y in corners))
             if right - left >= 1 and bottom - top >= 1 and (left > 0.5 or top > 0.5 or right < width - 0.5 or bottom < height - 0.5):
                 crop = (round(left, 3), round(top, 3), round(right, 3), round(bottom, 3))
+        origin = picture[4]
         board.images.append(ImportedImage(
-            data, _ext(fmt, data), (width, height), combine(pixels, matrix), crop, order, opacity,
+            data, _ext(fmt, data), (width, height), combine(pixels, matrix), crop, order, opacity, group,
+            _image_name(names.get(item_id, ""), origin), _local_file(origin),
         ))
 
     for item_id, text, background in con.execute("select id, text, background_color from items_notes"):
         if item_id not in items:
             continue
-        matrix, order, opacity = placed(item_id)
-        board.notes.append(ImportedNote(_text(text), _color(background), matrix, order, opacity))
+        matrix, order, opacity, group = placed(item_id)
+        board.notes.append(ImportedNote(_text(text), _color(background), matrix, order, opacity, group))
 
     board.skipped["drawing"] += con.execute("select count(*) from items_drawings").fetchone()[0]
-    board.skipped["group"] += con.execute("select count(*) from items_groups").fetchone()[0]
     return board
 
 
@@ -352,10 +387,12 @@ def _board_scale(board: Board) -> float:
     return factor if math.isfinite(factor) and factor > 0 else 1.0
 
 
-def page_items(board: Board, blobs: list[str]) -> list[dict[str, Any]]:
-    """The board as Artbook page items (blobs: each image's stored file name, in order)."""
+def page_items(board: Board, blobs: list[str], group_ids: Optional[dict[int, str]] = None) -> list[dict[str, Any]]:
+    """The board as Artbook page items (blobs: each image's stored file name, in order; group_ids:
+    each group's id on the page, made here if not given)."""
     factor = _board_scale(board)
     zoom: Affine = (factor, 0.0, 0.0, factor, 0.0, 0.0)
+    group_ids = group_ids if group_ids is not None else {gid: uuid.uuid4().hex for gid in board.groups}
     entries: list[tuple[tuple[float, ...], dict[str, Any]]] = []
     for image, blob in zip(board.images, blobs):
         w, h = image.size
@@ -363,9 +400,11 @@ def page_items(board: Board, blobs: list[str]) -> list[dict[str, Any]]:
         middle = combine(combine((1.0, 0.0, 0.0, 1.0, w / 2.0, h / 2.0), image.matrix), zoom)
         scale, rotation, flipped = decompose(middle)
         entries.append(((0.0,) + image.order, {
-            "id": uuid.uuid4().hex, "kind": "image", "source": {"path": None, "blob": blob}, "size": [w, h],
+            "id": uuid.uuid4().hex, "kind": "image", "source": {"path": image.path, "blob": blob}, "size": [w, h],
+            "name": image.name,
             "x": middle[4], "y": middle[5], "scale": scale, "rotation": rotation, "flip_h": flipped, "flip_v": False,
             "crop": list(image.crop) if image.crop else None, "opacity": round(image.opacity, 4), "gray": False,
+            "group": group_ids.get(image.group),
         }))
     for note in board.notes:
         inset = THEIR_NOTE_MARGIN - OUR_NOTE_MARGIN
@@ -375,6 +414,7 @@ def page_items(board: Board, blobs: list[str]) -> list[dict[str, Any]]:
             "id": uuid.uuid4().hex, "kind": "note", "text": _plain(note.html)[:20000], "html": note.html,
             "fill": note.fill, "width": None,  # (None: as wide as its text)
             "x": corner[4], "y": corner[5], "scale": scale, "rotation": rotation, "opacity": round(note.opacity, 4),
+            "group": group_ids.get(note.group),
         }))
     entries.sort(key=lambda entry: entry[0])
     items = []
@@ -393,10 +433,12 @@ def import_board(path: Path) -> tuple[dict[str, Any], Counter]:
     page_id = uuid.uuid4().hex
     try:
         blobs = [store.store_blob(page_id, image.data, image.ext) for image in board.images]
+        group_ids = {gid: uuid.uuid4().hex for gid in board.groups}
         now = time.time()
         page = {
             "version": store.FORMAT_VERSION, "id": page_id, "name": store.clean_name(Path(path).stem),
-            "created": now, "modified": now, "view": None, "items": page_items(board, blobs),
+            "created": now, "modified": now, "view": None, "items": page_items(board, blobs, group_ids),
+            "groups": {group_ids[gid]: {"fill": fill} for gid, fill in board.groups.items() if fill},
         }
         store.save_page(page)
     except BaseException:

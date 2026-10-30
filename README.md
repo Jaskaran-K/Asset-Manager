@@ -67,8 +67,25 @@ Explorer, a web browser or the clipboard.
 - **Adjusting images:** **C** crops the selected image: drag the handles inward (or back out), Enter or C keeps
   it, Esc cancels. The whole image is kept, so Right-click > Images > Selection > **Reset** > Crop brings it all
   back. The same Reset submenu undoes rotation, size, flips or crop one at a time (**R** resets all but the crop). **G** turns grayscale on / off for the selected images, the same menu has an **Opacity** slider, and
-  **Ctrl+G** shows the whole board in grayscale to judge values (remembered per page; page thumbnails stay in
-  colour).
+  **Shift+G** shows the whole board in grayscale to judge values (remembered per page; page thumbnails stay in
+  colour). Selection also has **Pixelated** (hard pixel edges when zoomed in, for pixel art and textures) and
+  **Caption...** (a line of text under the image that moves, scales and flips with it).
+- **Groups:** **Ctrl+G** groups the selection: a soft panel shows behind it, and clicking any member (or the
+  panel's empty space) picks up the whole group, so it moves, arranges and aligns as one block. **Alt+click**
+  picks one member on its own, **Ctrl+Shift+G** ungroups. A selected group gets a small bar above it:
+  - **Colour:** the theme's, white, black, or **Custom...** (the same live colour picker as notes, with opacity).
+  - **Lock:** the group can't be moved, resized, turned, flipped, cropped or deleted until it's unlocked.
+  Both are also in right-click > Images > Selection. Align > **Stack** piles the selection up like a hand of cards.
+- **Pages from the board:** right-click > **Pages** makes a new page, duplicates or renames this one, or exports it.
+- **Image list:** **L** (or the **Images** button) lists every image on the page with a small picture, its name,
+  size, and whether it's linked to a file, kept in the page, or missing its file. Click one to select and frame it;
+  search by name or path. With files missing, **Relink...** finds them.
+- **Files:** right-click > Copy > **File Path**, and Images > File > **Show in Explorer**, **Open Source File**,
+  **Replace Image...** (a new picture that keeps the old one's place, size on the board, crop and adjustments) and
+  **Relink Missing Images...** (pick the folder the files are in now: they're found by name, in its folders too).
+- **Draw:** **D** draws freehand strokes, with a bar at the top for the pen's colour (the theme's, white, black or
+  custom), its size and the **eraser** (**E**: drag over strokes to remove them). D again, Esc or Done stops.
+  Strokes move, scale, rotate, group and undo like everything else, and follow the theme in its colour.
 - **Notes:** **T** adds a note at the cursor and you type straight away; Esc or clicking elsewhere finishes,
   and double-clicking a note edits it. Notes take the theme's colours. Select one and a format bar appears
   above it: text colour, highlight, note colour, bold / italic / underline (Ctrl+B / I / U while typing), size,
@@ -96,8 +113,8 @@ Explorer, a web browser or the clipboard.
     saves it as one `.artbook` file with its images inside (linked files go in whole), ready to send.
   - **Import:** the import button at the top (or right-click > Import Pages..., or drop the files on the board)
     opens `.artbook` files and **PureRef boards** (`.pur`) as new pages. PureRef boards keep their layout:
-    positions, sizes, rotation, flips, crops, opacity and notes. Pick several at once. Groups come in
-    ungrouped (everything keeps its place) and drawings are left out for now. Boards from PureRef 1.x need
+    positions, sizes, rotation, flips, crops, opacity, notes, image names and groups (with their colour). Pick several at
+    once. Drawings are left out for now. Boards from PureRef 1.x need
     opening and saving in PureRef 2 first.
 - **Export as PNG:** **Ctrl+E** (or right-click > Canvas) saves the selection, or the whole board, as one picture on
   the board's colour, as sharp as its images allow (up to 16384 pixels on the longest side).

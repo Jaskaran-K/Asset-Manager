@@ -401,6 +401,26 @@ def _import(p, primary, secondary):
     _line(p, primary, 2.1, (8, 10.5), (12, 14.5), (16, 10.5))
 
 
+def _lock(p, primary, secondary):
+    shackle = QPainterPath(QPointF(8, 11))
+    shackle.lineTo(8, 8)
+    shackle.arcTo(QRectF(8, 4, 8, 8), 180, -180)
+    shackle.lineTo(16, 11)
+    p.setPen(_pen(primary, 2.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(shackle)
+    _body(p, _rounded(4.5, 10.5, 15, 10.5, 2.4), secondary)
+    p.fillPath(_circle(12, 15, 1.6), primary)  # the keyhole
+    _line(p, primary, 1.6, (12, 15.5), (12, 18))
+
+
+def _eraser(p, primary, secondary):
+    turn = QTransform().translate(12, 11).rotate(-40)
+    _body(p, turn.map(_rounded(-8, -4.5, 16, 9, 2.4)), secondary)
+    p.fillPath(turn.map(_rounded(-8, -4.5, 6, 9, 2.0)), primary)  # the rubber tip
+    _line(p, primary, 1.8, (6, 20.5), (19, 20.5))  # what's left on the page
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -437,7 +457,7 @@ ICONS: dict[str, IconPainter] = {
     "align_left": _align_left,
     "align_center": _align_center,
     "align_right": _align_right,
-    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import,
+    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import, "lock": _lock, "eraser": _eraser,
 }
 
 

@@ -413,6 +413,13 @@ class PagesPanel(QWidget):
         QTimer.singleShot(0, self.rebuild)  # after the editor closes: shows the cleaned-up name
 
     # ------------------ new ------------------
+    def current_folder(self) -> Optional[str]:
+        """The folder new things go in (see _selected_folder)."""
+        return self._selected_folder()
+
+    def duplicate(self, page_id: str) -> None:
+        self._duplicate(page_id)
+
     def _selected_folder(self) -> Optional[str]:
         """The folder new things go in: the selected one, or the selected page's."""
         item = self.tree.currentItem()

@@ -17,6 +17,7 @@ Boxes = Sequence[tuple[Hashable, QRectF]]
 
 ARRANGE_ASPECT = 1.6  # arranged rows aim for a block about this much wider than tall
 GAP_SHARE = 0.03  # space between arranged images: this share of a typical image's height
+STACK_STEP = 0.05  # how far each one in a stack sits from the last, of a typical one's size
 
 
 def gap_for(boxes: Boxes) -> float:
@@ -108,6 +109,19 @@ def distribute(boxes: Boxes, horizontal: bool) -> dict[Hashable, QPointF]:
         moves[item_id] = QPointF(shift, 0) if horizontal else QPointF(0, shift)
         position += length(box) + gap
     return moves
+
+
+def stack(boxes: Boxes) -> dict[Hashable, QPointF]:
+    """A pile, like a hand of cards: every box centered where the first one is, each a little down
+    and right of the one before (by STACK_STEP of a typical box's longest side). boxes: back to front."""
+    if not boxes:
+        return {}
+    anchor = boxes[0][1].center()
+    step = STACK_STEP * median(max(box.width(), box.height()) for _id, box in boxes)
+    return {
+        item_id: anchor + QPointF(step * n, step * n) - box.center()
+        for n, (item_id, box) in enumerate(boxes)
+    }
 
 
 def same_size(sizes: Sequence[tuple[Hashable, float]]) -> float:

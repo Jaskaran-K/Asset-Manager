@@ -138,6 +138,26 @@ def _read_json(archive: zipfile.ZipFile, entry: str, name: str) -> Any:
         raise ShareError(f"{name} is damaged: {exc}") from exc
 
 
+def _groups(value: Any) -> dict[str, dict[str, Any]]:
+    """The page's groups' settings, as far as they're sane: {group id: {"fill": "#rrggbb" / "#aarrggbb",
+    "locked": True}} (either may be left out)."""
+    if not isinstance(value, dict):
+        return {}
+    groups = {}
+    for gid, meta in list(value.items())[:10000]:
+        if not (isinstance(gid, str) and 0 < len(gid) <= 64 and isinstance(meta, dict)):
+            continue
+        clean: dict[str, Any] = {}
+        fill = meta.get("fill")
+        if isinstance(fill, str) and re.fullmatch(r"#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", fill):
+            clean["fill"] = fill
+        if meta.get("locked") is True:
+            clean["locked"] = True
+        if clean:
+            groups[gid] = clean
+    return groups
+
+
 def import_page(source: Path) -> dict[str, Any]:
     """Make a new page from an .artbook file (not yet filed in the index: page_tree() does that).
     Written whole (pictures first, page.json last); a failure leaves nothing. Safe off the UI thread."""
@@ -171,7 +191,7 @@ def import_page(source: Path) -> dict[str, Any]:
 
             items = []
             for item in shared["items"]:
-                if not isinstance(item, dict) or item.get("kind", "image") not in ("image", "note"):
+                if not isinstance(item, dict) or item.get("kind", "image") not in ("image", "note", "stroke"):
                     continue
                 item = dict(item)
                 item["id"] = uuid.uuid4().hex
@@ -187,6 +207,7 @@ def import_page(source: Path) -> dict[str, Any]:
                 "created": now, "modified": now,
                 "view": shared.get("view") if isinstance(shared.get("view"), dict) else None,
                 "items": items,
+                "groups": _groups(shared.get("groups")),
             }
             store.save_page(page)
             if "thumb.png" in entries and entries["thumb.png"].file_size < MAX_JSON_BYTES:

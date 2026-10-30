@@ -35,7 +35,7 @@ FONT_SIZES = (8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 64, 72, 96)
 SWATCHES = (("White", "#ffffff"), ("Black", "#111111"))
 
 
-def _swatch_icon(color: Optional[str]) -> QIcon:
+def swatch_icon(color: Optional[str]) -> QIcon:
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -74,14 +74,14 @@ class ColorButton(QToolButton):
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setFixedSize(30, 28)
         menu = QMenu(self)
-        default = menu.addAction(_swatch_icon(None), "Theme Default")
+        default = menu.addAction(swatch_icon(None), "Theme Default")
         default.triggered.connect(self._on_default)
         for name, hex_color in SWATCHES:
-            action = menu.addAction(_swatch_icon(hex_color), name)
+            action = menu.addAction(swatch_icon(hex_color), name)
             action.setData(hex_color)
             action.triggered.connect(self._on_swatch)
         menu.addSeparator()
-        menu.addAction("Custom...").triggered.connect(self._on_custom)
+        menu.addAction("Custom...").triggered.connect(self.open_custom)
         self.setMenu(menu)
         self.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
 
@@ -95,7 +95,8 @@ class ColorButton(QToolButton):
     def _on_swatch(self) -> None:
         self.on_pick(self.sender().data())
 
-    def _on_custom(self) -> None:
+    def open_custom(self) -> None:
+        """The custom colour picker, beside avoid() (one at a time)."""
         self.close_picker()
         self.popup = ColorPopup(f"Select {self.title.lower()}", self.color or QColor("#ffffff"), self)
         self.popup.changed.connect(self._on_live_color)
@@ -142,7 +143,7 @@ class NoteBar(QFrame):
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(3)
 
-        live, avoid = board.live_note_change, self.avoid_rect
+        live, avoid = board.live_change, self.avoid_rect
         self.btn_color = ColorButton("text_color", "Text colour", board.set_note_text_color, live, avoid)
         self.btn_highlight = ColorButton("highlight", "Highlight colour (behind the text)", board.set_note_highlight, live, avoid)
         self.btn_fill = ColorButton("fill", "Note colour", board.set_note_fill, live, avoid)

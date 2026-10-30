@@ -142,7 +142,7 @@ def test_a_board_becomes_a_page_with_everything_in_its_place(qapp, board_file):
 
     board = pur_import.read_board(board_file)
     assert len(board.images) == 4 and len(board.notes) == 1
-    assert board.skipped["drawing"] == 1 and board.skipped["group"] == 1
+    assert board.skipped["drawing"] == 1 and board.groups == {20: "#4f3f3f"}  # (opaque: saved without its alpha)
     assert [i.ext for i in board.images] == [".png", ".jpg", ".png", ".png"]  # (no format saved: found from the data)
 
     page, skipped = pur_import.import_board(board_file)
@@ -177,6 +177,8 @@ def test_a_board_becomes_a_page_with_everything_in_its_place(qapp, board_file):
     assert note.pos().x() == pytest.approx(x * factor) and note.pos().y() == pytest.approx(y * factor)
     assert note.textWidth() < 200  # as wide as its words
     assert grouped.zValue() > min(i.zValue() for i in images)  # (inside its group's place in the stack)
+    assert grouped.group is not None and plain.group is None  # the group came over, with its colour
+    assert page["groups"] == {grouped.group: {"fill": "#4f3f3f"}}
 
 
 def test_board_scaled_to_real_size_and_kept_viewable(tmp_path):
@@ -258,3 +260,14 @@ def test_importing_from_the_pages_sidebar_and_by_dropping(qapp, tmp_path, board_
     panel.close()
     panel.deleteLater()
     set_motion_mode("on")
+
+
+def test_imported_images_get_their_names_and_files_back(tmp_path):
+    hashed = "8681c73ecbe4ef557f01587603dcd402"
+    assert pur_import._image_name("male-planes-torso", "https://example.com/x.png") == "male-planes-torso"
+    assert pur_import._image_name(hashed, "https://example.com/refs/skull%20side.JPG?size=2") == "skull side.JPG"
+    assert pur_import._image_name(hashed, "https://encrypted-tbn0.gstatic.com/images?q=tbn") == ""  # (nothing to go on)
+    there = tmp_path / "ref.png"
+    there.write_bytes(png(4, 4))
+    assert pur_import._local_file(str(there)) == str(there)  # still on this computer: linked again
+    assert pur_import._local_file(str(tmp_path / "gone.png")) is None and pur_import._local_file("https://x.com/a.png") is None

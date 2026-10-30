@@ -18,6 +18,7 @@ import base64
 import html as html_lib
 import io
 import math
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -33,6 +34,7 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontMetricsF,
     QImage,
     QKeyEvent,
     QPainter,
@@ -53,10 +55,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsItem,
+    QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
+    QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMenu,
     QSlider,
@@ -70,8 +75,11 @@ from PIL import Image
 
 from core import artbook_store as store
 from core import artbook_share, pur_import
-from ui import animations, artbook_layout, shortcuts
-from ui.artbook_note_bar import NoteBar
+from ui import animations, artbook_layout, file_actions, shortcuts
+from ui.artbook_note_bar import SWATCHES, NoteBar, swatch_icon
+from ui.artbook_draw_bar import DrawBar
+from ui.artbook_group_bar import GroupBar
+from ui.artbook_image_list import ImageListPanel
 from ui.tag_widgets import run_job
 from ui.themes import theme_color
 
@@ -79,6 +87,19 @@ ZOOM_RANGE = (0.02, 32.0)
 EXPORT_MAX_SIDE = 16384  # pixels: an exported picture's longest side...
 EXPORT_MAX_PIXELS = 150_000_000  # ...and its area (about 600 MB while it's made)
 EXPORT_MARGIN = 0.02  # around what's exported, of its longest side
+GROUP_PADDING = 0.025  # a group's backdrop reaches this far past its members (of its longest side)
+GROUP_DEFAULT_ALPHA = 0.10  # a group's backdrop in the theme's accent colour, this see-through
+CAPTION_SIZE = 0.045  # a caption's text height, of its image's longest side
+MAX_CAPTION = 300
+MAX_NAME = 200
+OPEN_FILES_LIMIT = 10  # Open Source File opens at most this many at once
+RELINK_SCAN_LIMIT = 300_000  # files looked at when relinking (a whole drive would take ages)
+STROKE_STEP_PX = 2.0  # a stroke gets a new point every this many pixels the pen moves
+ERASER_PX = 6  # the eraser's reach around the pointer
+MIN_STROKE_WIDTH = 0.001
+MAX_STROKE_WIDTH = 100000.0
+MAX_STROKE_POINTS = 50000
+DRAW_BAR_TOP = 12
 WHEEL_ZOOM_STEP = 1.2  # per wheel notch
 ZOOM_MS = 140
 FIT_MS = 260
@@ -154,6 +175,9 @@ class ItemState:
     opacity: float = 1.0
     gray: bool = False
     width: Optional[float] = None  # notes: the width their text wraps at
+    group: Optional[str] = None  # the group it's in (selected, moved and arranged together)
+    caption: str = ""  # images: a line of text under it
+    pixelated: bool = False  # images: hard pixel edges when zoomed in (no smoothing)
 
 
 def _gray_image(image: QImage) -> QImage:
@@ -165,6 +189,10 @@ def _gray_image(image: QImage) -> QImage:
         painter.drawImage(0, 0, image)
         painter.end()
     return gray
+
+
+def _clean_group(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and 0 < len(value) <= 64 else None
 
 
 def _clean_crop(value: Any, natural: tuple[int, int]) -> Optional[Crop]:
@@ -195,6 +223,11 @@ class ImageItem(QGraphicsItem):
         self.crop: Optional[Crop] = None
         self.gray = False
         self.cropping = False  # crop mode: the whole image shows (the cut-away part faintly)
+        self.group: Optional[str] = None
+        self.caption = ""
+        self.pixelated = False
+        self.name = ""  # what the image list calls it (empty: its file's name)
+        self.load_failed = False  # its picture couldn't be read (shown as a placeholder)
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
 
     # ------------------ state ------------------
@@ -204,18 +237,23 @@ class ImageItem(QGraphicsItem):
             self.pos().x(), self.pos().y(), self.scale(), self.rotation(),
             flip.m11() < 0, flip.m22() < 0, self.zValue(),
             self.crop, round(self.opacity(), 4), self.gray,
+            group=self.group, caption=self.caption, pixelated=self.pixelated,
         )
 
     def apply_state(self, state: ItemState) -> None:
         self.setPos(state.x, state.y)
         self.setScale(state.scale)
         self.setRotation(state.rotation)
+        flipped_v = self.transform().m22() < 0
+        if state.caption != self.caption or (self.caption and state.flip_v != flipped_v):
+            self.prepareGeometryChange()  # (the caption: under the image, which a vertical flip turns over)
         self.setTransform(QTransform.fromScale(-1.0 if state.flip_h else 1.0, -1.0 if state.flip_v else 1.0))
         self.setZValue(state.z)
         self.set_crop(state.crop)
         self.setOpacity(state.opacity)
-        if state.gray != self.gray:
-            self.gray = state.gray
+        self.group = state.group
+        if (state.gray, state.caption, state.pixelated) != (self.gray, self.caption, self.pixelated):
+            self.gray, self.caption, self.pixelated = state.gray, state.caption, state.pixelated
             self.update()
 
     def to_dict(self) -> dict[str, Any]:
@@ -225,6 +263,7 @@ class ImageItem(QGraphicsItem):
             "x": s.x, "y": s.y, "scale": s.scale, "rotation": s.rotation,
             "flip_h": s.flip_h, "flip_v": s.flip_v, "z": s.z,
             "crop": list(s.crop) if s.crop else None, "opacity": s.opacity, "gray": s.gray,
+            "group": s.group, "caption": s.caption, "pixelated": s.pixelated, "name": self.name,
         }
 
     @classmethod
@@ -234,12 +273,35 @@ class ImageItem(QGraphicsItem):
             opacity = min(1.0, max(MIN_OPACITY / 100, float(data.get("opacity", 1.0))))
         except (TypeError, ValueError):
             opacity = 1.0
+        caption = data.get("caption")
         item.apply_state(ItemState(
             float(data.get("x", 0)), float(data.get("y", 0)), float(data.get("scale", 1)) or 1.0,
             float(data.get("rotation", 0)), bool(data.get("flip_h")), bool(data.get("flip_v")), float(data.get("z", 0)),
             _clean_crop(data.get("crop"), item.natural), opacity, bool(data.get("gray")),
+            group=_clean_group(data.get("group")),
+            caption=caption[:MAX_CAPTION] if isinstance(caption, str) else "",
+            pixelated=data.get("pixelated") is True,
         ))
+        name = data.get("name")
+        item.name = name[:MAX_NAME] if isinstance(name, str) else ""
         return item
+
+    # ------------------ its file ------------------
+    def linked_path(self) -> Optional[Path]:
+        """The file it's linked to, if it has one (whether or not it's still there)."""
+        path = self.source.get("path")
+        return Path(path) if isinstance(path, str) and path else None
+
+    def file_missing(self) -> bool:
+        """Linked to a file that isn't there any more (the copy kept in the page shows instead)."""
+        path = self.linked_path()
+        return path is not None and not path.is_file()
+
+    def display_name(self) -> str:
+        if self.name:
+            return self.name
+        path = self.linked_path()
+        return path.name if path is not None else "Pasted image"
 
     def set_image(self, image: QImage) -> None:
         self.pixmap = QPixmap.fromImage(image)
@@ -288,9 +350,30 @@ class ImageItem(QGraphicsItem):
         sx, sy = self.pixmap.width() / w, self.pixmap.height() / h
         return QRectF((rect.left() + w / 2.0) * sx, (rect.top() + h / 2.0) * sy, rect.width() * sx, rect.height() * sy)
 
+    # ------------------ caption ------------------
+    def caption_layout(self) -> Optional[tuple[QRectF, QFont, float]]:
+        """(where the caption goes, its font, its padding) in the item's own coordinates, or None.
+        Its size follows the image's; it sits under what shows (over it, in item terms, when
+        flipped upside down, so it still ends up underneath)."""
+        if not self.caption:
+            return None
+        shown = self.crop_rect()
+        size = max(2.0, max(shown.width(), shown.height()) * CAPTION_SIZE)
+        font = QFont()
+        font.setPixelSize(max(2, round(size)))
+        text = QFontMetricsF(font).boundingRect(
+            QRectF(0, 0, shown.width(), 1e9), int(Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap), self.caption,
+        )
+        pad = size * 0.4
+        height = text.height() + 2 * pad
+        top = shown.top() - height if self.transform().m22() < 0 else shown.bottom()
+        return QRectF(shown.left(), top, shown.width(), height), font, pad
+
     # ------------------ painting ------------------
     def boundingRect(self) -> QRectF:
-        return self.full_rect() if self.cropping else self.crop_rect()
+        rect = self.full_rect() if self.cropping else self.crop_rect()
+        caption = self.caption_layout()
+        return rect.united(caption[0]) if caption else rect
 
     def _shown_pixmap(self) -> QPixmap:
         scene = self.scene()
@@ -304,7 +387,7 @@ class ImageItem(QGraphicsItem):
         shown = self.crop_rect()
         if self.pixmap is not None:
             pixmap = self._shown_pixmap()
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, not self.pixelated)
             if self.cropping:
                 # The part being cut away, faintly, so you can drag the crop back out over it
                 painter.save()
@@ -318,6 +401,23 @@ class ImageItem(QGraphicsItem):
             placeholder = QColor(theme_color("text_faint"))
             placeholder.setAlpha(40)
             painter.fillRect(shown, placeholder)
+        caption = self.caption_layout()
+        if caption:
+            box, font, pad = caption
+            painter.save()
+            flip = self.transform()
+            if flip.m11() < 0 or flip.m22() < 0:  # keep the words readable on a flipped image
+                middle = box.center()
+                painter.translate(middle)
+                painter.scale(-1.0 if flip.m11() < 0 else 1.0, -1.0 if flip.m22() < 0 else 1.0)
+                painter.translate(-middle)
+            painter.setFont(font)
+            painter.setPen(theme_color("text_strong"))
+            painter.drawText(
+                box.adjusted(0, pad, 0, -pad), int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap),
+                self.caption,
+            )
+            painter.restore()
         # The selection frame is drawn by the view (BoardView.drawForeground), not here
 
 
@@ -388,6 +488,7 @@ class NoteItem(QGraphicsTextItem):
         self.gray = False
         self.cropping = False
         self.fill: Optional[str] = None  # None: the theme's surface colour
+        self.group: Optional[str] = None
         self.on_edit_finished: Optional[Callable[["NoteItem"], None]] = None
         font = self.font()
         font.setPointSize(NOTE_FONT_PT)
@@ -410,7 +511,7 @@ class NoteItem(QGraphicsTextItem):
     def state(self) -> ItemState:
         return ItemState(
             self.pos().x(), self.pos().y(), self.scale(), self.rotation(), False, False, self.zValue(),
-            None, round(self.opacity(), 4), False, self.textWidth(),
+            None, round(self.opacity(), 4), False, self.textWidth(), group=self.group,
         )
 
     def apply_state(self, state: ItemState) -> None:
@@ -419,6 +520,7 @@ class NoteItem(QGraphicsTextItem):
         self.setRotation(state.rotation)
         self.setZValue(state.z)
         self.setOpacity(state.opacity)
+        self.group = state.group
         if state.width is not None and state.width != self.textWidth():
             self.setTextWidth(max(MIN_NOTE_WIDTH, state.width))
 
@@ -435,7 +537,7 @@ class NoteItem(QGraphicsTextItem):
         s = self.state()
         return {
             "id": self.item_id, "kind": "note", "text": self.toPlainText(), "html": self.toHtml(),
-            "fill": self.fill, "width": self.textWidth(),
+            "fill": self.fill, "width": self.textWidth(), "group": self.group,
             "x": s.x, "y": s.y, "scale": s.scale, "rotation": s.rotation, "z": s.z, "opacity": s.opacity,
         }
 
@@ -461,6 +563,7 @@ class NoteItem(QGraphicsTextItem):
         note.apply_state(ItemState(
             float(data.get("x", 0)), float(data.get("y", 0)), float(data.get("scale", 1)) or 1.0,
             float(data.get("rotation", 0)), z=float(data.get("z", 0)), opacity=opacity, width=width,
+            group=_clean_group(data.get("group")),
         ))
         return note
 
@@ -518,7 +621,141 @@ class NoteItem(QGraphicsTextItem):
         super().paint(painter, plain, widget)
 
 
-BOARD_ITEMS = (ImageItem, NoteItem)
+class StrokeItem(QGraphicsPathItem):
+    """A freehand stroke (Draw, D). Its points are in its own coordinates (its origin is where it
+    began); it moves, scales, rotates, stacks and groups like images and notes. Without a colour of
+    its own it takes the theme's text colour (so it follows the theme, like notes)."""
+
+    def __init__(self, item_id: str, points: list[QPointF], color: Optional[str], width: float):
+        super().__init__()
+        self.item_id = item_id
+        self.color = color
+        self.width = max(MIN_STROKE_WIDTH, float(width))
+        self.points: list[QPointF] = []
+        self.group: Optional[str] = None
+        self.crop = None  # (image-only things: strokes have none)
+        self.gray = False
+        self.cropping = False
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.apply_theme()
+        self.set_points(points)
+
+    def apply_theme(self) -> None:
+        pen = QPen(QColor(self.color) if self.color else theme_color("text_strong"), self.width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        self.setPen(pen)
+
+    def set_points(self, points: list[QPointF]) -> None:
+        """The stroke's line, smoothed through its points."""
+        self.points = list(points)
+        path = QPainterPath(self.points[0] if self.points else QPointF())
+        if len(self.points) == 1:
+            path.lineTo(self.points[0])  # (a dot: a round cap on nothing)
+        for before, point in zip(self.points, self.points[1:]):
+            path.quadTo(before, (before + point) / 2.0)
+        if len(self.points) > 1:
+            path.lineTo(self.points[-1])
+        self.setPath(path)
+
+    def state(self) -> ItemState:
+        return ItemState(
+            self.pos().x(), self.pos().y(), self.scale(), self.rotation(), False, False, self.zValue(),
+            None, round(self.opacity(), 4), group=self.group,
+        )
+
+    def apply_state(self, state: ItemState) -> None:
+        self.setPos(state.x, state.y)
+        self.setScale(state.scale)
+        self.setRotation(state.rotation)
+        self.setZValue(state.z)
+        self.setOpacity(state.opacity)
+        self.group = state.group
+
+    def to_dict(self) -> dict[str, Any]:
+        s = self.state()
+        return {
+            "id": self.item_id, "kind": "stroke", "color": self.color, "width": self.width,
+            "points": [[round(p.x(), 2), round(p.y(), 2)] for p in self.points],
+            "x": s.x, "y": s.y, "scale": s.scale, "rotation": s.rotation, "z": s.z, "opacity": s.opacity, "group": s.group,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "StrokeItem":
+        points = []
+        raw = data.get("points")
+        for point in raw[:MAX_STROKE_POINTS] if isinstance(raw, list) else []:
+            if isinstance(point, (list, tuple)) and len(point) == 2 and all(isinstance(v, (int, float)) for v in point):
+                points.append(QPointF(float(point[0]), float(point[1])))
+        color = data.get("color")
+        try:
+            width = min(MAX_STROKE_WIDTH, float(data.get("width", 4.0)))
+            opacity = min(1.0, max(MIN_OPACITY / 100, float(data.get("opacity", 1.0))))
+        except (TypeError, ValueError):
+            width, opacity = 4.0, 1.0
+        stroke = cls(
+            str(data.get("id") or uuid.uuid4().hex), points or [QPointF()],
+            color if isinstance(color, str) and QColor(color).isValid() else None, width,
+        )
+        stroke.apply_state(ItemState(
+            float(data.get("x", 0)), float(data.get("y", 0)), float(data.get("scale", 1)) or 1.0,
+            float(data.get("rotation", 0)), z=float(data.get("z", 0)), opacity=opacity, group=_clean_group(data.get("group")),
+        ))
+        return stroke
+
+    def full_rect(self) -> QRectF:
+        return self.boundingRect()
+
+    def crop_rect(self) -> QRectF:
+        return self.boundingRect()
+
+    def image(self) -> None:
+        return None
+
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: Optional[QWidget] = None) -> None:
+        plain = QStyleOptionGraphicsItem(option)  # no dashed selection box: the view draws the frame
+        plain.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        super().paint(painter, plain, widget)
+
+
+BOARD_ITEMS = (ImageItem, NoteItem, StrokeItem)
+
+
+class _BoardScene(QGraphicsScene):
+    """The board's scene. Behind everything, each group's backdrop: a rounded panel around its
+    members (in the scene, so exports and thumbnails show it too)."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.gray_all = False  # the whole board in grayscale (read by ImageItem.paint)
+        self.group_backdrops: Callable[[], list[tuple[QRectF, Optional[str]]]] = list
+
+    def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawBackground(painter, rect)
+        backdrops = self.group_backdrops()
+        if not backdrops:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for box, fill in backdrops:
+            if not box.intersects(rect):
+                continue
+            if fill:
+                color = QColor(fill)
+                edge = color.darker(120)
+            else:
+                color = QColor(theme_color("accent"))
+                color.setAlphaF(GROUP_DEFAULT_ALPHA)
+                edge = QColor(theme_color("accent"))
+                edge.setAlphaF(0.35)
+            pen = QPen(edge, 1.5)
+            pen.setCosmetic(True)  # (a hairline at any zoom)
+            painter.setPen(pen)
+            painter.setBrush(color)
+            radius = min(box.width(), box.height()) * 0.03
+            painter.drawRoundedRect(box, radius, radius)
+        painter.restore()
 
 
 class _ColorReadout(QWidget):
@@ -606,6 +843,71 @@ class _TextCommand(QUndoCommand):
 
     def undo(self) -> None:
         self.note.set_content(self.before)
+
+
+class _ReplaceCommand(QUndoCommand):
+    """An image's picture swapped for another (its place, size, crop and adjustments kept).
+    before / after: {"source", "natural", "name", "pixmap", "state"}."""
+
+    def __init__(self, item: "ImageItem", before: dict[str, Any], after: dict[str, Any]):
+        super().__init__("replace image")
+        self.item, self.before, self.after = item, before, after
+
+    @staticmethod
+    def _apply(item: "ImageItem", picture: dict[str, Any]) -> None:
+        item.prepareGeometryChange()
+        item.source, item.natural, item.name = dict(picture["source"]), picture["natural"], picture["name"]
+        item.pixmap, item._gray_pixmap, item.load_failed = picture["pixmap"], None, False
+        item.crop = None  # (the state brings the crop that fits this picture)
+        item.apply_state(picture["state"])
+        item.update()
+
+    def redo(self) -> None:
+        self._apply(self.item, self.after)
+
+    def undo(self) -> None:
+        self._apply(self.item, self.before)
+
+
+class _SourcesCommand(QUndoCommand):
+    """Images linked to other files ({item id: (source before, source after)}); each is read again."""
+
+    def __init__(self, board: "BoardView", changes: dict[str, tuple[dict[str, Any], dict[str, Any]]]):
+        super().__init__("relink images")
+        self.board, self.changes = board, changes
+
+    def redo(self) -> None:
+        self.board.set_sources({item_id: after for item_id, (_before, after) in self.changes.items()})
+
+    def undo(self) -> None:
+        self.board.set_sources({item_id: before for item_id, (before, _after) in self.changes.items()})
+
+
+class _GroupMetaCommand(QUndoCommand):
+    """Groups' own settings changing ({group id: {"fill": colour, "locked": True}}, {} for none).
+    Commands with the same merge key (a live colour pick) add up to one step."""
+
+    def __init__(
+        self, board: "BoardView", before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]],
+        text: str, merge: Optional[int] = None,
+    ):
+        super().__init__(text)
+        self.board, self.before, self.after, self.merge = board, before, after, merge
+
+    def id(self) -> int:
+        return 2 if self.merge is not None else -1
+
+    def mergeWith(self, other: QUndoCommand) -> bool:
+        if not isinstance(other, _GroupMetaCommand) or other.merge != self.merge or other.after.keys() != self.after.keys():
+            return False
+        self.after = other.after
+        return True
+
+    def redo(self) -> None:
+        self.board.set_group_metas(self.after)
+
+    def undo(self) -> None:
+        self.board.set_group_metas(self.before)
 
 
 # ----------------------------------------------------------------------
@@ -741,6 +1043,23 @@ def _decode_saved(page_id: str, source: dict[str, Optional[str]]) -> QImage:
 # ----------------------------------------------------------------------
 # The board
 # ----------------------------------------------------------------------
+def find_files(folder: Path, names: set[str], limit: int = RELINK_SCAN_LIMIT) -> dict[str, str]:
+    """Look through a folder (and the folders in it) for files with these names (any case).
+    {lowercase name: the first such file found}. Safe off the UI thread."""
+    wanted = {name.lower() for name in names}
+    found: dict[str, str] = {}
+    seen = 0
+    for root, _dirs, files in os.walk(folder):
+        for file_name in files:
+            seen += 1
+            key = file_name.lower()
+            if key in wanted and key not in found:
+                found[key] = str(Path(root) / file_name)
+        if len(found) == len(wanted) or seen > limit:
+            break
+    return found
+
+
 def _is_web_url(text: str) -> bool:
     return text.startswith(("http://", "https://"))
 
@@ -753,6 +1072,8 @@ class BoardView(QGraphicsView):
     boards_dropped = Signal(list)  # board files dropped on it (.artbook, PureRef .pur): to import as pages
     export_image_requested = Signal()  # Ctrl+E / the menu: the panel asks where, then calls export_image
     export_page_requested = Signal()  # the menu: share the page as an .artbook file
+    files_changed = Signal()  # an image's picture came in (or failed), or it was relinked: for the image list
+    image_list_toggled = Signal(bool)  # the image list was shown / hidden
 
     # Keys the board handles itself while it has the focus (even ones the window also uses)
     KEYS = (
@@ -760,14 +1081,15 @@ class BoardView(QGraphicsView):
         "artbook.front", "artbook.back", "artbook.reset", "artbook.delete", "artbook.select_all",
         "artbook.deselect", "artbook.undo", "artbook.redo", "artbook.pan_key", "artbook.arrange",
         "artbook.crop", "artbook.crop_apply", "artbook.gray", "artbook.gray_board", "artbook.note", "artbook.picker",
-        "artbook.export_png",
+        "artbook.export_png", "artbook.group", "artbook.ungroup", "artbook.image_list", "artbook.draw", "artbook.eraser",
     )
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("artbookBoard")
         self.setProperty("smoothScroll", False)  # the wheel zooms here (ui.views would scroll)
-        self._scene = QGraphicsScene(-SCENE_EXTENT, -SCENE_EXTENT, 2 * SCENE_EXTENT, 2 * SCENE_EXTENT, self)
+        self._scene = _BoardScene(-SCENE_EXTENT, -SCENE_EXTENT, 2 * SCENE_EXTENT, 2 * SCENE_EXTENT, self)
+        self._scene.group_backdrops = self.group_backdrops
         self._scene.selectionChanged.connect(self._on_selection_changed)
         self.setScene(self._scene)
         self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
@@ -801,9 +1123,19 @@ class BoardView(QGraphicsView):
         self._readout.hide()
         self._note_bar: Optional[NoteBar] = None  # floats above the selected note (made when first needed:
         self._note_bar_queued = False  # listing the system's fonts for it is slow)
-        self._live_merge: Optional[int] = None  # (see live_note_change)
+        self._live_merge: Optional[int] = None  # (see live_change)
         self._live_merges = 0
-        self._scene.gray_all = False  # the whole board in grayscale (read by ImageItem.paint)
+        self._groups: dict[str, dict[str, Any]] = {}  # group id -> {"fill": colour}, for groups with one
+        self._expanding = False  # (selecting the rest of a group)
+        self._single_pick = False  # Alt+click: one member of a group, on its own
+        self._group_bar: Optional[GroupBar] = None  # floats above the selected group (made when first needed)
+        self._image_list: Optional[ImageListPanel] = None  # every image on the page, at the right (L)
+        self._pen: dict[str, Any] = {"color": None, "width": 4, "eraser": False}  # the pen (kept between sessions)
+        self._draw_on = False  # draw mode (D)
+        self._stroke: Optional[dict[str, Any]] = None  # a stroke being drawn (or strokes being erased)
+        self._draw_bar: Optional[DrawBar] = None
+        # The Pages submenu of the right-click menu, from the panel (ui.artbook): its entries
+        self.page_menu: Optional[Callable[[], list]] = None
 
         self._zoom_anim = QVariantAnimation(self)
         self._zoom_anim.setDuration(ZOOM_MS)
@@ -840,9 +1172,12 @@ class BoardView(QGraphicsView):
     def load_page(self, page: dict[str, Any]) -> None:
         """Show a page (its images fill in as they're decoded)."""
         self._generation += 1
+        if self._group_bar is not None:
+            self._group_bar.close_pickers()
         self.cancel_crop()
         self.finish_note_edit()
         self.stop_picker()
+        self.stop_draw()
         self._loading = True  # clearing the undo stack isn't a change to save
         self.undo_stack.clear()
         self._loading = False
@@ -851,10 +1186,24 @@ class BoardView(QGraphicsView):
             self.detach(item)
         self._items.clear()
         self.page_id = page["id"]
+        groups = page.get("groups")
+        self._groups = {
+            gid: {"fill": meta["fill"]} for gid, meta in (groups.items() if isinstance(groups, dict) else [])
+            if _clean_group(gid) and isinstance(meta, dict) and isinstance(meta.get("fill"), str) and QColor(meta["fill"]).isValid()
+        }
         generation = self._generation
+        groups = page.get("groups")
+        for gid, meta in (groups.items() if isinstance(groups, dict) else []):
+            if gid in self._groups and isinstance(meta, dict) and meta.get("locked") is True:
+                self._groups[gid]["locked"] = True
+            elif _clean_group(gid) and isinstance(meta, dict) and meta.get("locked") is True:
+                self._groups[gid] = {"locked": True}
         for data in page.get("items", []):
             if data.get("kind") == "note":
                 self.attach(NoteItem.from_dict(data))
+                continue
+            if data.get("kind") == "stroke":
+                self.attach(StrokeItem.from_dict(data))
                 continue
             if data.get("kind") != "image":
                 continue
@@ -866,6 +1215,7 @@ class BoardView(QGraphicsView):
                 lambda image, item=item, generation=generation: self._on_saved_decoded(item, image, generation),
                 lambda error, item=item, generation=generation: self._on_saved_failed(item, error, generation),
             )
+        self._apply_locks()
         view = page.get("view")
         if isinstance(view, dict):
             self.set_view(float(view.get("zoom", 1.0)), QPointF(float(view.get("x", 0)), float(view.get("y", 0))))
@@ -876,6 +1226,11 @@ class BoardView(QGraphicsView):
 
     def page_items(self) -> list[dict[str, Any]]:
         return [item.to_dict() for item in sorted(self._items.values(), key=lambda i: i.zValue())]
+
+    def page_groups(self) -> dict[str, dict[str, Any]]:
+        """The groups' own settings (their colour), for the groups still on the page."""
+        used = {item.group for item in self._items.values() if item.group}
+        return {gid: dict(meta) for gid, meta in self._groups.items() if gid in used}
 
     def thumbnail(self, width: int = 160, height: int = 120) -> Optional[QImage]:
         """Everything on the page, fitted into width x height (transparent around it); None if empty."""
@@ -959,6 +1314,8 @@ class BoardView(QGraphicsView):
         self._items[item.item_id] = item
         if item.scene() is None:
             self._scene.addItem(item)
+        if any(meta.get("locked") for meta in self._groups.values()):
+            self._apply_locks()
         self._update_hint()
 
     def detach(self, item: ImageItem) -> None:
@@ -973,14 +1330,20 @@ class BoardView(QGraphicsView):
             item = self._items.get(item_id)
             if item is not None:
                 item.apply_state(state)
+        if any(meta.get("locked") for meta in self._groups.values()):
+            self._apply_locks()  # (a group's members may have changed)
         self.viewport().update()
 
     def _on_saved_decoded(self, item: ImageItem, image: QImage, generation: int) -> None:
         if generation == self._generation:
+            item.load_failed = False
             item.set_image(image)
+            self.files_changed.emit()
 
     def _on_saved_failed(self, item: ImageItem, error: str, generation: int) -> None:
         if generation == self._generation:
+            item.load_failed = True
+            self.files_changed.emit()
             self.show_message(f"An image couldn't be loaded: {error}")
 
     def _on_undo_index_changed(self, _index: int) -> None:
@@ -1008,6 +1371,22 @@ class BoardView(QGraphicsView):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._place_overlays()
+        if self._image_list is not None and self._image_list.isVisible():
+            self._image_list.place()
+
+    @property
+    def image_list(self) -> ImageListPanel:
+        if self._image_list is None:
+            self._image_list = ImageListPanel(self)
+        return self._image_list
+
+    def toggle_image_list(self) -> None:
+        """L: show / hide the list of every image on the page."""
+        self.image_list.toggle()
+        self.image_list_toggled.emit(self.image_list.isVisible())
+
+    def image_list_open(self) -> bool:
+        return self._image_list is not None and self._image_list.isVisible()
 
     # ------------------ adding images ------------------
     def add_files(self, paths: list[Path], at: Optional[QPointF] = None) -> int:
@@ -1239,7 +1618,446 @@ class BoardView(QGraphicsView):
         return [i for i in self._scene.selectedItems() if isinstance(i, ImageItem)]
 
     def _on_selection_changed(self) -> None:
+        if not self._expanding and not self._single_pick:
+            groups = {item.group for item in self.selected() if item.group}
+            missing = [i for i in self._items.values() if i.group in groups and not i.isSelected()] if groups else []
+            if missing:
+                self._expanding = True  # selecting one of a group selects all of it
+                try:
+                    for item in missing:
+                        item.setSelected(True)
+                finally:
+                    self._expanding = False
         self.viewport().update()
+
+    # ------------------ groups ------------------
+    def group_members(self, group: Optional[str]) -> list[ImageItem]:
+        return [i for i in self._items.values() if group and i.group == group]
+
+    def group_backdrops(self) -> list[tuple[QRectF, Optional[str]]]:
+        """Each group's panel (around its members, with a margin) and colour (None: the theme's)."""
+        return [(box, self.group_fill(gid)) for gid, box in self.group_backdrop_boxes().items()]
+
+    def group_backdrop_boxes(self) -> dict[str, QRectF]:
+        """Each group's panel (groups of two or more), by group id."""
+        boxes: dict[str, QRectF] = {}
+        counts: dict[str, int] = {}
+        for item in self._items.values():
+            if item.group and item.isVisible():
+                rect = item.sceneBoundingRect()
+                boxes[item.group] = boxes[item.group].united(rect) if item.group in boxes else rect
+                counts[item.group] = counts.get(item.group, 0) + 1
+        result = {}
+        for gid, box in boxes.items():
+            if counts[gid] >= 2:
+                pad = max(box.width(), box.height()) * GROUP_PADDING
+                result[gid] = box.adjusted(-pad, -pad, pad, pad)
+        return result
+
+    def group_selection(self) -> None:
+        """Ctrl+G: the selection becomes one group (its members leave any group they were in)."""
+        items = self.selected()
+        if len(items) < 2:
+            return
+        gid = uuid.uuid4().hex
+        self._change_selection("group", lambda _item, s: replace(s, group=gid), items)
+
+    def ungroup_selection(self) -> None:
+        """Ctrl+Shift+G: the selected groups come apart (everything stays where it is)."""
+        items = [i for i in self.selected() if i.group]
+        self._change_selection("ungroup", lambda _item, s: replace(s, group=None), items)
+
+    # ------------------ drawing ------------------
+    def drawing(self) -> bool:
+        return self._draw_on
+
+    @property
+    def draw_bar(self) -> DrawBar:
+        if self._draw_bar is None:
+            self._draw_bar = DrawBar(self)
+        return self._draw_bar
+
+    def toggle_draw(self) -> None:
+        """D: draw freehand strokes on the board (D again, Esc or Done to stop)."""
+        if self._draw_on:
+            self.stop_draw()
+        else:
+            self.start_draw()
+
+    def start_draw(self) -> None:
+        self.finish_note_edit()
+        self.stop_picker()
+        if self._crop:
+            self.apply_crop()
+        self._draw_on = True
+        self._scene.clearSelection()
+        self._sync_draw_bar()
+        bar = self.draw_bar
+        bar.resize(bar.sizeHint())
+        bar.move((self.width() - bar.width()) // 2, DRAW_BAR_TOP)
+        bar.show()
+        bar.raise_()
+        self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+
+    def stop_draw(self) -> None:
+        if not self._draw_on:
+            return
+        self._finish_stroke()
+        self._draw_on = False
+        if self._draw_bar is not None:
+            self._draw_bar.close_pickers()
+            self._draw_bar.hide()
+        self.viewport().unsetCursor()
+
+    def set_pen_color(self, color: Optional[str]) -> None:
+        self._pen["color"] = color
+        self._sync_draw_bar()
+
+    def set_pen_width(self, width: int) -> None:
+        self._pen["width"] = max(1, int(width))
+        self._sync_draw_bar()
+
+    def toggle_eraser(self) -> None:
+        """E (while drawing): drag over strokes to remove them."""
+        self._pen["eraser"] = not self._pen["eraser"]
+        self._sync_draw_bar()
+
+    def _sync_draw_bar(self) -> None:
+        if self._draw_bar is not None or self._draw_on:
+            color = QColor(self._pen["color"]) if self._pen["color"] else theme_color("text_strong")
+            self.draw_bar.sync(color, self._pen["width"], self._pen["eraser"])
+
+    def _begin_stroke(self, pos: QPointF) -> None:
+        if self._pen["eraser"]:
+            self._stroke = {"erased": [], "last": pos}
+            self._erase_at(pos)
+            return
+        start = self.mapToScene(pos.toPoint())
+        item = StrokeItem(uuid.uuid4().hex, [QPointF()], self._pen["color"], self._pen["width"] / self.zoom())
+        item.setPos(start)
+        item.setZValue(max((i.zValue() for i in self._items.values()), default=0.0) + 1.0)
+        self._scene.addItem(item)  # (on the board while it's drawn; added for good when it's done)
+        self._stroke = {"item": item, "last": pos}
+
+    def _extend_stroke(self, pos: QPointF) -> None:
+        stroke = self._stroke
+        if "erased" in stroke:
+            # Along the whole way from the last point: a quick drag mustn't skip a stroke
+            last = stroke["last"]
+            steps = max(1, math.ceil(math.hypot(pos.x() - last.x(), pos.y() - last.y()) / ERASER_PX))
+            for n in range(1, steps + 1):
+                self._erase_at(last + (pos - last) * (n / steps))
+            stroke["last"] = pos
+            return
+        if math.hypot(pos.x() - stroke["last"].x(), pos.y() - stroke["last"].y()) < STROKE_STEP_PX:
+            return
+        stroke["last"] = pos
+        item = stroke["item"]
+        item.set_points(item.points + [self.mapToScene(pos.toPoint()) - item.pos()])
+
+    def _erase_at(self, pos: QPointF) -> None:
+        reach = ERASER_PX
+        area = QRect(round(pos.x()) - reach, round(pos.y()) - reach, 2 * reach, 2 * reach)
+        for item in self.items(area):
+            if isinstance(item, StrokeItem) and item.isVisible() and item.item_id in self._items and not self.is_locked(item):
+                item.setVisible(False)  # (gone for good when the drag ends: one undo step)
+                self._stroke["erased"].append(item)
+
+    def _finish_stroke(self) -> None:
+        stroke, self._stroke = self._stroke, None
+        if stroke is None:
+            return
+        if "erased" in stroke:
+            for item in stroke["erased"]:
+                item.setVisible(True)
+            if stroke["erased"]:
+                self.undo_stack.push(_RemoveCommand(self, stroke["erased"], "erase"))
+            return
+        self.undo_stack.push(_AddCommand(self, [stroke["item"]], "draw"))
+
+    # ------------------ files: copy path, Explorer, open, replace, relink ------------------
+    def _images_in_order(self) -> list[ImageItem]:
+        return sorted(self.selected_images(), key=lambda item: item.zValue())  # (back to front: always the same)
+
+    def selected_files(self) -> list[Path]:
+        """The files the selected images are linked to (that are still there)."""
+        return [path for item in self._images_in_order() if (path := item.linked_path()) is not None and path.is_file()]
+
+    def copy_file_paths(self) -> bool:
+        """Copy the selected images' file paths, one per line (their linked files, there or not)."""
+        paths = [str(path) for item in self._images_in_order() if (path := item.linked_path()) is not None]
+        if paths:
+            QApplication.clipboard().setText("\n".join(paths))
+        return bool(paths)
+
+    def show_in_explorer(self) -> None:
+        files = self.selected_files()
+        if files:
+            file_actions.reveal(files[0])
+
+    def open_source_files(self) -> None:
+        """Open the selected images' files in the app Windows uses for them (a few at most)."""
+        for path in self.selected_files()[:OPEN_FILES_LIMIT]:
+            file_actions.open_file(path)
+
+    def replace_image(self, path: Optional[Path] = None) -> None:
+        """Swap the one selected image's picture for another file (asks which). It keeps its place,
+        its size on the board, its crop (as a share of the picture) and its adjustments."""
+        images = self.selected_images()
+        if len(images) != 1 or len(self.selected()) != 1 or self.page_id is None or self.is_locked(images[0]):
+            return
+        if path is None:
+            extensions = " ".join(f"*{ext}" for ext in sorted(store.IMAGE_EXTENSIONS))
+            chosen, _filter = QFileDialog.getOpenFileName(self, "Replace Image", "", f"Images ({extensions})")
+            if not chosen:
+                return
+            path = Path(chosen)
+        item, page_id, generation = images[0], self.page_id, self._generation
+        self.show_message(f"Replacing with {Path(path).name}...")
+        run_job(
+            lambda: _prepare_file(page_id, Path(path)),
+            lambda result: self._on_replacement(item, result, generation),
+            self.show_message,
+        )
+
+    def _on_replacement(self, item: ImageItem, result: dict[str, Any], generation: int) -> None:
+        if generation != self._generation or item.item_id not in self._items:
+            return
+        state = item.state()
+        old_w, old_h = item.natural
+        new_w, new_h = max(1, int(result["size"][0])), max(1, int(result["size"][1]))
+        crop = None
+        if item.crop:
+            left, top, right, bottom = item.crop
+            crop = _clean_crop((left / old_w * new_w, top / old_h * new_h, right / old_w * new_w, bottom / old_h * new_h), (new_w, new_h))
+        shown_old = item.crop_rect()
+        shown_new_width = (crop[2] - crop[0]) if crop else new_w
+        scale = state.scale * shown_old.width() / shown_new_width
+        middle_now = item.mapToScene(shown_old.center())
+        if crop:
+            left, top, right, bottom = crop
+            middle = QPointF((left + right) / 2 - new_w / 2, (top + bottom) / 2 - new_h / 2)
+        else:
+            middle = QPointF()
+        shape = (
+            QTransform.fromScale(-1.0 if state.flip_h else 1.0, -1.0 if state.flip_v else 1.0)
+            * QTransform().scale(scale, scale) * QTransform().rotate(state.rotation)
+        )
+        position = middle_now - shape.map(middle)
+        before = {"source": dict(item.source), "natural": item.natural, "name": item.name, "pixmap": item.pixmap, "state": state}
+        after = {
+            "source": result["source"], "natural": (new_w, new_h), "name": "", "pixmap": QPixmap.fromImage(result["image"]),
+            "state": replace(state, x=position.x(), y=position.y(), scale=scale, crop=crop),
+        }
+        self.undo_stack.push(_ReplaceCommand(item, before, after))
+        self.viewport().update()
+
+    def missing_images(self) -> list[ImageItem]:
+        return [item for item in self._items.values() if isinstance(item, ImageItem) and item.file_missing()]
+
+    def relink_missing(self, folder: Optional[Path] = None) -> None:
+        """Find the images whose files moved: look for files with the same names in a folder
+        (and the folders in it). One undo step; the ones not found stay as they are."""
+        missing = self.missing_images()
+        if not missing:
+            self.show_message("No images are missing their files.")
+            return
+        if folder is None:
+            chosen = QFileDialog.getExistingDirectory(self, "Relink Missing Images: where are the files now?")
+            if not chosen:
+                return
+            folder = Path(chosen)
+        names = {item.linked_path().name for item in missing}
+        generation = self._generation
+        self.show_message(f"Looking for {len(missing)} missing file{'s' if len(missing) != 1 else ''} in {folder.name or folder}...")
+        run_job(
+            lambda: find_files(folder, names),
+            lambda found: self._on_relinked(found, generation),
+            self.show_message,
+        )
+
+    def _on_relinked(self, found: dict[str, str], generation: int) -> None:
+        if generation != self._generation:
+            return
+        missing = self.missing_images()
+        changes = {}
+        for item in missing:
+            path = found.get(item.linked_path().name.lower())
+            if path:
+                changes[item.item_id] = (dict(item.source), {**item.source, "path": path})
+        if changes:
+            self.undo_stack.push(_SourcesCommand(self, changes))
+        left = len(missing) - len(changes)
+        message = f"Relinked {len(changes)} image{'s' if len(changes) != 1 else ''}."
+        if left:
+            message += f" {left} still missing (no file with {'its' if left == 1 else 'their'} name there)."
+        self.show_message(message)
+
+    def set_sources(self, sources: dict[str, dict[str, Any]]) -> None:
+        """Point images at other files (or back), and read their pictures again."""
+        for item_id, source in sources.items():
+            item = self._items.get(item_id)
+            if item is None:
+                continue
+            item.source = dict(source)
+            page_id, generation = self.page_id, self._generation
+            run_job(
+                lambda page_id=page_id, source=dict(source): _decode_saved(page_id, source),
+                lambda image, item=item, generation=generation: self._on_saved_decoded(item, image, generation),
+                lambda error, item=item, generation=generation: self._on_saved_failed(item, error, generation),
+            )
+        self.files_changed.emit()
+
+    # ------------------ a group's colour and lock (and its bar) ------------------
+    def selected_groups(self) -> list[str]:
+        return sorted({item.group for item in self.selected() if item.group and len(self.group_members(item.group)) >= 2})
+
+    def group_fill(self, group: str) -> Optional[str]:
+        return self._groups.get(group, {}).get("fill")
+
+    def group_locked(self, group: Optional[str]) -> bool:
+        return bool(group) and self._groups.get(group, {}).get("locked") is True
+
+    def is_locked(self, item: ImageItem) -> bool:
+        return self.group_locked(item.group) and len(self.group_members(item.group)) >= 2
+
+    def _unlocked(self, items: list[ImageItem]) -> list[ImageItem]:
+        return [item for item in items if not self.is_locked(item)]
+
+    def set_group_metas(self, metas: dict[str, dict[str, Any]]) -> None:
+        """Set groups' own settings as they are ({} for none): no undo step (see set_group_fill)."""
+        for gid, meta in metas.items():
+            if meta:
+                self._groups[gid] = dict(meta)
+            else:
+                self._groups.pop(gid, None)
+        self._apply_locks()
+        self._sync_group_bar()
+        self.viewport().update()
+
+    def _change_groups(self, groups: list[str], change: Callable[[dict[str, Any]], dict[str, Any]], text: str) -> None:
+        before = {gid: dict(self._groups.get(gid, {})) for gid in groups if self.group_members(gid)}
+        after = {gid: {k: v for k, v in change(dict(meta)).items() if v not in (None, False)} for gid, meta in before.items()}
+        if before and before != after:
+            self.undo_stack.push(_GroupMetaCommand(self, before, after, text, self._live_merge if text == "group colour" else None))
+
+    def set_group_fill(self, fill: Optional[str], groups: Optional[list[str]] = None) -> None:
+        """The selected groups' (or groups') colour, None for the theme's: one undo step (while a
+        custom colour is picked live, its changes add up to one)."""
+        self._change_groups(self.selected_groups() if groups is None else groups, lambda meta: {**meta, "fill": fill}, "group colour")
+
+    def toggle_group_lock(self) -> None:
+        """Lock the selected groups in place (or unlock them, if they're all locked)."""
+        groups = self.selected_groups()
+        locked = not all(self.group_locked(gid) for gid in groups)
+        self._change_groups(groups, lambda meta: {**meta, "locked": locked}, "lock group" if locked else "unlock group")
+
+    def _apply_locks(self) -> None:
+        """A locked group's members can't be dragged."""
+        counts: dict[str, int] = {}
+        for item in self._items.values():
+            if item.group:
+                counts[item.group] = counts.get(item.group, 0) + 1
+        for item in self._items.values():
+            locked = self.group_locked(item.group) and counts.get(item.group, 0) >= 2
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked)
+
+    @staticmethod
+    def default_group_color() -> QColor:
+        color = QColor(theme_color("accent"))
+        color.setAlphaF(GROUP_DEFAULT_ALPHA)
+        return color
+
+    def _group_color_menu(self, enabled: bool) -> list:
+        """Group Colour: the theme's, white, black, or Custom... (the same choices as a note's colours)."""
+        entries: list = []
+        for name, fill in (("Theme Default", None),) + SWATCHES:
+            action = QAction(swatch_icon(fill), name, self)
+            action.setEnabled(enabled)
+            action.triggered.connect(lambda _checked=False, fill=fill: self.set_group_fill(fill))
+            entries.append(action)
+        entries += [None, ("Custom...", None, self.pick_group_color, enabled)]
+        return entries
+
+    def pick_group_color(self) -> None:
+        """Custom group colour: the group bar's colour picker (floating beside the bar and group)."""
+        self._place_group_bar()
+        if self._group_bar is not None and self._group_bar.isVisible():
+            self._group_bar.btn_color.open_custom()
+
+    @property
+    def group_bar(self) -> GroupBar:
+        if self._group_bar is None:
+            self._group_bar = GroupBar(self)
+        return self._group_bar
+
+    def group_bar_target(self) -> Optional[str]:
+        """The group the bar works on: when the selection is exactly one group (and nothing's being typed)."""
+        groups = self.selected_groups()
+        if len(groups) != 1 or self._editing or self._crop or self._picking:
+            return None
+        return groups[0] if all(item.group == groups[0] for item in self.selected()) else None
+
+    def group_bar_box(self) -> Optional[QRect]:
+        """The bar's group's panel, in view coordinates."""
+        gid = self.group_bar_target()
+        box = self.group_backdrop_boxes().get(gid) if gid else None
+        return self.mapFromScene(box).boundingRect() if box is not None else None
+
+    def _sync_group_bar(self) -> None:
+        gid = self.group_bar_target()
+        if gid is not None and self._group_bar is not None:
+            fill = self.group_fill(gid)
+            self._group_bar.sync(QColor(fill) if fill else self.default_group_color(), self.group_locked(gid))
+
+    def _place_group_bar(self) -> None:
+        box = self.group_bar_box()
+        if box is None:
+            if self._group_bar is not None:
+                self._group_bar.hide()
+                self._group_bar.close_pickers()  # (nothing left for an open colour picker to colour)
+            return
+        bar = self.group_bar
+        bar.resize(bar.sizeHint())
+        x = max(4, min(box.center().x() - bar.width() // 2, self.width() - bar.width() - 4))
+        y = box.top() - bar.height() - NOTE_BAR_GAP
+        if y < 4:
+            y = min(box.bottom() + 12, self.height() - bar.height() - 4)  # no room above: below it
+        gid = self.group_bar_target()
+        if not bar.isVisible() or bar.property("group") != gid:
+            bar.setProperty("group", gid)
+            self._sync_group_bar()
+        bar.move(x, y)
+        bar.show()
+        bar.raise_()
+
+    def _group_at(self, scene_point: QPointF) -> Optional[str]:
+        """The group whose panel is at a point (the smallest, where panels overlap)."""
+        inside = [(box.width() * box.height(), gid) for gid, box in self.group_backdrop_boxes().items() if box.contains(scene_point)]
+        return min(inside)[1] if inside else None
+
+    def _units(self, items: list[ImageItem]) -> dict[str, list[ImageItem]]:
+        """items in blocks: a group's members together, everything else on its own. If they're all
+        one group, its members on their own (arranging a group tidies inside it)."""
+        units: dict[str, list[ImageItem]] = {}
+        for item in items:
+            units.setdefault(item.group or item.item_id, []).append(item)
+        if len(units) == 1 and len(items) > 1:
+            units = {item.item_id: [item] for item in items}
+        return units
+
+    @staticmethod
+    def _unit_boxes(units: dict[str, list[ImageItem]]) -> list[tuple[str, QRectF]]:
+        boxes = []
+        for key, members in units.items():
+            rect = QRectF()
+            for item in members:
+                rect = rect.united(item.sceneBoundingRect())
+            boxes.append((key, rect))
+        return boxes
+
+    def _move_units(self, units: dict[str, list[ImageItem]], moves: dict[str, QPointF], text: str) -> None:
+        self._move_by({item.item_id: moves[key] for key, members in units.items() if key in moves for item in members}, text)
 
     def _image_at(self, pos: QPointF) -> Optional[ImageItem]:
         """The image or note under a point of the view."""
@@ -1284,24 +2102,26 @@ class BoardView(QGraphicsView):
         self._change_selection(
             "flip",
             lambda item, s: self._centered(item, replace(s, flip_h=not s.flip_h) if horizontal else replace(s, flip_v=not s.flip_v)),
-            self.selected_images(),  # notes don't flip
+            self._unlocked(self.selected_images()),  # notes don't flip
         )
 
     def reset_transform(self) -> None:
         """R: rotation, size and flips back to how the image came in (crop kept)."""
         self._change_selection(
-            "reset", lambda item, s: self._centered(item, replace(s, scale=1.0, rotation=0.0, flip_h=False, flip_v=False))
+            "reset", lambda item, s: self._centered(item, replace(s, scale=1.0, rotation=0.0, flip_h=False, flip_v=False)),
+            self._unlocked(self.selected()),
         )
 
     def reset_rotation(self) -> None:
-        self._change_selection("reset rotation", lambda item, s: self._centered(item, replace(s, rotation=0.0)))
+        self._change_selection("reset rotation", lambda item, s: self._centered(item, replace(s, rotation=0.0)), self._unlocked(self.selected()))
 
     def reset_size(self) -> None:
-        self._change_selection("reset size", lambda item, s: self._centered(item, replace(s, scale=1.0)))
+        self._change_selection("reset size", lambda item, s: self._centered(item, replace(s, scale=1.0)), self._unlocked(self.selected()))
 
     def reset_flips(self) -> None:
         self._change_selection(
-            "reset flips", lambda item, s: self._centered(item, replace(s, flip_h=False, flip_v=False)), self.selected_images()
+            "reset flips", lambda item, s: self._centered(item, replace(s, flip_h=False, flip_v=False)),
+            self._unlocked(self.selected_images()),
         )
 
     def restack(self, to_front: bool) -> None:
@@ -1320,7 +2140,7 @@ class BoardView(QGraphicsView):
         return selected if len(selected) >= 2 else self.items_list()
 
     def _move_by(self, moves: dict[str, QPointF], text: str) -> None:
-        items = [self._items[item_id] for item_id in moves]
+        items = self._unlocked([self._items[item_id] for item_id in moves])  # (a locked group stays put)
         before = self._snapshot(items)
         for item in items:
             item.setPos(item.pos() + moves[item.item_id])
@@ -1331,22 +2151,46 @@ class BoardView(QGraphicsView):
         return [(item.item_id, item.sceneBoundingRect()) for item in items]
 
     def auto_arrange(self) -> None:
-        """A: rows of about equal width, in reading order, sizes kept."""
-        items = self.arrange_scope()
-        if len(items) >= 2:
-            self._move_by(artbook_layout.arrange(self._boxes(items)), "arrange")
+        """A: rows of about equal width, in reading order, sizes kept (a group moves as one block)."""
+        units = self._units(self.arrange_scope())
+        if len(units) >= 2:
+            self._move_units(units, artbook_layout.arrange(self._unit_boxes(units)), "arrange")
 
     def align(self, edge: str) -> None:
         """Line the selection up on an edge: left, center, right, top, middle or bottom."""
-        items = self.selected()
-        if len(items) >= 2:
-            self._move_by(artbook_layout.align(self._boxes(items), edge), "align")
+        units = self._units(self.selected())
+        if len(units) >= 2:
+            self._move_units(units, artbook_layout.align(self._unit_boxes(units), edge), "align")
 
     def distribute(self, horizontal: bool) -> None:
         """Equal gaps between the selected images (three or more)."""
-        items = self.selected()
-        if len(items) >= 3:
-            self._move_by(artbook_layout.distribute(self._boxes(items), horizontal), "distribute")
+        units = self._units(self.selected())
+        if len(units) >= 3:
+            self._move_units(units, artbook_layout.distribute(self._unit_boxes(units), horizontal), "distribute")
+
+    def stack(self) -> None:
+        """Pile the selection up where the back-most one is, each a little down and right of the last."""
+        units = self._units(self.selected())
+        if len(units) >= 2:
+            boxes = sorted(self._unit_boxes(units), key=lambda box: min(i.zValue() for i in units[box[0]]))
+            self._move_units(units, artbook_layout.stack(boxes), "stack")
+
+    # ------------------ caption, pixels ------------------
+    def edit_caption(self) -> None:
+        """Ask for the selected images' caption (empty: none)."""
+        images = self.selected_images()
+        if not images:
+            return
+        text, ok = QInputDialog.getText(self, "Caption", "Caption under the image (empty for none):", text=images[0].caption)
+        if ok:
+            caption = " ".join(text.split())[:MAX_CAPTION]
+            self._change_selection("caption", lambda _item, s: replace(s, caption=caption), images)
+
+    def toggle_pixelated(self) -> None:
+        """Hard pixel edges for the selected images (smooth again if they all have them)."""
+        images = self.selected_images()
+        pixelated = not all(item.pixelated for item in images)
+        self._change_selection("pixelated", lambda _item, s: replace(s, pixelated=pixelated), images)
 
     def same_size(self, height: bool) -> None:
         """Scale the selection to one height (or width): the middle one of their sizes."""
@@ -1358,7 +2202,7 @@ class BoardView(QGraphicsView):
             return rect.height() if height else rect.width()
 
         target = artbook_layout.same_size([(item.item_id, side(item) * item.scale()) for item in items])
-        self._change_selection("same size", lambda item, s: replace(s, scale=target / side(item)))
+        self._change_selection("same size", lambda item, s: replace(s, scale=target / side(item)), self._unlocked(items))
 
     # ------------------ grayscale, opacity ------------------
     def toggle_gray(self) -> None:
@@ -1368,7 +2212,7 @@ class BoardView(QGraphicsView):
         self._change_selection("grayscale", lambda _item, s: replace(s, gray=gray), items)
 
     def set_board_gray(self, gray: bool) -> None:
-        """Ctrl+G: the whole board in grayscale, to judge values (a view setting: not an undo step)."""
+        """Shift+G: the whole board in grayscale, to judge values (a view setting: not an undo step)."""
         if gray != self._scene.gray_all:
             self._scene.gray_all = gray
             self.viewport().update()
@@ -1473,8 +2317,9 @@ class BoardView(QGraphicsView):
             self.undo_stack.push(_TextCommand(note, before, note.content(), text, self._live_merge))  # typing: recorded when done
         self._sync_note_bar()
 
-    def live_note_change(self, on: bool) -> None:
-        """A custom colour is being picked (changing live): its changes add up to one undo step."""
+    def live_change(self, on: bool) -> None:
+        """A custom colour is being picked (changing live: a note's, or a group's): its changes add up
+        to one undo step."""
         if on:
             self._live_merges += 1
         self._live_merge = self._live_merges if on else None
@@ -1615,6 +2460,7 @@ class BoardView(QGraphicsView):
 
     def _place_note_bar(self) -> None:
         self._note_bar_queued = False
+        self._place_group_bar()
         note = self.note_bar_target()
         if note is None or self._crop or self._picking or note.scene() is not self._scene:
             if self._note_bar is not None:
@@ -1639,8 +2485,8 @@ class BoardView(QGraphicsView):
         super().changeEvent(event)
         if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
             for item in self._items.values():
-                if isinstance(item, NoteItem):
-                    item.apply_theme()  # notes in the theme's colours follow it
+                if isinstance(item, (NoteItem, StrokeItem)):
+                    item.apply_theme()  # notes and strokes in the theme's colours follow it
             self._sync_note_bar()  # and the bar's colour swatches show the new theme's
 
     # ------------------ colour picker ------------------
@@ -1694,7 +2540,7 @@ class BoardView(QGraphicsView):
     def start_crop(self) -> bool:
         """C: crop mode for the one selected image (False if not exactly one is selected)."""
         items = self.selected()
-        if len(items) != 1 or not isinstance(items[0], ImageItem):
+        if len(items) != 1 or not isinstance(items[0], ImageItem) or self.is_locked(items[0]):
             return False
         if self._crop:
             self.apply_crop()
@@ -1772,7 +2618,9 @@ class BoardView(QGraphicsView):
         self.viewport().update()
 
     def delete_selection(self) -> None:
-        items = self.selected()
+        items = self._unlocked(self.selected())
+        if len(items) < len(self.selected()):
+            self.show_message("A locked group can't be deleted: unlock it first (the lock above it).")
         if items:
             self.undo_stack.push(_RemoveCommand(self, items, "delete"))
 
@@ -1798,7 +2646,8 @@ class BoardView(QGraphicsView):
         if not items:
             return None
         if len(items) == 1:
-            return list(items[0].mapToScene(items[0].boundingRect()))[:4]
+            outline = items[0].boundingRect() if getattr(items[0], "cropping", False) else items[0].crop_rect()
+            return list(items[0].mapToScene(outline))[:4]
         rect = QRectF()
         for item in items:
             rect = rect.united(item.sceneBoundingRect())
@@ -1822,7 +2671,7 @@ class BoardView(QGraphicsView):
 
     def _handle_at(self, pos: QPointF) -> Optional[tuple[str, int]]:
         corners = self._frame_corners()
-        if corners is None or self._crop or self._editing:
+        if corners is None or self._crop or self._editing or any(self.is_locked(item) for item in self.selected()):
             return None
         if len(self.selected()) == 1:
             handle = self.mapFromScene(self._rotate_handle(corners))
@@ -1854,6 +2703,8 @@ class BoardView(QGraphicsView):
         if self._editing:
             return  # typing in a note: just its outline (the handles don't work meanwhile)
         painter.drawPolygon(QPolygonF(corners))
+        if any(self.is_locked(item) for item in self.selected()):
+            return  # a locked group: its frame, but no handles (it can't be resized or turned)
         size = HANDLE_PX / self.zoom()
         painter.setBrush(QBrush(QColor("#ffffff")))
         for handle in self._frame_handles(corners):
@@ -1903,6 +2754,10 @@ class BoardView(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+        if button == Qt.MouseButton.LeftButton and self._draw_on:
+            self._begin_stroke(pos)  # (artbook.draw_drag)
+            event.accept()
+            return
         if button == Qt.MouseButton.LeftButton and self._crop:
             index = self._crop_handle_at(pos)
             if index is not None:
@@ -1922,9 +2777,44 @@ class BoardView(QGraphicsView):
             item = self._image_at(pos)
             modifiers = event.modifiers()
             if item is not None and modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
-                item.setSelected(not item.isSelected())
+                selected = not item.isSelected()
+                self._expanding = True  # (a group comes and goes as one)
+                try:
+                    for member in self.group_members(item.group) or [item]:
+                        member.setSelected(selected)
+                finally:
+                    self._expanding = False
+                self.viewport().update()
                 event.accept()
                 return
+            group = self._group_at(self.mapToScene(pos.toPoint())) if item is None else None
+            if group is not None:  # artbook.group_click: a group's own panel picks up the whole group
+                members = self.group_members(group)
+                self._expanding = True
+                try:
+                    if modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
+                        selected = not members[0].isSelected()
+                        for member in members:
+                            member.setSelected(selected)
+                    else:
+                        if not members[0].isSelected():
+                            self._scene.clearSelection()
+                        for member in members:
+                            member.setSelected(True)
+                finally:
+                    self._expanding = False
+                if not self.group_locked(group) and not modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
+                    self._drag = {
+                        "mode": "group_move", "last": self.mapToScene(pos.toPoint()),
+                        "before": self._snapshot(self._unlocked(self.selected())),
+                    }
+                self.viewport().update()
+                event.accept()
+                return
+            if item is not None and modifiers & Qt.KeyboardModifier.AltModifier and item.group:
+                self._single_pick = True  # artbook.group_pick: just this one (until the button is let go)
+                self._scene.clearSelection()
+                item.setSelected(True)
             super().mousePressEvent(event)
             self._drag = {"mode": "move", "before": self._snapshot(self.selected())} if item is not None else None
             return
@@ -1954,6 +2844,9 @@ class BoardView(QGraphicsView):
         if self._picking:
             self._show_readout(pos.toPoint())
             return
+        if self._stroke is not None:
+            self._extend_stroke(pos)
+            return
         if drag and drag["mode"] == "pan":
             delta = pos - drag["last"]
             drag["last"] = pos
@@ -1969,6 +2862,15 @@ class BoardView(QGraphicsView):
             return
         if drag and drag["mode"] == "note_width":
             self._drag_note_width(drag, self.mapToScene(pos.toPoint()))
+            return
+        if drag and drag["mode"] == "group_move":
+            point = self.mapToScene(pos.toPoint())
+            delta, drag["last"] = point - drag["last"], point
+            for item_id in drag["before"]:
+                item = self._items.get(item_id)
+                if item is not None:
+                    item.setPos(item.pos() + delta)
+            self.viewport().update()
             return
         if drag and drag["mode"] == "rotate":
             snap = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -2028,6 +2930,8 @@ class BoardView(QGraphicsView):
         scales, rotation included), rotate on the round handle, move over images."""
         if self._space_down:
             return QCursor(Qt.CursorShape.OpenHandCursor)
+        if self._draw_on:
+            return QCursor(Qt.CursorShape.CrossCursor)
         if self._crop:
             index = self._crop_handle_at(pos)
             if index is None:
@@ -2044,7 +2948,8 @@ class BoardView(QGraphicsView):
             corner, opposite = handles[handle[1]], handles[self._opposite(handle[1])]
             angle = math.degrees(math.atan2(corner.y() - opposite.y(), corner.x() - opposite.x())) % 180.0
             return QCursor(_RESIZE_CURSORS[int(((angle + 22.5) % 180.0) // 45.0)])
-        if self._image_at(pos) is not None:
+        item = self._image_at(pos)
+        if item is not None and not self.is_locked(item):
             return QCursor(Qt.CursorShape.SizeAllCursor)
         return QCursor(Qt.CursorShape.ArrowCursor)
 
@@ -2052,12 +2957,19 @@ class BoardView(QGraphicsView):
         self.viewport().setCursor(self.hover_cursor(pos))
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._stroke is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._finish_stroke()
+            return
         drag, self._drag = self._drag, None
+        self._single_pick = False
         if drag and drag["mode"] == "pan":
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor if self._space_down else Qt.CursorShape.ArrowCursor)
             return
         if drag and drag["mode"] in ("scale", "rotate", "note_width"):
             self._push_states(drag["before"], "note width" if drag["mode"] == "note_width" else drag["mode"])
+            return
+        if drag and drag["mode"] == "group_move":
+            self._push_states(drag["before"], "move")
             return
         if drag and drag["mode"] == "crop":
             return  # applied with Enter (or C, or clicking elsewhere)
@@ -2111,6 +3023,14 @@ class BoardView(QGraphicsView):
             ("Crop", "artbook.crop", self.start_crop, selected == 1 and len(images) == 1),
             ("Grayscale", "artbook.gray", self.toggle_gray, bool(images), bool(images) and all(item.gray for item in images)),
             ("Opacity", [self._opacity_action(menu, has_selection)]),
+            ("Pixelated", None, self.toggle_pixelated, bool(images), bool(images) and all(item.pixelated for item in images)),
+            ("Caption...", None, self.edit_caption, bool(images)),
+            None,
+            ("Group", "artbook.group", self.group_selection, selected >= 2),
+            ("Ungroup", "artbook.ungroup", self.ungroup_selection, any(item.group for item in items)),
+            ("Group Colour", self._group_color_menu(bool(self.selected_groups()))),
+            ("Lock Group", None, self.toggle_group_lock, bool(self.selected_groups()),
+             bool(self.selected_groups()) and all(self.group_locked(g) for g in self.selected_groups())),
             None,
             ("Flip Horizontally", "artbook.flip_h", lambda: self.flip(True), bool(images)),
             ("Flip Vertically", "artbook.flip_v", lambda: self.flip(False), bool(images)),
@@ -2134,6 +3054,8 @@ class BoardView(QGraphicsView):
             None,
             ("Distribute Horizontally", None, lambda: self.distribute(True), selected >= 3),
             ("Distribute Vertically", None, lambda: self.distribute(False), selected >= 3),
+            None,
+            ("Stack", None, self.stack, selected >= 2),
         ]
         match_size = [
             ("Same Height", None, lambda: self.same_size(True), selected >= 2),
@@ -2145,27 +3067,42 @@ class BoardView(QGraphicsView):
             ("Grayscale Board", "artbook.gray_board", self.toggle_board_gray, True, self._scene.gray_all),
             None,
             ("Export Selection as PNG..." if has_selection else "Export as PNG...", "artbook.export_png", self.request_export_image, bool(self._items)),
-            ("Export Page (.artbook)...", None, self.export_page_requested.emit, True),
+        ]
+        has_files = bool(self.selected_files())
+        files = [
+            ("Show in Explorer", None, self.show_in_explorer, has_files),
+            ("Open Source File", None, self.open_source_files, has_files),
+            None,
+            ("Replace Image...", None, self.replace_image, selected == 1 and len(images) == 1 and not self.is_locked(images[0])),
+            ("Relink Missing Images...", None, self.relink_missing, bool(self.missing_images())),
         ]
         images_menu = [
             ("Select All", "artbook.select_all", self.select_all, bool(self._items)),
+            ("Image List", "artbook.image_list", self.toggle_image_list, True, self.image_list_open()),
             ("Selection", selection),
             ("Arrange", arrange),
             ("Align", align),
             ("Match Size", match_size),
+            ("File", files),
         ]
         entries = [
             ("Undo", "artbook.undo", self.undo_stack.undo, self.undo_stack.canUndo()),
             ("Redo", "artbook.redo", self.undo_stack.redo, self.undo_stack.canRedo()),
             None,
-            ("Copy Image", "artbook.copy", self.copy_selection, has_selection),
+            ("Copy", [
+                ("Image", "artbook.copy", self.copy_selection, has_selection),
+                ("File Path", None, self.copy_file_paths, any(item.linked_path() for item in images)),
+            ]),
             ("Paste", "artbook.paste", lambda: self.paste(at), self.can_paste()),
             ("Note", "artbook.note", lambda: self.add_note(at), True),
             ("Colour Picker", "artbook.picker", self.start_picker, True),
+            ("Draw", "artbook.draw", self.toggle_draw, True, self._draw_on),
             None,
             ("Canvas", canvas),
             ("Images", images_menu),
         ]
+        if self.page_menu is not None:
+            entries.append(("Pages", self.page_menu()))
         self._fill_menu(menu, entries)
         if self.window_menu is not None:
             menu.addSeparator()
@@ -2268,6 +3205,14 @@ class BoardView(QGraphicsView):
             self.stop_picker()  # Esc, or I again
             event.accept()
             return
+        if self._draw_on and key in ("artbook.deselect", "artbook.draw"):
+            self.stop_draw()  # Esc, or D again
+            event.accept()
+            return
+        if self._draw_on and key == "artbook.eraser":
+            self.toggle_eraser()
+            event.accept()
+            return
         if self._crop and key == "artbook.deselect":
             self.cancel_crop()  # Esc: leave the image as it was
             event.accept()
@@ -2305,6 +3250,10 @@ class BoardView(QGraphicsView):
             "artbook.picker": self.start_picker,
             "artbook.gray_board": self.toggle_board_gray,
             "artbook.export_png": self.request_export_image,
+            "artbook.group": self.group_selection,
+            "artbook.ungroup": self.ungroup_selection,
+            "artbook.image_list": self.toggle_image_list,
+            "artbook.draw": self.toggle_draw,
         }
         if key in actions:
             actions[key]()

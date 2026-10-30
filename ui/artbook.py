@@ -95,6 +95,12 @@ class ArtbookPanel(QWidget):
         bar_layout.addWidget(self.lbl_page)
         bar_layout.addStretch(1)
 
+        self.btn_images = QPushButton("Images")
+        set_icon(self.btn_images, "grid")
+        self.btn_images.setCheckable(True)
+        self.btn_images.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_images.setToolTip("Show / hide the list of every image on the page (L)")
+        bar_layout.addWidget(self.btn_images)
         self.btn_fit = QPushButton("Fit")
         set_icon(self.btn_fit, "fit")
         self.btn_fit.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -111,7 +117,7 @@ class ArtbookPanel(QWidget):
         bar_layout.addLayout(self.toolbar_slot)
         layout.addWidget(bar)
         # Narrow (a side of Split View): icon-only buttons, no page name
-        self.toolbar = CompactToolbar(self, bar, [(self.btn_fit, "Fit")], hide=[self.lbl_page])
+        self.toolbar = CompactToolbar(self, bar, [(self.btn_images, "Images"), (self.btn_fit, "Fit")], hide=[self.lbl_page])
 
         self.board = BoardView()
         self.pages = PagesPanel(self)
@@ -136,6 +142,9 @@ class ArtbookPanel(QWidget):
         self.board.boards_dropped.connect(self._on_boards_dropped)
         self.board.export_image_requested.connect(self.export_image)
         self.board.export_page_requested.connect(self._on_export_page_requested)
+        self.board.page_menu = self._page_menu
+        self.btn_images.clicked.connect(self.board.toggle_image_list)
+        self.board.image_list_toggled.connect(self.btn_images.setChecked)
         self.board.zoom_changed.connect(self._on_zoom_changed)
         self.btn_fit.clicked.connect(self._on_fit_clicked)
         self.btn_zoom.clicked.connect(self._on_zoom_clicked)
@@ -220,6 +229,32 @@ class ArtbookPanel(QWidget):
         rest = [p for p in order if p != page_id]
         self.open_page(rest[min(position, len(rest) - 1)] if rest else "")
 
+    def _page_menu(self) -> list:
+        """The board's right-click Pages submenu (entries as BoardView._fill_menu takes them)."""
+        return [
+            ("New Page", None, self._menu_new_page, True),
+            ("Duplicate Page", None, self._menu_duplicate_page, self.page is not None),
+            ("Rename Page...", None, self._menu_rename_page, self.page is not None),
+            None,
+            ("Export Page (.artbook)...", None, self._on_export_page_requested, self.page is not None),
+        ]
+
+    def _menu_new_page(self) -> None:
+        """A new page beside this one (in its folder), its name ready to type over in the sidebar."""
+        self.sidebar.set_open(True)
+        self.pages.show_current()
+        self.pages.new_page(self.pages.current_folder())
+
+    def _menu_duplicate_page(self) -> None:
+        if self.page is not None:
+            self.pages.duplicate(self.page["id"])
+            self.board.show_message(f"Duplicated as \"{(self.page.get('name') or 'Untitled')} copy\" (in Pages)")
+
+    def _menu_rename_page(self) -> None:
+        self.sidebar.set_open(True)
+        self.pages.show_current()
+        self.pages.rename_selected()
+
     # ------------------ importing boards ------------------
     def import_boards(self, paths: list[Path], folder_id: Optional[str] = None) -> None:
         """Make a page from each PureRef board, one at a time in the background; the last one opens."""
@@ -271,8 +306,6 @@ class ArtbookPanel(QWidget):
         parts = []
         if imported:
             parts.append(f"Imported {len(imported)} board{'s' if len(imported) != 1 else ''}.")
-        if skipped["group"]:
-            parts.append("Groups were ungrouped (everything kept its place).")
         if skipped["drawing"]:
             parts.append(f"Left out {skipped['drawing']} drawing{'s' if skipped['drawing'] != 1 else ''} (not on the Artbook yet).")
         if skipped["missing image"]:
@@ -346,6 +379,7 @@ class ArtbookPanel(QWidget):
     def _snapshot(self) -> dict[str, Any]:
         page = dict(self.page)
         page["items"] = self.board.page_items()
+        page["groups"] = self.board.page_groups()
         page["view"] = self.board.view_state()
         page["modified"] = time.time()
         return page

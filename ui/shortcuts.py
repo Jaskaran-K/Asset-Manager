@@ -35,6 +35,7 @@ class Shortcut:
 MAIN = "Asset Browser"
 SEARCH = "Search Bar"
 VIEWER = "Asset Viewer"
+PDF = "PDF Viewer"
 MODEL = "3D Model Viewer"
 IMAGE = "Image Viewer"
 VIDEO = "Video Player"
@@ -42,7 +43,7 @@ TAG_DIALOG = "Tag Dialog"
 VIEWS = "Views"
 ARTBOOK = "Artbook"
 PAGES = "Artbook Pages"
-CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, PAGES, VIEWER, MODEL, IMAGE, VIDEO, TAG_DIALOG)
+CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, PAGES, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG)
 
 SHORTCUTS: tuple[Shortcut, ...] = (
     # Views (both windows)
@@ -163,6 +164,48 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("viewer.next", VIEWER, "Page Down", "Next file in the grid", "PgDown"),
     Shortcut("viewer.previous_alt", VIEWER, "Alt+Left", "Previous file in the grid", "Alt+Left"),
     Shortcut("viewer.next_alt", VIEWER, "Alt+Right", "Next file in the grid", "Alt+Right"),
+
+    # PDF viewer (ui.pdf_viewer)
+    Shortcut("pdf.previous_page", PDF, "Left", "Previous page", "Left"),
+    Shortcut("pdf.next_page", PDF, "Right", "Next page", "Right"),
+    Shortcut("pdf.first_page", PDF, "Home", "First page", "Home"),
+    Shortcut("pdf.last_page", PDF, "End", "Last page", "End"),
+    Shortcut("pdf.zoom_in", PDF, "Ctrl+=", "Zoom in", "Ctrl+="),
+    Shortcut("pdf.zoom_in_alt", PDF, "Ctrl++", "Zoom in", "Ctrl++"),
+    Shortcut("pdf.zoom_out", PDF, "Ctrl+-", "Zoom out", "Ctrl+-"),
+    Shortcut("pdf.actual_size", PDF, "Ctrl+0", "Actual size (100%)", "Ctrl+0"),
+    Shortcut("pdf.fit_width", PDF, "W", "Fit the page's width", "W"),
+    Shortcut("pdf.fit_page", PDF, "F", "Fit the whole page", "F"),
+    Shortcut("pdf.sidebar", PDF, "Ctrl+B", "Show / hide the Contents and Pages sidebar", "Ctrl+B"),
+    Shortcut("pdf.scroll", PDF, "Mouse wheel", "Scroll through the pages"),
+    Shortcut("pdf.zoom_wheel", PDF, "Ctrl+wheel / pinch", "Zoom toward the pointer"),
+    Shortcut("pdf.pan", PDF, "Drag (Hand tool) / middle-drag", "Move the pages around"),
+    Shortcut("pdf.space_pan", PDF, "Space+drag", "Move the pages around, whatever tool is on", "Space"),
+    Shortcut("pdf.select_tool", PDF, "S", "Select Text tool: drag over text to select it", "S"),
+    Shortcut("pdf.escape", PDF, "Esc", "In the find box: clear the search. On the pages: clear the selection, then back to the Hand tool (then Esc closes the viewer)", "Esc"),
+    Shortcut("pdf.select_drag", PDF, "Drag (Select Text tool)", "Select text, across pages too"),
+    Shortcut("pdf.copy", PDF, "Ctrl+C", "Copy the selected text", "Ctrl+C"),
+    Shortcut("pdf.select_page", PDF, "Ctrl+A", "Select all the text on this page", "Ctrl+A"),
+    Shortcut("pdf.context_menu", PDF, "Right-click", "Copy, select this page's text"),
+    Shortcut("pdf.highlight_tool", PDF, "H", "Highlight tool: drag over text (or press H with text selected)", "H"),
+    Shortcut("pdf.pen_tool", PDF, "D", "Pen tool: draw on the page", "D"),
+    Shortcut("pdf.note_tool", PDF, "T", "Note tool: click on the page and type", "T"),
+    Shortcut("pdf.eraser_tool", PDF, "E", "Eraser: drag over highlights, drawings and notes to remove them", "E"),
+    Shortcut("pdf.undo", PDF, "Ctrl+Z", "Undo a change to your marks", "Ctrl+Z"),
+    Shortcut("pdf.redo", PDF, "Ctrl+Y", "Redo", "Ctrl+Y"),
+    Shortcut("pdf.redo_alt", PDF, "Ctrl+Shift+Z", "Redo", "Ctrl+Shift+Z"),
+    Shortcut("pdf.delete_mark", PDF, "Delete", "Delete the picked highlight, drawing or note", "Del"),
+    Shortcut("pdf.pick_mark", PDF, "Click a mark (Hand tool)", "Pick a highlight, drawing or note; drag a drawing or note to move it"),
+    Shortcut("pdf.edit_note", PDF, "Double-click a note", "Type in it (Esc or clicking elsewhere finishes)"),
+    Shortcut("pdf.find", PDF, "Ctrl+F", "Find in the PDF", "Ctrl+F"),
+    Shortcut("pdf.find_next", PDF, "F3", "Next match", "F3"),
+    Shortcut("pdf.find_previous", PDF, "Shift+F3", "Previous match", "Shift+F3"),
+    Shortcut("pdf.find_box_next", PDF, "Enter (in the find box)", "Next match", "Return"),
+    Shortcut("pdf.find_box_next_alt", PDF, "Enter (number pad, in the find box)", "Next match", "Enter"),
+    Shortcut("pdf.find_box_previous", PDF, "Shift+Enter (in the find box)", "Previous match", "Shift+Return"),
+    Shortcut("pdf.link", PDF, "Click a link", "Follow it: a page in the PDF, or a web address in your browser"),
+    Shortcut("pdf.go_to_page", PDF, "Type in the page box", "Go to that page (Enter)"),
+    Shortcut("pdf.contents", PDF, "Click in Contents / Pages", "Go to that chapter or page"),
 
     # 3D model viewport
     Shortcut("viewer3d.orbit", MODEL, "Left-drag", "Orbit the camera"),

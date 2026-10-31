@@ -64,7 +64,8 @@ making your first board. The list below is the full reference.
   handle to rotate (Shift snaps to 15°).
   **H** / **V** flip, **]** / **[** bring to front / send to back, **R** resets, **Delete** removes, **Ctrl+Z** /
   **Ctrl+Y** undo and redo. The wheel zooms toward the cursor, middle-drag (or Space+drag) pans, **F** frames
-  everything, double-click zooms to an image.
+  everything, double-click zooms to an image. A lighter **active area** sits behind everything on the page and
+  grows, shrinks and moves with it as you add or spread out images (exports leave it out).
 - **Right-click menu:** Undo / Redo, Copy / Paste, then **Canvas** (frame, 100%, grayscale board) and **Images**
   (Select All, and the Selection, Arrange, Align and Match Size submenus). Greyed-out items need a selection.
 - **Adjusting images:** **C** crops the selected image: drag the handles inward (or back out), Enter or C keeps
@@ -118,9 +119,9 @@ making your first board. The list below is the full reference.
     saves it as one `.artbook` file with its images inside (linked files go in whole), ready to send.
   - **Import:** the import button at the top (or right-click > Import Pages..., or drop the files on the board)
     opens `.artbook` files and **PureRef boards** (`.pur`) as new pages. PureRef boards keep their layout:
-    positions, sizes, rotation, flips, crops, opacity, notes, image names and groups (with their colour). Pick several at
-    once. Drawings are left out for now. Boards from PureRef 1.x need
-    opening and saving in PureRef 2 first.
+    positions, sizes, rotation, flips, crops, opacity, notes, image names, groups (with their colour) and
+    drawings (each stroke with its colour and width; a drawing's strokes are grouped, so they move as one).
+    Pick several at once. Boards from PureRef 1.x need opening and saving in PureRef 2 first.
 - **Export as PNG:** **Ctrl+E** (or right-click > Canvas) saves the selection, or the whole board, as one picture on
   the board's colour, as sharp as its images allow (up to 16384 pixels on the longest side).
 - **Saving:** pages save themselves a couple of seconds after each change, and when you switch page or quit.
@@ -139,6 +140,32 @@ making your first board. The list below is the full reference.
   second time. Export as PNG and Copy always use the full pictures, whatever is showing.
 - **Motion:** arranging, aligning, stacking and undoing glide images to their new places, and pictures fade in
   as they load. The Motion setting in Settings > Appearance turns this off (or follows Windows).
+
+## Reading PDFs
+
+Open a PDF from the grid and the viewer shows it page by page, sharp at any zoom.
+
+- **Moving around:** scroll, or drag with the Hand tool (middle-drag or Space+drag work with any tool).
+  **Left** / **Right** turn pages, **Home** / **End** go to the first and last; type a page number in the
+  page box. Page Up / Page Down still switch to the previous / next file, as in the rest of the viewer.
+- **Zoom:** Ctrl+wheel (or pinch) zooms toward the pointer; the zoom box takes presets or a typed size;
+  **W** fits the page's width, **F** the whole page, **Ctrl+0** is actual size.
+- **Sidebar (Ctrl+B):** **Contents** lists the PDF's chapters, **Pages** shows a picture of every page, and
+  **Notes** lists your marks. Click any of them to go there. Links in the PDF work too: a page of the PDF,
+  or a web address in your browser.
+- **Find (Ctrl+F):** every match is highlighted; Enter / F3 for the next, Shift+Enter / Shift+F3 for the
+  previous. Capitals don't matter and phrases are found across line breaks.
+- **Text:** the Select Text tool (**S**) selects text by dragging, across pages too; **Ctrl+C** copies,
+  **Ctrl+A** selects a page's text. (Scanned pages have no text to find or select.)
+- **Your marks:** **Highlight** (**H**: drag over text, or highlight a selection), **Pen** (**D**),
+  **Note** (**T**: click and type) and **Eraser** (**E**), with a colour for each and a pen size. With the
+  Hand tool, click a mark to pick it, drag a drawing or note to move it, **Delete** removes it, and
+  double-clicking a note edits it. **Ctrl+Z** / **Ctrl+Y** undo and redo; **Marks** hides them all.
+- **Sharing:** right-click a page > **Send Page to Artbook** (with or without your marks), or **Export...**
+  saves a copy of the pages with your marks drawn in: one PDF or PNG images, at 150 or 300 dpi.
+- **The PDF is never changed.** Your marks, and the page and zoom you were at, are kept by the app
+  (`%LOCALAPPDATA%\AssetManager\pdf-notes`), matched to the file's contents, so they follow it when it's
+  renamed or moved. A PDF reopens where you left it.
 
 ## Video playback
 

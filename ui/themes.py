@@ -16,8 +16,9 @@ from __future__ import annotations
 import re
 from string import Template
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolTip
 
 from core.thumbnail_manager import set_thumbnail_card_style
 
@@ -65,6 +66,7 @@ THEMES: dict[str, dict[str, str]] = {
         "thumb_card": "#1a1c24", "thumb_border": "#2e3240",
         "thumb_badge": "#12141a", "thumb_badge_text": "#ffffff",
         "glass_tint": "#b81a1b23", "glass_edge": "#24ffffff", "texture_ink": "#ffffff",
+        "board_area": "#0fffffff",  # the Artbook's active area: a little lighter than the board
     },
     "light": {
         "label": "Light Mode",
@@ -108,6 +110,7 @@ THEMES: dict[str, dict[str, str]] = {
         "thumb_card": "#f3f4f6", "thumb_border": "#e5e7eb",
         "thumb_badge": "#ffffff", "thumb_badge_text": "#1f2937",
         "glass_tint": "#bcf9fafb", "glass_edge": "#1f000000", "texture_ink": "#1e293b",
+        "board_area": "#bfffffff",
     },
     "dark_purple": {
         "label": "Dark Purple",
@@ -151,6 +154,7 @@ THEMES: dict[str, dict[str, str]] = {
         "thumb_card": "#1e1332", "thumb_border": "#3b2a5c",
         "thumb_badge": "#140b24", "thumb_badge_text": "#ffffff",
         "glass_tint": "#8c180d2c", "glass_edge": "#33c4b5fd", "texture_ink": "#e9ddff",
+        "board_area": "#0fe9ddff",
     },
 }
 
@@ -238,6 +242,21 @@ QPlainTextEdit {
     font-family: Consolas, "Courier New", monospace;
 }
 QPlainTextEdit[invalid="true"] { border: 1px solid $danger; }
+#pdfTab { padding: 5px 4px; min-width: 0px; }
+QCheckBox, QRadioButton { spacing: 8px; }
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 14px; height: 14px; border: 1px solid $input_border; background-color: $input_bg;
+}
+QCheckBox::indicator { border-radius: 4px; }
+QRadioButton::indicator { border-radius: 8px; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: $accent_border; }
+QCheckBox::indicator:checked { background-color: $accent; border-color: $accent; }
+QRadioButton::indicator:checked {
+    border-color: $accent;
+    background-color: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 $accent, stop:0.5 $accent, stop:0.56 $input_bg, stop:1 $input_bg);
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { border-color: $border; background-color: transparent; }
 #guideText { background-color: $input_bg; border: 1px solid $input_border; border-radius: 8px; padding: 10px 14px; color: $text; }
 
 QMenu { background-color: $surface; border: 1px solid $border; padding: 4px; }
@@ -460,6 +479,33 @@ def _solid(color: str, fallback: str) -> QColor:
     """QColor for a token, using fallback for gradients / rgba() values QColor can't parse."""
     c = QColor(color)
     return c if c.isValid() else QColor(fallback)
+
+
+_pending: dict = {}  # apply_theme_soon: the latest request, applied once the event loop is free
+
+
+def apply_theme_soon(theme_id: str, texture_id: str | None = None, then=None) -> None:
+    """apply_theme once the current event is over (then() after). For clicks: restyling the whole
+    app replaces the style a clicked button is still using, which can crash Qt. Requests made in
+    quick succession are applied once, the last one winning."""
+    if not _pending:
+        QTimer.singleShot(0, _apply_pending)
+    _pending.update(theme_id=theme_id, then=then)
+    if texture_id is not None:
+        _pending["texture_id"] = texture_id
+
+
+def _apply_pending() -> None:
+    request = dict(_pending)
+    _pending.clear()
+    if request:
+        QToolTip.hideText()  # (a tooltip is a short-lived window of its own: not one to restyle as it goes)
+        apply_theme(request["theme_id"], texture_id=request.get("texture_id"))
+        if request.get("then") is not None:
+            try:
+                request["then"]()
+            except RuntimeError:
+                pass  # (its widget was closed meanwhile)
 
 
 def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str | None = None) -> None:

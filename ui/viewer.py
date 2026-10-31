@@ -3,7 +3,7 @@
 Includes:
 - Model3DViewportWidget: 3D orbit viewport for .obj, .gltf, .glb, .fbx with shaded/wireframe modes.
 - TextureViewerWidget: High-resolution texture/image viewer with interactive zoom, pan, and checkerboard.
-- DocumentViewerWidget: Embedded PDF document viewer with page navigation and zoom.
+- PDFs: ui.pdf_viewer.PdfViewer (pages, zoom, contents, thumbnails, links).
 - VideoPlayer (ui.video_player): in-app video playback with proxy fallback.
 - AssetViewerDialog: Unified modal viewer dialog hosting the appropriate view.
 """
@@ -50,8 +50,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtPdf import QPdfDocument
-from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -73,6 +71,7 @@ from core.scanner import AssetItem
 from core.tag_repository import Tag
 from ui import shortcuts
 from ui.duotone import set_icon
+from ui.pdf_viewer import PdfViewer
 from ui.tag_widgets import tag_chip_cloud
 from ui.video_player import VideoPlayer, control_icon
 
@@ -776,69 +775,6 @@ class TextureViewerWidget(QWidget):
 
 
 # ----------------------------------------------------------------------
-# PDF Document Viewer
-# ----------------------------------------------------------------------
-class DocumentViewerWidget(QWidget):
-    """Embedded PDF document viewer with page navigation and zoom controls."""
-
-    def __init__(self, file_path: Path, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.file_path = file_path
-        self._init_ui()
-
-    def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # PDF Document & View
-        self.doc = QPdfDocument(self)
-        self.doc.load(str(self.file_path))
-
-        self.pdf_view = QPdfView(self)
-        self.pdf_view.setDocument(self.doc)
-        self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
-        self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitInView)
-
-        # Toolbar controls
-        toolbar = QWidget()
-        toolbar.setObjectName("viewerToolbar")
-        t_layout = QHBoxLayout(toolbar)
-        t_layout.setContentsMargins(10, 4, 10, 4)
-        t_layout.setSpacing(8)
-
-        btn_fit = QPushButton("Fit Page")
-        btn_fit.setToolTip("Zoom so the whole page fits")
-        btn_fit.clicked.connect(lambda: self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitInView))
-        t_layout.addWidget(btn_fit)
-
-        btn_fit_width = QPushButton("Fit Width")
-        btn_fit_width.setToolTip("Zoom so the page fills the width")
-        btn_fit_width.clicked.connect(lambda: self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth))
-        t_layout.addWidget(btn_fit_width)
-
-        btn_zoom_in = QPushButton("+ Zoom In")
-        btn_zoom_in.setToolTip("Zoom in by 25%")
-        btn_zoom_in.clicked.connect(lambda: self.pdf_view.setZoomFactor(self.pdf_view.zoomFactor() * 1.25))
-        t_layout.addWidget(btn_zoom_in)
-
-        btn_zoom_out = QPushButton("- Zoom Out")
-        btn_zoom_out.setToolTip("Zoom out by 25%")
-        btn_zoom_out.clicked.connect(lambda: self.pdf_view.setZoomFactor(self.pdf_view.zoomFactor() / 1.25))
-        t_layout.addWidget(btn_zoom_out)
-
-        t_layout.addStretch(1)
-
-        page_count = self.doc.pageCount()
-        self.lbl_pages = QLabel(f"Total Pages: {page_count}")
-        self.lbl_pages.setObjectName("toolbarLabel")
-        t_layout.addWidget(self.lbl_pages)
-
-        layout.addWidget(toolbar)
-        layout.addWidget(self.pdf_view, 1)
-
-
-# ----------------------------------------------------------------------
 # Unified Asset Viewer Dialog
 # ----------------------------------------------------------------------
 @dataclass
@@ -862,18 +798,23 @@ class AssetViewerDialog(QDialog):
         edit_tags: Optional[Callable[[], Optional[list[Tag]]]] = None,
         navigate: Optional[Callable[[int], Optional[ViewerTarget]]] = None,
         position: str = "",
+        artbook=None,
     ):
         """tags: the asset's tags to show (None hides the section).
         edit_tags: opens the tagging dialog; returns the updated tags, or None if nothing changed.
         navigate: navigate(-1 / +1) returns the previous / next file, or None at either end;
-        it enables the < > buttons and Page Up / Page Down. position: e.g. "3 of 120"."""
+        it enables the < > buttons and Page Up / Page Down. position: e.g. "3 of 120".
+        artbook: the main window (fill_artbook_menu, send_image_to_artbook): a PDF's pages can be
+        sent to the Artbook (None: they can't)."""
         super().__init__(parent)
         self.asset = asset
         self.tags = tags
         self._edit_tags = edit_tags
         self._navigate = navigate
         self._position = position
+        self._artbook = artbook
         self.video_player: Optional[VideoPlayer] = None  # at most one, owned by this dialog
+        self.pdf_viewer: Optional[PdfViewer] = None  # (saves where you were before it goes)
         # Window state to return to when leaving fullscreen
         self._state_before_fullscreen = Qt.WindowState.WindowNoState
         self._was_fullscreen_for_video = False  # viewer was already full screen when the video went full screen
@@ -894,6 +835,9 @@ class AssetViewerDialog(QDialog):
             self.video_player.set_fullscreen(False)
             self.video_player.stop()
             self.video_player = None
+        if self.pdf_viewer is not None:
+            self.pdf_viewer.save_state()
+            self.pdf_viewer = None
         self.asset, self.tags, self._edit_tags, self._position = target.asset, target.tags, target.edit_tags, target.position
         self._init_ui()
         self.setFocus()
@@ -938,6 +882,12 @@ class AssetViewerDialog(QDialog):
         # 3. Bottom Action Bar
         self.bottom_bar = self._build_bottom_bar()
         main_layout.addWidget(self.bottom_bar)
+
+        # Enter in a text box (the PDF's page box, zoom box) is for that box: no button is the
+        # dialog's default, so Enter never also presses one (it opened the tag editor)
+        for button in page.findChildren(QPushButton):
+            button.setAutoDefault(False)
+            button.setDefault(False)
 
     def _build_header_bar(self) -> QWidget:
         header = QWidget()
@@ -1115,9 +1065,9 @@ class AssetViewerDialog(QDialog):
 
         # Case C: Document (PDF) Viewer
         elif self.asset.is_document:
-            doc_viewer = DocumentViewerWidget(self.asset.path)
-            metadata["Pages"] = str(doc_viewer.doc.pageCount())
-            layout.addWidget(doc_viewer, 1)
+            self.pdf_viewer = PdfViewer(self.asset.path, artbook=self._artbook)
+            metadata["Pages"] = str(self.pdf_viewer.doc.pageCount())
+            layout.addWidget(self.pdf_viewer, 1)
 
         # Case D: Video Player
         elif self.asset.is_video:
@@ -1296,6 +1246,8 @@ class AssetViewerDialog(QDialog):
         """Stop playback and release the video file however the dialog closes."""
         if self.video_player is not None:
             self.video_player.stop()
+        if self.pdf_viewer is not None:
+            self.pdf_viewer.save_state()
         super().done(result)
 
     def _open_external(self) -> None:

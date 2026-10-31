@@ -38,6 +38,19 @@ def qt_path(points) -> str:
     return _qt_text(data + struct.pack(">i", 0))
 
 
+def qt_strokes(strokes) -> str:
+    """A drawing's strokes as a board saves them: each (rgba, width, path elements as (type, x, y))."""
+    name = b"QList<Stroke>\x00"
+    data = struct.pack(">IBI", 1024, 0, len(name)) + name + struct.pack(">I", len(strokes))
+    for (r, g, b, a), width, elements in strokes:
+        data += bytes([100]) + struct.pack(">bHHHHH", 1, a * 257, r * 257, g * 257, b * 257, 0) + struct.pack(">d", width)
+        data += struct.pack(">i", len(elements))
+        for kind, x, y in elements:
+            data += struct.pack(">idd", kind, x, y)
+        data += struct.pack(">ii", 0, 0) + struct.pack(">dd", elements[0][1], elements[0][2]) + struct.pack(">i", 0)
+    return _qt_text(data)
+
+
 def png(w, h, color="red") -> bytes:
     out = io.BytesIO()
     Image.new("RGB", (w, h), color).save(out, "PNG")
@@ -71,8 +84,12 @@ def make_board(path, images=(), items=(), item_images=(), notes=(), groups=(), d
         con.execute("insert into items_notes (id, text, background_color, style) values (?, ?, ?, 1)", (item_id, text, background))
     for group_id in groups:
         con.execute("insert into items_groups (id, background_color, lock_mode) values (?, '#ff4f3f3f', 0)", (group_id,))
-    for drawing_id in drawings:
-        con.execute("insert into items_drawings (id, strokes) values (?, x'00')", (drawing_id,))
+    for drawing in drawings:  # (an id alone: one that can't be read)
+        drawing_id, strokes = drawing if isinstance(drawing, tuple) else (drawing, None)
+        if strokes is None:
+            con.execute("insert into items_drawings (id, strokes) values (?, x'00')", (drawing_id,))
+        else:
+            con.execute("insert into items_drawings (id, strokes) values (?, ?)", (drawing_id, strokes))
     con.commit()
     con.close()
     data = database.read_bytes()
@@ -271,3 +288,45 @@ def test_imported_images_get_their_names_and_files_back(tmp_path):
     there.write_bytes(png(4, 4))
     assert pur_import._local_file(str(there)) == str(there)  # still on this computer: linked again
     assert pur_import._local_file(str(tmp_path / "gone.png")) is None and pur_import._local_file("https://x.com/a.png") is None
+
+
+def test_drawings_come_over_as_strokes_where_they_were(qapp, tmp_path):
+    from ui.artbook_board import BoardView, StrokeItem
+
+    line = [(0, 0.0, 0.0), (1, 40.0, 0.0)]
+    curve = [(0, 0.0, 10.0), (2, 10.0, 30.0), (3, 30.0, 30.0), (3, 40.0, 10.0)]
+    teal = (46, 132, 170, 200)
+    drawing = rotation(30, 2.0, 500, 300)
+    path = make_board(
+        tmp_path / "Notes.pur",
+        images=[(1, "png", png(40, 20), 40, 20)],
+        items=[(10, -1, qt_transform(1, 0, 0, 1, 0, 0), 1, 1.0), (50, -1, drawing, 5, 0.8)],
+        item_images=[(10, 1, centered(40, 20), outline(40, 20))],
+        drawings=[(50, qt_strokes([(teal, 3.0, line), ((255, 0, 0, 255), 1.5, curve)]))],
+    )
+    board = pur_import.read_board(path)
+    assert not board.skipped["drawing"] and len(board.strokes) == 2
+    first, second = board.strokes
+    assert first.color == "#c82e84aa" and second.color == "#ff0000"  # (see-through keeps its alpha)
+    assert first.points == [(0.0, 0.0), (40.0, 0.0)]
+    assert second.points[0] == (0.0, 10.0) and second.points[-1] == pytest.approx((40.0, 10.0))
+    assert len(second.points) == 1 + pur_import.CURVE_STEPS  # (a curve: points along it)
+    assert board.groups[50] == pur_import.DRAWING_GROUP_FILL  # its strokes move as one, with no panel
+
+    page, skipped = pur_import.import_board(path)
+    assert not skipped["drawing"]
+    strokes = [item for item in page["items"] if item["kind"] == "stroke"]
+    assert len(strokes) == 2 and strokes[0]["group"] == strokes[1]["group"] is not None
+    assert page["groups"][strokes[0]["group"]] == {"fill": pur_import.DRAWING_GROUP_FILL}
+    factor = pur_import._board_scale(board)
+    assert strokes[0]["width"] == pytest.approx(3.0 * 2.0 * factor) and strokes[0]["opacity"] == pytest.approx(0.8)
+
+    view = BoardView()
+    view.load_page(page)
+    by_color = {i.color: i for i in view.items_list() if isinstance(i, StrokeItem)}
+    for item, stroke in ((by_color["#c82e84aa"], first), (by_color["#ff0000"], second)):
+        for local, point in ((item.points[0], stroke.points[0]), (item.points[-1], stroke.points[-1])):
+            expected = pur_import.apply(stroke.matrix, *point)
+            on_page = item.mapToScene(local)
+            assert on_page.x() == pytest.approx(expected[0] * factor, abs=0.02)
+            assert on_page.y() == pytest.approx(expected[1] * factor, abs=0.02)

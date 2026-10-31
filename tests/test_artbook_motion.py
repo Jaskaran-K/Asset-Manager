@@ -132,4 +132,4 @@ def test_pictures_fade_in_when_they_arrive(qapp, panel, tmp_path):
     assert pump(qapp, lambda: item.pixmap is not None)
     assert item.fade_from is not None and item.fade() < 1.0
     assert pump(qapp, lambda: item.fade_from is None, seconds=2)
-    assert not panel.board._fade_timer.isActive()
+    assert pump(qapp, lambda: not panel.board._fade_timer.isActive(), seconds=2)  # (it stops on its next tick)

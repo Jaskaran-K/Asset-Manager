@@ -8,7 +8,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_user_data(tmp_path, monkeypatch):
     """Never touch the real config, library database, caches or logs from a test."""
-    from core import artbook_store, crash_log, settings, tag_repository, video_tools
+    from core import artbook_store, crash_log, pdf_notes, settings, tag_repository, video_tools
 
     data = tmp_path / "user-data"
     data.mkdir()
@@ -18,6 +18,7 @@ def isolated_user_data(tmp_path, monkeypatch):
     monkeypatch.setattr(tag_repository, "_repository", None)
     monkeypatch.setattr(crash_log, "LOG_DIR", data)
     monkeypatch.setattr(artbook_store, "PAGES_DIR", data / "artbook")
+    monkeypatch.setattr(pdf_notes, "NOTES_DIR", data / "pdf-notes")
     monkeypatch.setattr(video_tools, "CACHE_ROOT", data / "cache")
     monkeypatch.setattr(video_tools, "PROXY_DIR", data / "cache" / "proxies")
     monkeypatch.setattr(video_tools, "POSTER_DIR", data / "cache" / "posters")

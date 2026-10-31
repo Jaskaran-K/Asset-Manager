@@ -21,6 +21,8 @@ Any of these work:
 - Drag images from the asset grid, from Explorer, or from a web browser (search results too).
 - Paste with **Ctrl+V**: a copied image, files, or an image link.
 - In the asset grid, right-click > **Send to Artbook** to send the selected images to any page.
+- In a PDF (open it from the grid), right-click a page > **Send Page to Artbook**: it arrives as a
+  picture, with or without your highlights and notes.
 - Import a PureRef board (`.pur`) or a shared `.artbook` file with the import button at the top of the
   Pages sidebar, or by dropping the file on the board. PureRef boards keep their layout.
 

@@ -428,6 +428,68 @@ def _smooth(p, primary, secondary):
     _outline(p, wave, primary, 2.0)
 
 
+def _magnifier(p, primary, secondary, plus: bool):
+    _body(p, _circle(10, 10, 7), secondary)
+    _line(p, primary, 2.3, (15.2, 15.2), (20.5, 20.5))  # the handle
+    _line(p, primary, 1.9, (7, 10), (13, 10))
+    if plus:
+        _line(p, primary, 1.9, (10, 7), (10, 13))
+
+
+def _zoom_in(p, primary, secondary):
+    _magnifier(p, primary, secondary, True)
+
+
+def _zoom_out(p, primary, secondary):
+    _magnifier(p, primary, secondary, False)
+
+
+def _fit_width(p, primary, secondary):
+    _body(p, _rounded(6.5, 3.5, 11, 17, 2.0), secondary)
+    _line(p, primary, 1.9, (2.5, 12), (21.5, 12))  # edge to edge
+    _line(p, primary, 1.9, (5, 9.5), (2.5, 12), (5, 14.5))
+    _line(p, primary, 1.9, (19, 9.5), (21.5, 12), (19, 14.5))
+
+
+def _hand(p, primary, secondary):
+    _body(p, _circle(12, 12, 6.5), secondary)
+    for a, b, c in (((12, 2.5), (9.5, 5), (14.5, 5)), ((12, 21.5), (9.5, 19), (14.5, 19)),
+                    ((2.5, 12), (5, 9.5), (5, 14.5)), ((21.5, 12), (19, 9.5), (19, 14.5))):
+        _line(p, primary, 1.9, b, a, c)  # (moves every way)
+
+
+def _text_select(p, primary, secondary):
+    _body(p, _rounded(3, 8, 18, 8, 2.2), secondary)  # a line of text, selected
+    _line(p, primary, 1.9, (12, 4), (12, 20))  # the text cursor
+    _line(p, primary, 1.9, (9.5, 4), (14.5, 4))
+    _line(p, primary, 1.9, (9.5, 20), (14.5, 20))
+
+
+def _sticky_note(p, primary, secondary):
+    _body(p, _polygon((4, 4), (20, 4), (20, 15), (15, 20), (4, 20)), secondary, round_corners=1.6)
+    p.fillPath(_polygon((20, 15), (15, 20), (15, 15)), primary)  # the turned-up corner
+    _line(p, primary, 1.7, (7.5, 9), (16.5, 9))
+    _line(p, primary, 1.7, (7.5, 12.5), (13, 12.5))
+
+
+def _turn_arrow(p, primary, secondary, mirrored: bool):
+    flip = QTransform().translate(24, 0).scale(-1, 1) if mirrored else QTransform()
+    arc = QPainterPath(QPointF(6, 10))
+    arc.cubicTo(QPointF(9, 4.5), QPointF(19, 4.5), QPointF(20, 12))
+    arc.cubicTo(QPointF(20.5, 17), QPointF(16, 20), QPointF(11, 19.5))
+    _body(p, flip.map(_circle(13, 12.5, 6.5)), secondary)
+    _outline(p, flip.map(arc), primary, 2.0)
+    _line(p, primary, 2.0, *(flip.map(QPointF(*xy)).toTuple() for xy in ((5, 4.5), (6, 10), (11.5, 9.5))))  # the arrowhead
+
+
+def _undo(p, primary, secondary):
+    _turn_arrow(p, primary, secondary, False)
+
+
+def _redo(p, primary, secondary):
+    _turn_arrow(p, primary, secondary, True)
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -465,6 +527,8 @@ ICONS: dict[str, IconPainter] = {
     "align_center": _align_center,
     "align_right": _align_right,
     "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
+    "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
+    "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
 }
 
 

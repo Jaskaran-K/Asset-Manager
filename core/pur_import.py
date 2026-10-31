@@ -13,10 +13,16 @@ in this format. What a version-2 file holds, as found in the files themselves:
   colours), `items_groups` and `items_drawings`.
 - Transforms, crop outlines and sizes are Qt values (QDataStream, big-endian) stored as text:
   each byte above 127 was saved as two UTF-8 bytes, so they're turned back into bytes first.
+- A drawing (`items_drawings.strokes`) is a list of strokes: a count, then for each a byte (always
+  100 in the files seen), its colour (a QColor: spec, then alpha, red, green, blue and padding as
+  16-bit values), its width (a double), its line as a QPainterPath (a count of elements, each a type
+  and x, y; then two ints) and 20 bytes more (where it starts, and padding). Its points are in the
+  drawing item's own coordinates.
 
 Every item is placed relative to its parent (a group, or an image for a note attached to it), so
 the importer follows each chain to the board. Groups come over as Artbook groups (the outermost
-one an item is in), with their colour. Drawings aren't on the Artbook yet: left out (and counted). The whole board
+one an item is in), with their colour. A drawing's strokes come over as Artbook strokes, grouped (so
+they move as one, as the drawing did) in a see-through group unless the drawing is in a group. The whole board
 is scaled so its images are near their real size (the layout is unchanged), since boards can be
 far bigger than the Artbook zooms out to.
 """
@@ -47,6 +53,10 @@ SUFFIX = ".pur"
 QT_TRANSFORM = 80  # Qt's type ids, as saved before each value
 QT_SIZEF = 22
 QT_USER_TYPE = 1024  # followed by the type's name
+QT_PATH_MOVE, QT_PATH_LINE, QT_PATH_CURVE, QT_PATH_CURVE_DATA = 0, 1, 2, 3  # a path's element types
+CURVE_STEPS = 6  # points along each curve of a drawn line
+MAX_STROKES = 5000  # in one drawing (a damaged count reads as millions)
+DRAWING_GROUP_FILL = "#00000000"  # a drawing's own group: holds its strokes together, shows no panel
 TARGET_SCALE = 1.0  # images end up near their real size...
 MAX_BOARD_SIDE = 40000.0  # ...unless the board would then be too big to see all at once
 THEIR_NOTE_MARGIN = 4.0  # around a note's text (Qt's default)
@@ -85,9 +95,21 @@ class ImportedNote:
 
 
 @dataclass
+class ImportedStroke:
+    points: list[tuple[float, float]]  # along the line, in the drawing's own coordinates
+    color: str  # #aarrggbb or #rrggbb
+    width: float  # in the drawing's own coordinates
+    matrix: Affine  # the drawing's corner to the board
+    order: tuple[float, ...]
+    opacity: float
+    group: Optional[int] = None  # the outermost group the drawing is in, else the drawing itself
+
+
+@dataclass
 class Board:
     images: list[ImportedImage] = field(default_factory=list)
     notes: list[ImportedNote] = field(default_factory=list)
+    strokes: list[ImportedStroke] = field(default_factory=list)
     groups: dict[int, Optional[str]] = field(default_factory=dict)  # group id -> its colour (None: the theme's)
     skipped: Counter = field(default_factory=Counter)  # drawings, missing images
 
@@ -178,6 +200,66 @@ def _path_points(value: Any) -> list[tuple[float, float]]:
         return [p for p in points if all(math.isfinite(v) for v in p)]
     except struct.error:
         return []
+
+
+def _cubic(p0, p1, p2, p3) -> list[tuple[float, float]]:
+    """Points along a cubic curve (after its start)."""
+    points = []
+    for step in range(1, CURVE_STEPS + 1):
+        t = step / CURVE_STEPS
+        u = 1.0 - t
+        points.append((
+            u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0],
+            u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1],
+        ))
+    return points
+
+
+def _strokes(value: Any) -> Optional[list[tuple[str, float, list[tuple[float, float]]]]]:
+    """A drawing's strokes as (colour, width, points along the line), or None if it can't be read."""
+    data = _qt_bytes(value)
+    try:
+        if struct.unpack_from(">I", data, 0)[0] != QT_USER_TYPE:
+            return None
+        name_length = struct.unpack_from(">I", data, 5)[0]
+        if not data[9:9 + name_length].startswith(b"QList<"):
+            return None
+        at = 9 + name_length
+        count = struct.unpack_from(">I", data, at)[0]
+        at += 4
+        if count > MAX_STROKES:
+            return None
+        strokes = []
+        for _ in range(count):
+            at += 1  # (always 100)
+            _spec, alpha, red, green, blue, _pad = struct.unpack_from(">bHHHHH", data, at)
+            at += 11
+            width = struct.unpack_from(">d", data, at)[0]
+            at += 8
+            elements = struct.unpack_from(">i", data, at)[0]
+            at += 4
+            if not 0 <= elements <= 1_000_000:
+                return None
+            path = [struct.unpack_from(">idd", data, at + 20 * i) for i in range(elements)]
+            at += 20 * elements + 8 + 20  # (then two ints, where it starts, and padding)
+            points: list[tuple[float, float]] = []
+            i = 0
+            while i < len(path):
+                kind, x, y = path[i]
+                if kind == QT_PATH_CURVE and i + 2 < len(path) and points:
+                    points += _cubic(points[-1], (x, y), path[i + 1][1:], path[i + 2][1:])
+                    i += 3
+                    continue
+                if kind in (QT_PATH_MOVE, QT_PATH_LINE, QT_PATH_CURVE_DATA, QT_PATH_CURVE):
+                    points.append((x, y))
+                i += 1
+            points = [p for p in points if all(math.isfinite(v) for v in p)]
+            if points and math.isfinite(width) and width > 0:
+                color = "#" + "".join(f"{v >> 8:02x}" for v in (alpha, red, green, blue))
+                strokes.append((_color(color) or "#000000", width, points))
+        return strokes
+    except struct.error:
+        return None
 
 
 def _text(value: Any) -> str:
@@ -356,7 +438,17 @@ def _read(con: sqlite3.Connection) -> Board:
         matrix, order, opacity, group = placed(item_id)
         board.notes.append(ImportedNote(_text(text), _color(background), matrix, order, opacity, group))
 
-    board.skipped["drawing"] += con.execute("select count(*) from items_drawings").fetchone()[0]
+    for item_id, value in con.execute("select id, strokes from items_drawings"):
+        strokes = _strokes(value) if item_id in items else None
+        if strokes is None:
+            board.skipped["drawing"] += 1  # (one that can't be read)
+            continue
+        matrix, order, opacity, group = placed(item_id)
+        if group is None and len(strokes) > 1:
+            group = item_id  # (its strokes move as one, as the drawing did)
+            board.groups[item_id] = DRAWING_GROUP_FILL
+        for color, width, points in strokes:
+            board.strokes.append(ImportedStroke(points, color, width, matrix, order, opacity, group))
     return board
 
 
@@ -380,6 +472,8 @@ def _board_scale(board: Board) -> float:
         points += [apply(image.matrix, x, y) for x, y in ((0, 0), (w, 0), (0, h), (w, h))]
     for note in board.notes:
         points.append(apply(note.matrix, 0, 0))
+    for stroke in board.strokes:
+        points += [apply(stroke.matrix, x, y) for x, y in stroke.points[:: max(1, len(stroke.points) // 8)]]
     if len(points) > 1:
         side = max(max(p[0] for p in points) - min(p[0] for p in points), max(p[1] for p in points) - min(p[1] for p in points))
         if side * factor > MAX_BOARD_SIDE:
@@ -416,6 +510,17 @@ def page_items(board: Board, blobs: list[str], group_ids: Optional[dict[int, str
             "x": corner[4], "y": corner[5], "scale": scale, "rotation": rotation, "opacity": round(note.opacity, 4),
             "group": group_ids.get(note.group),
         }))
+    for stroke in board.strokes:
+        to_board = combine(stroke.matrix, zoom)
+        scale = decompose(to_board)[0]
+        x0, y0 = apply(to_board, *stroke.points[0])
+        line = [apply(to_board, x, y) for x, y in stroke.points[:20000]]
+        entries.append(((0.0,) + stroke.order, {
+            "id": uuid.uuid4().hex, "kind": "stroke", "color": stroke.color, "width": stroke.width * scale,
+            "points": [[round(x - x0, 2), round(y - y0, 2)] for x, y in line],
+            "x": x0, "y": y0, "scale": 1.0, "rotation": 0.0, "opacity": round(stroke.opacity, 4),
+            "group": group_ids.get(stroke.group),
+        }))
     entries.sort(key=lambda entry: entry[0])
     items = []
     for z, (_order, item) in enumerate(entries, start=1):
@@ -428,7 +533,7 @@ def import_board(path: Path) -> tuple[dict[str, Any], Counter]:
     """Make a page from a board file: (the page, what was left out). The page is written whole
     (images first, page.json last), so a failed import leaves nothing behind. Safe off the UI thread."""
     board = read_board(Path(path))
-    if not board.images and not board.notes:
+    if not board.images and not board.notes and not board.strokes:
         raise PurError(f"{Path(path).name} has nothing on it to import.")
     page_id = uuid.uuid4().hex
     try:

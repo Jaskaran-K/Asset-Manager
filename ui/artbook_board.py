@@ -114,6 +114,10 @@ FIT_MS = 260
 FIT_MARGIN = 0.08
 MOVE_MS = 220  # images gliding to where a layout (or an undo) puts them
 FADE_MS = 180  # a picture fading in over its placeholder when it arrives
+AREA_MS = 260  # the active area following the board's items as they spread out or gather
+AREA_PAD_ITEM = 0.15  # the active area reaches this far past the items (of a typical item's longest side)...
+AREA_PAD_BOARD = 0.02  # ...or this far (of the area's own longest side), whichever is more
+AREA_RADIUS = 0.6  # its corners' rounding, of its padding
 DROP_GAP = 24.0  # between images dropped together
 HANDLE_PX = 9.0  # on screen, whatever the zoom
 MIN_CROP_PX = 8.0  # a crop keeps at least this much of the image (image pixels)
@@ -813,21 +817,29 @@ BOARD_ITEMS = (ImageItem, NoteItem, StrokeItem)
 
 
 class _BoardScene(QGraphicsScene):
-    """The board's scene. Behind everything, each group's backdrop: a rounded panel around its
-    members (in the scene, so exports and thumbnails show it too)."""
+    """The board's scene. Behind everything, the active area (a lighter rounded panel around all
+    the items: BoardView keeps it up to date), then each group's backdrop: a rounded panel around
+    its members (in the scene, so exports and thumbnails show it too; the active area they leave out)."""
 
     def __init__(self, *args):
         super().__init__(*args)
         self.gray_all = False  # the whole board in grayscale (read by ImageItem.paint)
         self.group_backdrops: Callable[[], list[tuple[QRectF, Optional[str]]]] = list
+        self.active_area: Optional[tuple[QRectF, float]] = None  # (the panel, its corners' radius)
+        self.show_area = True  # (off while exporting and making thumbnails)
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         super().drawBackground(painter, rect)
         backdrops = self.group_backdrops()
-        if not backdrops:
+        area = self.active_area if self.show_area else None
+        if not backdrops and area is None:
             return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if area is not None and area[0].intersects(rect):
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(theme_color("board_area"))
+            painter.drawRoundedRect(area[0], area[1], area[1])
         for box, fill in backdrops:
             if not box.intersects(rect):
                 continue
@@ -1394,6 +1406,15 @@ class BoardView(QGraphicsView):
         self._move_anim.valueChanged.connect(self._on_move_step)
         self._move_anim.finished.connect(self.finish_moves)
         self._moves: dict[ImageItem, tuple[ItemState, ItemState]] = {}  # gliding: item -> (from, to)
+        self._area_anim = QVariantAnimation(self)  # the active area gliding to fit the items
+        self._area_anim.setDuration(AREA_MS)
+        self._area_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._area_anim.setStartValue(0.0)
+        self._area_anim.setEndValue(1.0)
+        self._area_anim.valueChanged.connect(self._on_area_step)
+        self._area_from: Optional[tuple[QRectF, float]] = None
+        self._area_target: Optional[tuple[QRectF, float]] = None
+        self._scene.changed.connect(self.update_area)
         self._fade_timer = QTimer(self)  # repaints while pictures fade in
         self._fade_timer.setInterval(16)
         self._fade_timer.timeout.connect(self._on_fade_step)
@@ -1445,6 +1466,8 @@ class BoardView(QGraphicsView):
         self._move_anim.stop()  # (glides and fades on the last page end here)
         self._moves = {}
         self._fade_timer.stop()
+        self._area_anim.stop()  # (the new page's area appears where it is, not gliding from the last one's)
+        self._scene.active_area = self._area_target = None
         groups = page.get("groups")
         for gid, meta in (groups.items() if isinstance(groups, dict) else []):
             if gid in self._groups and isinstance(meta, dict) and meta.get("locked") is True:
@@ -1498,10 +1521,12 @@ class BoardView(QGraphicsView):
         painter = QPainter(image)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         gray_all, self._scene.gray_all = self._scene.gray_all, False  # the list shows pages in colour
+        self._scene.show_area = False
         try:
             self._scene.render(painter, target, bounds)  # items only: the selection frame is the view's
         finally:
             self._scene.gray_all = gray_all
+            self._scene.show_area = True
         painter.end()
         return image
 
@@ -1560,10 +1585,12 @@ class BoardView(QGraphicsView):
                 item.detail = QPixmap.fromImage(picture)
         painter = QPainter(image)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.TextAntialiasing)
+        self._scene.show_area = False  # (on the board's own colour)
         try:
             self._scene.render(painter, QRectF(0, 0, size.width(), size.height()), bounds)
         finally:
             painter.end()
+            self._scene.show_area = True
             for item in hidden:
                 item.setVisible(True)
             for item, detail in swapped.items():
@@ -1640,6 +1667,49 @@ class BoardView(QGraphicsView):
             item.setScale(end.scale)
             item.setRotation(end.rotation)
         self._place_note_bar()
+        self.viewport().update()
+
+    # ------------------ the active area ------------------
+    def area_box(self) -> Optional[tuple[QRectF, float]]:
+        """(the active area: around every item and group panel, with room to spare; its corners'
+        radius), or None for an empty board."""
+        boxes = [item.sceneBoundingRect() for item in self._items.values() if item.isVisible()]
+        if not boxes:
+            return None
+        area = QRectF(boxes[0])
+        for box in boxes[1:]:
+            area = area.united(box)
+        for box in self.group_backdrop_boxes().values():
+            area = area.united(box)
+        sides = sorted(max(box.width(), box.height()) for box in boxes)
+        pad = max(sides[len(sides) // 2] * AREA_PAD_ITEM, max(area.width(), area.height()) * AREA_PAD_BOARD)
+        return area.adjusted(-pad, -pad, pad, pad), pad * AREA_RADIUS
+
+    def update_area(self, *_args) -> None:
+        """Fit the active area to the items again: it glides there (or jumps, with motion off)."""
+        target = self.area_box()
+        if target == self._area_target:
+            return
+        self._area_target = target
+        current = self._scene.active_area
+        if target is None or current is None or not animations.motion_enabled() or not self.isVisible():
+            self._area_anim.stop()
+            self._scene.active_area = target
+            self.viewport().update()
+            return
+        self._area_from = current
+        self._area_anim.stop()
+        self._area_anim.start()
+
+    def _on_area_step(self, value) -> None:
+        if self._area_from is None or self._area_target is None:
+            return
+        t = float(value)
+        (a, ra), (b, rb) = self._area_from, self._area_target
+        self._scene.active_area = (QRectF(
+            a.left() + (b.left() - a.left()) * t, a.top() + (b.top() - a.top()) * t,
+            a.width() + (b.width() - a.width()) * t, a.height() + (b.height() - a.height()) * t,
+        ), ra + (rb - ra) * t)
         self.viewport().update()
 
     def _start_fade(self, item: ImageItem) -> None:
@@ -1847,10 +1917,11 @@ class BoardView(QGraphicsView):
             self._prepare(lambda page_id, path=path: _prepare_file(page_id, path))
         return len(images)
 
-    def add_image(self, image: QImage, at: Optional[QPointF] = None) -> None:
+    def add_image(self, image: QImage, at: Optional[QPointF] = None, name: str = "") -> None:
+        """A picture (pasted, or a PDF page sent here); name: what the image list calls it."""
         self._start_batch(at)
         copy = QImage(image)  # the clipboard's image may change before the worker reads it
-        self._prepare(lambda page_id: _prepare_qimage(page_id, copy))
+        self._prepare(lambda page_id: {**_prepare_qimage(page_id, copy), "name": name})
 
     def add_web_image(self, sources: list[str], at: Optional[QPointF] = None) -> None:
         """One image from the web: the first of `sources` (web_image_sources) that works."""
@@ -1894,6 +1965,7 @@ class BoardView(QGraphicsView):
             return  # another page is showing now
         width, height = result["size"]
         item = ImageItem(uuid.uuid4().hex, result["source"], (width, height))
+        item.name = str(result.get("name") or "")[:MAX_NAME]
         item.set_image(result["image"])
         if batch["first"]:
             x = batch["x"]  # the first one is centered where it was dropped

@@ -18,7 +18,7 @@ import threading
 import time
 from functools import partial
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QItemSelection,
@@ -1420,6 +1420,7 @@ class MainWindow(QMainWindow):
         dialog = AssetViewerDialog(
             asset, self, tags=target.tags, edit_tags=target.edit_tags,
             navigate=navigate if row is not None and len(assets) > 1 else None, position=target.position,
+            artbook=self,
         )
         dialog.exec()
         # Free the viewer (GL context, decoded image, video player) instead of keeping it parented
@@ -1586,11 +1587,15 @@ class MainWindow(QMainWindow):
         paths = [a.path for a in self._selected_assets() if a.path.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
         send = menu.addMenu("Send to Artbook" if paths else "Send to Artbook (images only)")
         send.setEnabled(bool(paths))
-        if not paths:
-            return
+        if paths:
+            self.fill_artbook_menu(send, lambda page_id: self._send_to_artbook(paths, page_id))
+
+    def fill_artbook_menu(self, send: QMenu, on_pick: Callable[[Optional[str]], None]) -> None:
+        """Fill a "Send to Artbook" menu: New Page, then every page (in its folders). on_pick(page id,
+        or None for a new page). Also used by the PDF viewer (ui.pdf_viewer) for its pages."""
         action_new = send.addAction("New Page")
         set_icon(action_new, "new_page")
-        action_new.triggered.connect(lambda: self._send_to_artbook(paths, None))
+        action_new.triggered.connect(lambda: on_pick(None))
         send.addSeparator()
         names = {p["id"]: p.get("name") or "Untitled" for p in artbook_store.list_pages()}
         current = self.artbook_panel.current_page_id() or get_artbook_page()
@@ -1608,12 +1613,12 @@ class MainWindow(QMainWindow):
                     font = action.font()
                     font.setBold(True)  # the open page
                     action.setFont(font)
-                action.triggered.connect(lambda _checked=False, pid=page_id: self._send_to_artbook(paths, pid))
+                action.triggered.connect(lambda _checked=False, pid=page_id: on_pick(pid))
 
         add(send, artbook_store.page_tree())
 
-    def _send_to_artbook(self, paths: list[Path], page_id: Optional[str]) -> None:
-        """Add image files to an Artbook page (None: a new one), which becomes the open page."""
+    def _open_artbook_page(self, page_id: Optional[str]) -> str:
+        """Open an Artbook page to send things to (None: a new one): "" or what went wrong."""
         panel = self.artbook_panel
         try:
             if page_id is None:
@@ -1621,15 +1626,35 @@ class MainWindow(QMainWindow):
             else:
                 panel.open_page(page_id)
         except (artbook_store.PageError, OSError) as exc:
-            self.status_label.setText(f"Couldn't open the Artbook page: {exc}")
-            return
+            return f"Couldn't open the Artbook page: {exc}"
         if panel.current_page_id() != page_id:
-            self.status_label.setText("That Artbook page couldn't be opened.")
-            return
-        count = panel.board.add_files(paths)
+            return "That Artbook page couldn't be opened."
+        return ""
+
+    def _sent_message(self, count: int) -> str:
+        panel = self.artbook_panel
         name = panel.page.get("name") or "Untitled"
         hint = " Ctrl+2 shows the Artbook." if not panel.isVisible() else ""
-        self.status_label.setText(f'Sent {count} image{"s" if count != 1 else ""} to "{name}".{hint}')
+        return f'Sent {count} image{"s" if count != 1 else ""} to "{name}".{hint}'
+
+    def _send_to_artbook(self, paths: list[Path], page_id: Optional[str]) -> None:
+        """Add image files to an Artbook page (None: a new one), which becomes the open page."""
+        error = self._open_artbook_page(page_id)
+        if error:
+            self.status_label.setText(error)
+            return
+        count = self.artbook_panel.board.add_files(paths)
+        self.status_label.setText(self._sent_message(count))
+
+    def send_image_to_artbook(self, image: QImage, name: str, page_id: Optional[str]) -> str:
+        """Add a picture (a PDF page) to an Artbook page (None: a new one); says how it went."""
+        error = self._open_artbook_page(page_id)
+        if error:
+            return error
+        self.artbook_panel.board.add_image(image, name=name)
+        message = self._sent_message(1)
+        self.status_label.setText(message)
+        return message
 
     # ------------------------------------------------------------------
     # Tagging

@@ -116,7 +116,7 @@ from ui.icons import (
 )
 from ui import shortcuts
 from ui.tag_widgets import next_tag_color, run_job
-from ui.themes import THEMES, apply_theme, current_theme_id, theme_color
+from ui.themes import THEMES, apply_theme_soon, current_theme_id, theme_color
 
 # Data roles on category tree items
 EXTENSIONS_ROLE = Qt.ItemDataRole.UserRole
@@ -1997,20 +1997,21 @@ class SettingsDialog(QDialog):
         self.btn_save.setEnabled(valid)
         self.lbl_footer_warning.setVisible(not valid)
 
+    # Previews and Cancel's restore wait for the click to finish (apply_theme_soon): restyling the
+    # app from inside a button's click handling can crash Qt
     def _on_theme_selected(self, theme_id: str) -> None:
         # Live preview; reverted in reject() if the dialog is cancelled
-        apply_theme(theme_id)
-        self.page_appearance.refresh_preview()
+        apply_theme_soon(theme_id, then=self.page_appearance.refresh_preview)
 
     def _on_texture_selected(self, texture_id: str) -> None:
-        apply_theme(self.page_appearance.theme_id(), texture_id=texture_id)  # live preview, like themes
+        apply_theme_soon(self.page_appearance.theme_id(), texture_id=texture_id)  # live preview, like themes
 
     def reject(self) -> None:
         if self.page_about.is_busy() or self.page_artbook.is_busy():
             return
         chosen = (self.page_appearance.theme_id(), self.page_appearance.texture_id())
         if chosen != (get_theme(), get_background_texture()):
-            apply_theme(get_theme(), texture_id=get_background_texture())
+            apply_theme_soon(get_theme(), texture_id=get_background_texture())
         set_frost(get_glass_frost())
         # Discard icon images imported during this session
         remove_unused_category_icons(get_categories())

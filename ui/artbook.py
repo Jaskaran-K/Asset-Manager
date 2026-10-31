@@ -318,7 +318,7 @@ class ArtbookPanel(QWidget):
         if imported:
             parts.append(f"Imported {len(imported)} board{'s' if len(imported) != 1 else ''}.")
         if skipped["drawing"]:
-            parts.append(f"Left out {skipped['drawing']} drawing{'s' if skipped['drawing'] != 1 else ''} (not on the Artbook yet).")
+            parts.append(f"Left out {skipped['drawing']} drawing{'s' if skipped['drawing'] != 1 else ''} that couldn't be read.")
         if skipped["missing image"]:
             parts.append(f"{skipped['missing image']} image{'s' if skipped['missing image'] != 1 else ''} had no picture saved and were left out.")
         parts += errors

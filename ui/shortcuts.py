@@ -40,10 +40,11 @@ MODEL = "3D Model Viewer"
 IMAGE = "Image Viewer"
 VIDEO = "Video Player"
 TAG_DIALOG = "Tag Dialog"
+THEME_STUDIO = "Theme Studio"
 VIEWS = "Views"
 ARTBOOK = "Artbook"
 PAGES = "Artbook Pages"
-CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, PAGES, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG)
+CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, PAGES, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG, THEME_STUDIO)
 
 SHORTCUTS: tuple[Shortcut, ...] = (
     # Views (both windows)
@@ -208,12 +209,14 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("pdf.contents", PDF, "Click in Contents / Pages", "Go to that chapter or page"),
 
     # 3D model viewport
-    Shortcut("viewer3d.orbit", MODEL, "Left-drag", "Orbit the camera"),
+    Shortcut("viewer3d.orbit", MODEL, "Left-drag", "Turn the model (the lights, when Turn Lights is on)"),
+    Shortcut("viewer3d.light_drag", MODEL, "Shift+Left-drag", "Turn the lights round the model"),
     Shortcut("viewer3d.pan", MODEL, "Right-drag / Middle-drag", "Pan the camera"),
     Shortcut("viewer3d.zoom", MODEL, "Mouse wheel", "Zoom"),
     Shortcut("viewer3d.wireframe", MODEL, "W", "Cycle shaded / wireframe / both", "W"),
     Shortcut("viewer3d.grid", MODEL, "G", "Toggle the ground grid", "G"),
     Shortcut("viewer3d.reset", MODEL, "R", "Reset the camera", "R"),
+    Shortcut("viewer3d.drag_lights", MODEL, "L", "Turn Lights on / off: whether dragging turns the lights or the model", "L"),
 
     # Image / texture viewer
     Shortcut("image.zoom", IMAGE, "Mouse wheel", "Zoom toward the cursor"),
@@ -236,6 +239,14 @@ SHORTCUTS: tuple[Shortcut, ...] = (
 
     # Tag dialog
     Shortcut("tagdialog.create", TAG_DIALOG, "Enter (in the new tag box)", "Create the tag and tick it"),  # QLineEdit.returnPressed
+
+    # Theme Studio (AssetManager.exe --theme-studio: ui.theme_studio)
+    Shortcut("studio.new", THEME_STUDIO, "Ctrl+N", "Start a new theme from a built-in one", "Ctrl+N"),
+    Shortcut("studio.open", THEME_STUDIO, "Ctrl+O", "Open a theme file (.amtheme)", "Ctrl+O"),
+    Shortcut("studio.save", THEME_STUDIO, "Ctrl+S", "Save the theme file", "Ctrl+S"),
+    Shortcut("studio.save_as", THEME_STUDIO, "Ctrl+Shift+S", "Save the theme as a new file", "Ctrl+Shift+S"),
+    Shortcut("studio.pick_color", THEME_STUDIO, "Click a swatch", "Pick that colour (with see-through)"),
+    Shortcut("studio.type_color", THEME_STUDIO, "Type in a colour box", "#rrggbb, #aarrggbb, rgba(r, g, b, a) or transparent"),
 )
 
 _BY_ID = {s.id: s for s in SHORTCUTS}

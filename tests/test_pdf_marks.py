@@ -78,6 +78,24 @@ def test_drawing_with_the_pen(qapp, viewer):
     first, last = ink.points[0], ink.points[-1]
     assert abs(first.x() - 40) < 2 and abs(first.y() - 100) < 2 and abs(last.x() - 200) < 2 and abs(last.y() - 160) < 2
     assert ink.parentItem() is view.pages[0]  # (on its page: it zooms and scrolls with it)
+    assert ink.cacheMode() == ink.CacheMode.DeviceCoordinateCache  # (finished: not stroked again as the pen passes)
+
+
+def test_a_line_grows_point_by_point_as_it_would_be_drawn_whole(qapp):
+    points = [QPointF(10 + i * 7, 20 + (i % 5) * 3) for i in range(40)]
+    grown = InkMark("a", points[:1], "#e5484d", 2.0)
+    for point in points[1:]:
+        grown.add_point(point)
+    whole = InkMark("b", points, "#e5484d", 2.0)
+    assert grown.path() == whole.path() and grown.points == whole.points
+    # Its bounds hold the line, the reach for clicking on it and the picked outline (only they're redrawn)
+    bounds = whole.boundingRect()
+    assert bounds.contains(whole.shape().boundingRect()) and bounds.contains(whole.path().boundingRect().adjusted(-4, -4, 4, 4))
+
+
+def test_a_notes_bounds_hold_its_picked_outline(qapp):
+    note = NoteMark("n", "remember this", "#fff3a3")
+    assert note.boundingRect().contains(note.card().adjusted(-3, -3, 3, 3))
 
 
 def test_typing_a_note(qapp, viewer):

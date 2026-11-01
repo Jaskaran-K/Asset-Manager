@@ -200,3 +200,21 @@ def test_library_split_button(library, qapp, tmp_path):
     window.btn_library.click()  # the main part: back to the library
     assert window.browse_folder is None and window.btn_library.property("active") is True
     window.close()
+
+
+def test_the_window_is_ready_for_the_3d_viewer_from_the_start(library, qapp, monkeypatch):
+    """The 3D viewer's OpenGL widget made Qt remake the main window the first time one opened
+    (it vanished and came back): a hidden one in the main window from the start prevents that."""
+    import main
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+    window = open_window(qapp)
+    ready = window.findChildren(QOpenGLWidget)
+    assert len(ready) == 1 and not ready[0].isVisible()
+    # And the viewer is told when it has loaded a model, for the model's grid picture
+    handed = []
+    monkeypatch.setattr(main.AssetViewerDialog, "exec", lambda dialog: handed.append(dialog._model_viewed) or 0)
+    select(window, "chair.fbx")
+    window._open_viewer(window._selected_assets()[0])
+    assert handed == [window.thumbnail_manager.model_viewed]
+    window.close()

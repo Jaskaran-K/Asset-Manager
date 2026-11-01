@@ -18,8 +18,8 @@ from typing import Optional
 
 import shiboken6
 
-from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRect, QRectF, Qt
-from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPalette
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QObject, QRect, QRectF, Qt, QVariantAnimation
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
@@ -54,6 +54,10 @@ class RowHighlightDelegate(QStyledItemDelegate):
     INSET = 4
     RADIUS = 5.0
     _selected_row = False
+
+    def color(self, token: str) -> QColor:
+        """A theme colour for the pill (the Theme Studio's preview shows the theme being made)."""
+        return theme_color(token)
 
     def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
         super().initStyleOption(option, index)
@@ -94,7 +98,7 @@ class RowHighlightDelegate(QStyledItemDelegate):
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setClipRect(cell)
-            painter.fillPath(path, theme_color("accent" if selected else "hover"))
+            painter.fillPath(path, self.color("accent" if selected else "hover"))
             painter.restore()
 
         opt = QStyleOptionViewItem(option)
@@ -113,15 +117,26 @@ class RowHighlightDelegate(QStyledItemDelegate):
 # Smooth scrolling
 # ----------------------------------------------------------------------
 class _Glide(QObject):
-    """Animates one scroll bar toward a target; further wheel notches extend the target."""
+    """Animates one scroll bar (its parent) toward a target; further wheel notches extend the target.
+
+    The animation has no target object: a QPropertyAnimation on the bar keeps a reference to the
+    bar's wrapper, which with the bar's to this glide and this glide's to its animation made a
+    reference cycle. Collecting it freed the real scroll bar under its open view, and Qt crashed
+    the next time the view laid itself out (the 0.5.x PDF viewer and Settings crashes)."""
 
     def __init__(self, bar: QScrollBar):
         super().__init__(bar)
         self.target = bar.value()
-        self.anim = QPropertyAnimation(bar, b"value", self)
+        self.anim = QVariantAnimation(self)
         self.anim.setDuration(SCROLL_MS)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.valueChanged.connect(self._on_step)
         bar.sliderPressed.connect(self.anim.stop)  # dragging the handle takes over
+
+    def _on_step(self, value) -> None:
+        bar = self.parent()
+        if isinstance(bar, QScrollBar):
+            bar.setValue(round(value))
 
     def by(self, bar: QScrollBar, pixels: int) -> bool:
         """Glide bar (the live one the wheel event found: a reference kept from earlier can outlive
@@ -141,9 +156,9 @@ class _Glide(QObject):
 
 def _glide_for(bar: QScrollBar) -> _Glide:
     for glide in bar.findChildren(_Glide, options=Qt.FindChildOption.FindDirectChildrenOnly):
-        if shiboken6.isValid(glide.anim) and glide.anim.targetObject() is bar:
+        if shiboken6.isValid(glide.anim):
             return glide
-        glide.deleteLater()  # (left over, its scroll bar gone: a new one takes over)
+        glide.deleteLater()  # (its animation gone: a new one takes over)
     return _Glide(bar)
 
 

@@ -156,6 +156,50 @@ THEMES: dict[str, dict[str, str]] = {
         "glass_tint": "#8c180d2c", "glass_edge": "#33c4b5fd", "texture_ink": "#e9ddff",
         "board_area": "#0fe9ddff",
     },
+    "neon_cyan": {  # (made in the Theme Studio)
+        "label": "Neon Cyan",
+        "window_bg": "#17181e",
+        "surface": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #151515, stop:0.5 #24433f, stop:1 #3b635b)",
+        "surface_alt": "#1e2029",
+        "sidebar_bg": "#aa090c13",
+        "grid_bg": "qlineargradient(x1:0, y1:1, x2:0, y2:0, stop:0 #000000, stop:0.5 #252525, stop:1 #000000)",
+        "border": "#5e6467",
+        "text": "#73cfd2",
+        "text_strong": "#bfeafa",
+        "text_muted": "#8f9cb2",
+        "text_faint": "#d0d3d9",
+        "button": "#343845",
+        "button_border": "#00564e",
+        "button_hover": "#434859",
+        "button_border_hover": "#96feec",
+        "button_pressed": "#47635c",
+        "button_disabled": "#1a1a1c",
+        "input_bg": "#15161b",
+        "input_border": "#363a48",
+        "hover": "#5a8a94",
+        "accent": "#41949c",
+        "accent_border": "#a2f7ff",
+        "accent_hover": "#55d2de",
+        "accent_soft": "#008b99",
+        "accent_text": "#bee3e6",
+        "card": "#1c1e26",
+        "card_border": "#00564e",
+        "card_hover": "#6d6d6d",
+        "card_hover_border": "#96feec",
+        "card_selected": "#476760",
+        "card_selected_text": "#ffffff",
+        "scroll_track": "#15161b",
+        "scroll_handle": "#374151",
+        "scroll_handle_hover": "#4b5563",
+        "danger": "#ef4444",
+        "warn_text": "#fca5a5", "warn_bg": "#3b1d22", "warn_border": "#7f1d1d",
+        "note_text": "#fcd34d", "note_bg": "#33290f", "note_border": "#78590f",
+        "info_text": "#93c5fd", "info_bg": "#172554", "info_border": "#1e40af",
+        "thumb_card": "#1a1c24", "thumb_border": "#2e3240",
+        "thumb_badge": "#12141a", "thumb_badge_text": "#ffffff",
+        "glass_tint": "#b826403b", "glass_edge": "#24ffffff", "texture_ink": "#ffffff",
+        "board_area": "#0fffffff",
+    },
 }
 
 DEFAULT_THEME = "dark"
@@ -448,21 +492,52 @@ def build_stylesheet(theme_id: str, texture_id: str = "none") -> str:
     from ui.backgrounds import tile_path
 
     tokens = theme_tokens(theme_id)
+    return stylesheet_from(tokens, tile_path(texture_id, QColor(tokens["texture_ink"])))
+
+
+def stylesheet_from(tokens: dict[str, str], tile=None) -> str:
+    """The stylesheet for a full set of tokens, with a background tile (a PNG path) or none.
+    (Also what the Theme Studio previews with: ui.theme_studio.)"""
     sheet = APP_QSS_TEMPLATE.substitute(tokens)
-    tile = tile_path(texture_id, QColor(tokens["texture_ink"]))
     if tile is not None:
         sheet += TEXTURE_QSS_TEMPLATE.substitute(tile=tile.as_posix())
     return sheet
 
 
+def palette_from(tokens: dict[str, str]) -> QPalette:
+    """The palette matching a set of tokens (for widgets the stylesheet doesn't cover)."""
+    t = tokens
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, _solid(t["window_bg"], t["thumb_card"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(t["text"]))
+    palette.setColor(QPalette.ColorRole.Base, _solid(t["input_bg"], "#15161b"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, _solid(t["surface"], t["thumb_card"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(t["text"]))
+    palette.setColor(QPalette.ColorRole.Button, _solid(t["button"], t["thumb_card"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(t["text"]))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, _solid(t["surface"], t["thumb_card"]))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(t["text"]))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(t["text_faint"]))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(t["accent"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.Link, QColor(t["accent_text"]))
+    return palette
+
+
 _RGBA = re.compile(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)")
+
+
+_GRADIENT_STOP = re.compile(r"stop:\s*[-\d.]+\s+(#[0-9a-fA-F]+|rgba\([^)]*\)|transparent)")
 
 
 def parse_color(value: str) -> QColor:
     """QColor for a token: "#rgb" / "#aarrggbb" / names, or rgba() with 0-1 alpha.
 
-    Gradients aren't colors: they give an invalid QColor.
+    A gradient gives its middle stop's colour (for what's painted in code, which takes one colour).
     """
+    if value.strip().startswith("qlineargradient"):
+        stops = _GRADIENT_STOP.findall(value)
+        return parse_color(stops[len(stops) // 2]) if stops else QColor()
     match = _RGBA.fullmatch(value.strip())
     if match:
         r, g, b, a = match.groups()
@@ -476,8 +551,8 @@ def theme_color(name: str) -> QColor:
 
 
 def _solid(color: str, fallback: str) -> QColor:
-    """QColor for a token, using fallback for gradients / rgba() values QColor can't parse."""
-    c = QColor(color)
+    """QColor for a token (a gradient's middle colour), using fallback for what isn't a colour."""
+    c = parse_color(color)
     return c if c.isValid() else QColor(fallback)
 
 
@@ -522,23 +597,7 @@ def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str 
         _current_texture_id = texture_id
     t = THEMES[theme_id]
 
-    base = _solid(t["input_bg"], "#15161b")
-    window = _solid(t["window_bg"], t["thumb_card"])
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, window)
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(t["text"]))
-    palette.setColor(QPalette.ColorRole.Base, base)
-    palette.setColor(QPalette.ColorRole.AlternateBase, _solid(t["surface"], t["thumb_card"]))
-    palette.setColor(QPalette.ColorRole.Text, QColor(t["text"]))
-    palette.setColor(QPalette.ColorRole.Button, _solid(t["button"], t["thumb_card"]))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(t["text"]))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, _solid(t["surface"], t["thumb_card"]))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(t["text"]))
-    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(t["text_faint"]))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(t["accent"]))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.ColorRole.Link, QColor(t["accent_text"]))
-    app.setPalette(palette)
+    app.setPalette(palette_from(t))
     app.setStyleSheet(build_stylesheet(theme_id, _current_texture_id))
 
     set_thumbnail_card_style(

@@ -54,6 +54,7 @@ Source: "..\dist\AssetManager\*"; DestDir: "{app}"; Flags: ignoreversion recurse
 
 [Icons]
 Name: "{group}\Asset Manager"; Filename: "{app}\AssetManager.exe"
+Name: "{group}\Asset Manager Theme Studio"; Filename: "{app}\AssetManager.exe"; Parameters: "--theme-studio"; Comment: "Make your own themes and backgrounds"
 Name: "{group}\Uninstall Asset Manager"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Asset Manager"; Filename: "{app}\AssetManager.exe"; Tasks: desktopicon
 

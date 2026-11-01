@@ -89,7 +89,7 @@ def read_details(path: str, extension: str) -> Optional[AssetMeta]:
             from .model_loader import load_3d_model
 
             mesh = load_3d_model(Path(path))
-            if "Error" in mesh.metadata:  # the loader fell back to a placeholder cube
+            if mesh.stand_in:  # the loader fell back to a placeholder cube
                 return EMPTY
             return AssetMeta(poly_count=mesh.face_count)
     except Exception:  # pylint: disable=broad-except

@@ -266,7 +266,9 @@ class PdfPageView(QGraphicsView):
         self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
-        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        # Only what changed is redrawn: redrawing every page and mark at each point of a pen line
+        # made long lines on big pages crawl (the marks keep their picked outline inside their bounds)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
         self.setFrameShape(QGraphicsView.Shape.NoFrame)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.viewport().setMouseTracking(True)  # (links show a hand when hovered)
@@ -607,6 +609,10 @@ class PdfPageView(QGraphicsView):
         self._remove_mark(item.mark_id)
         item.setParentItem(self.pages[data["page"]])
         item.setVisible(self.marks_shown)
+        if isinstance(item, InkMark):
+            # A finished line is drawn once per zoom and kept as a picture: stroking a long line
+            # again whenever the pen passes over it slowed drawing down line by line
+            item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         if isinstance(item, NoteMark):
             item.on_edit_finished = self._on_note_focus_lost
         self._marks[item.mark_id] = (data["page"], item)
@@ -766,7 +772,7 @@ class PdfPageView(QGraphicsView):
         drawing["last"] = pos
         item = drawing["item"]
         steady = item.points[-1] + (local - item.points[-1]) * PEN_FOLLOW
-        item.set_points(item.points + [steady])
+        item.add_point(steady)
 
     def _finish_ink(self) -> None:
         drawing, self._drawing = self._drawing, None

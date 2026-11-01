@@ -11,7 +11,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/Asset-Manager-Icon.ico', 'assets'), ('README.md', '.'), ('docs/artbook-guide.md', 'docs')],  # (the Guide in Settings)
+    datas=[('assets/Asset-Manager-Icon.ico', 'assets'), ('README.md', '.'), ('docs/artbook-guide.md', 'docs'), ('docs/theme-studio.md', 'docs')],  # (the Guide in Settings)
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

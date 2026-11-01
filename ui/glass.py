@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QGraphicsBlurEffect, QGraphicsScene, QWidget
 
 from core.settings import DEFAULT_GLASS_FROST
 from ui.backgrounds import render_tile
-from ui.themes import theme_color
+from ui.themes import parse_color, theme_color
 
 BLUR_SCALE = 0.25  # blur a quarter-size copy: far quicker, and detail is blurred away anyway
 MAX_BLUR_RADIUS = 12.0  # at quarter size, so about 48 px on screen at full frost
@@ -50,9 +50,9 @@ def blur_radius(strength: float) -> float:
     return MAX_BLUR_RADIUS * strength
 
 
-def tint_color(strength: float) -> QColor:
-    """The theme's glass tint, more see-through the clearer the glass."""
-    tint = theme_color("glass_tint")
+def tint_color(strength: float, tint: Optional[QColor] = None) -> QColor:
+    """The theme's glass tint (or this one), more see-through the clearer the glass."""
+    tint = QColor(tint) if tint is not None else theme_color("glass_tint")
     tint.setAlphaF(tint.alphaF() * (0.35 + 0.65 * strength))
     return tint
 
@@ -88,9 +88,9 @@ def frosted(image: QImage, radius: float, scale: float = BLUR_SCALE) -> QImage:
     )
 
 
-def _grain_pixmap() -> QPixmap:
+def _grain_pixmap(ink: Optional[QColor] = None) -> QPixmap:
     """Fine speckle in the theme's ink: what makes glass look frosted even over a plain background."""
-    ink = theme_color("texture_ink")
+    ink = ink if ink is not None else theme_color("texture_ink")
     key = ink.name()
     if key not in _grain:
         _grain[key] = QPixmap.fromImage(render_tile("grain", ink))
@@ -107,6 +107,7 @@ class GlassPanel(QWidget):
         self._source: Optional[QImage] = None
         self.backdrop: Optional[QPixmap] = None  # the source, frosted
         self.offset_x = 0  # draw the backdrop shifted by this (a sliding panel's backdrop stays put)
+        self.tokens: Optional[dict[str, str]] = None  # colours instead of the current theme's (the Theme Studio's preview)
         _panels.add(self)
 
     def set_backdrop(self, image: QImage) -> None:
@@ -124,15 +125,19 @@ class GlassPanel(QWidget):
         painter.fillRect(self.rect(), self.palette().window())
         if self.backdrop is not None:
             painter.drawPixmap(-self.offset_x, 0, self.backdrop)
-        painter.fillRect(self.rect(), tint_color(_frost))
+        painter.fillRect(self.rect(), tint_color(_frost, self._color("glass_tint")))
         if _frost > 0.0:
             painter.setOpacity(0.25 + 0.75 * _frost)
-            painter.fillRect(self.rect(), QBrush(_grain_pixmap()))
+            painter.fillRect(self.rect(), QBrush(_grain_pixmap(self._color("texture_ink"))))
             painter.setOpacity(1.0)
         # Sheen toward the top, like light catching the glass
         sheen = QLinearGradient(0, 0, 0, self.height())
         sheen.setColorAt(0.0, QColor(255, 255, 255, round(8 + 18 * _frost)))
         sheen.setColorAt(0.4, QColor(255, 255, 255, 0))
         painter.fillRect(self.rect(), sheen)
-        painter.setPen(theme_color("glass_edge"))
+        edge = self._color("glass_edge")
+        painter.setPen(edge if edge is not None else theme_color("glass_edge"))
         painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+
+    def _color(self, token: str) -> Optional[QColor]:
+        return parse_color(self.tokens[token]) if self.tokens else None

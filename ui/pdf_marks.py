@@ -22,6 +22,7 @@ NOTE_WIDTH = 170.0  # points
 NOTE_FONT_PT = 11.0
 NOTE_PADDING = 6.0
 INK_HIT = 4.0  # points either side of a drawn line that still count as on it
+CHOSEN_MARGIN = 4.0  # points around a mark kept inside its bounds for the picked outline (only that much is redrawn)
 MAX_POINTS = 20000
 MAX_NOTE_TEXT = 10000
 MAX_BOXES = 2000
@@ -92,6 +93,9 @@ class InkMark(QGraphicsPathItem):
         self.mark_id, self.color, self.width = mark_id, color, width
         self.chosen = False
         self.points: list[QPointF] = []
+        self._curve = QPainterPath()  # (through the points' middles, without the last stretch: add_point extends it)
+        self._bounds = QRectF()
+        self._shape: Optional[QPainterPath] = None
         pen = QPen(QColor(color), width)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -101,20 +105,42 @@ class InkMark(QGraphicsPathItem):
     def set_points(self, points: list[QPointF]) -> None:
         """Through its points, smoothly (a curve through each pair's middle)."""
         self.points = list(points)
-        path = QPainterPath(self.points[0] if self.points else QPointF())
-        if len(self.points) == 1:
-            path.lineTo(self.points[0])  # (a dot)
+        self._curve = QPainterPath(self.points[0] if self.points else QPointF())
         for before, point in zip(self.points, self.points[1:]):
-            path.quadTo(before, (before + point) / 2.0)
-        if len(self.points) > 1:
-            path.lineTo(self.points[-1])
+            self._curve.quadTo(before, (before + point) / 2.0)
+        self._show_curve()
+
+    def add_point(self, point: QPointF) -> None:
+        """One more point at the end (while it's drawn: the curve so far isn't worked out again)."""
+        if self.points:
+            before = self.points[-1]
+            self._curve.quadTo(before, (before + point) / 2.0)
+        else:
+            self._curve = QPainterPath(point)
+        self.points.append(point)
+        self._show_curve()
+
+    def _show_curve(self) -> None:
+        path = QPainterPath(self._curve)
+        if self.points:
+            path.lineTo(self.points[-1])  # (the last stretch; a dot if it's one point)
+        reach = self.width / 2.0 + INK_HIT + CHOSEN_MARGIN
+        self.prepareGeometryChange()  # (before the bounds change)
+        self._bounds = path.controlPointRect().adjusted(-reach, -reach, reach, reach)
+        self._shape = None
         self.setPath(path)
 
+    def boundingRect(self) -> QRectF:
+        # (Qt's own works it out from shape(): stroking the whole line at every point drawn)
+        return self._bounds
+
     def shape(self) -> QPainterPath:
-        stroker = QPainterPathStroker()
-        stroker.setWidth(self.width + 2 * INK_HIT)
-        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-        return stroker.createStroke(self.path())
+        if self._shape is None:  # (worked out when it's first hit-tested, not while it's drawn)
+            stroker = QPainterPathStroker()
+            stroker.setWidth(self.width + 2 * INK_HIT)
+            stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+            self._shape = stroker.createStroke(self.path())
+        return self._shape
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: Optional[QWidget] = None) -> None:
         plain = QStyleOptionGraphicsItem(option)
@@ -175,8 +201,15 @@ class NoteMark(QGraphicsTextItem):
         if self.editing() and self.on_edit_finished is not None:
             self.on_edit_finished(self)
 
+    def boundingRect(self) -> QRectF:
+        # (room for the picked outline around the card: only an item's bounds are redrawn)
+        return super().boundingRect().adjusted(-CHOSEN_MARGIN, -CHOSEN_MARGIN, CHOSEN_MARGIN, CHOSEN_MARGIN)
+
+    def card(self) -> QRectF:
+        return super().boundingRect()
+
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: Optional[QWidget] = None) -> None:
-        card = self.boundingRect()
+        card = self.card()
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QPen(QColor(0, 0, 0, 60), 0))

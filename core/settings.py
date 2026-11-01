@@ -4,7 +4,7 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - scan_folders:     library folders scanned on startup / refresh
 - file_extensions:  file types the scanner picks up
 - categories:       sidebar main categories, their subcategories, file types, colors and icons
-- theme:            UI theme id ("dark", "light", "dark_purple")
+- theme:            UI theme id ("dark", "light", "dark_purple", "neon_cyan")
 - thumbnail_size:   grid thumbnail size in pixels
 - ffmpeg_path:      ffmpeg executable for video proxies / poster frames (blank = search PATH)
 - media_backend:    Qt multimedia backend ("auto", "ffmpeg", "windows"); applied on restart
@@ -43,7 +43,7 @@ CONFIG_FILE_PATH: Path = Path.home() / ".3d_asset_manager_config.json"
 CATEGORY_ICONS_DIR: Path = Path.home() / ".3d_asset_manager" / "category_icons"
 MAX_CATEGORY_ICON_BYTES = 1024 * 1024
 
-THEME_IDS = ("dark", "light", "dark_purple")
+THEME_IDS = ("dark", "light", "dark_purple", "neon_cyan")
 DEFAULT_THEME = "dark"
 THUMBNAIL_SIZE_RANGE = (64, 256)
 DEFAULT_THUMBNAIL_SIZE = 110
@@ -469,6 +469,29 @@ def get_sidebar_state(key: str = "sidebar") -> dict[str, Any]:
         "pinned": raw.get("pinned") if isinstance(raw.get("pinned"), bool) else True,
         "width": max(lo, min(hi, width)) if isinstance(width, int) else DEFAULT_SIDEBAR_WIDTH,
     }
+
+
+def get_model_view() -> dict[str, Any]:
+    """The 3D viewer's look, kept between viewings: {"color": "#rrggbb", "material", "lighting"}
+    (core.model_look's names), and whether models get rendered thumbnails ("thumbnails")."""
+    from core.model_look import DEFAULT_COLOR, DEFAULT_LIGHTING, DEFAULT_MATERIAL, LIGHTINGS, MATERIALS
+
+    raw = _load_raw_config().get("model_view")
+    raw = raw if isinstance(raw, dict) else {}
+    color = raw.get("color")
+    return {
+        "color": color if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color) else DEFAULT_COLOR,
+        "material": raw.get("material") if raw.get("material") in MATERIALS else DEFAULT_MATERIAL,
+        "lighting": raw.get("lighting") if raw.get("lighting") in LIGHTINGS else DEFAULT_LIGHTING,
+        "thumbnails": raw.get("thumbnails") if isinstance(raw.get("thumbnails"), bool) else True,
+    }
+
+
+def set_model_view(**changes: Any) -> None:
+    """Update some of color / material / lighting / thumbnails (anything invalid reads back as the default)."""
+    state = get_model_view()
+    state.update({k: v for k, v in changes.items() if k in state})
+    _update_config("model_view", state)
 
 
 def set_sidebar_state(key: str = "sidebar", **changes: Any) -> None:

@@ -32,6 +32,7 @@ class Mesh3D:
     ground_y: float = -0.9
     format_type: str = "Unknown"
     metadata: dict[str, str] = field(default_factory=dict)
+    stand_in: bool = False  # the file couldn't be read: this is the placeholder cube
 
     @property
     def vertex_count(self) -> int:
@@ -42,32 +43,35 @@ class Mesh3D:
         return len(self.faces) if self.faces is not None else 0
 
 
+_NORMALS_CHUNK = 2_000_000  # triangles at a time (a big sculpt has tens of millions)
+
+
 def _compute_vertex_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    """Compute per-vertex smooth normals from triangle faces."""
+    """Compute per-vertex smooth normals from triangle faces (in float32 and a chunk of triangles
+    at a time, so a big sculpt doesn't need gigabytes for it)."""
     if len(vertices) == 0 or len(faces) == 0:
         return np.zeros_like(vertices, dtype=np.float32)
 
-    v0 = vertices[faces[:, 0]]
-    v1 = vertices[faces[:, 1]]
-    v2 = vertices[faces[:, 2]]
-
-    # Compute face normals using cross product
-    face_normals = np.cross(v1 - v0, v2 - v0)
-    norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    face_normals /= norms
-
-    # Accumulate onto vertices
-    vert_normals = np.zeros_like(vertices, dtype=np.float32)
-    np.add.at(vert_normals, faces[:, 0], face_normals)
-    np.add.at(vert_normals, faces[:, 1], face_normals)
-    np.add.at(vert_normals, faces[:, 2], face_normals)
+    vertices = np.asarray(vertices, dtype=np.float32)
+    vert_normals = np.zeros((len(vertices), 3), dtype=np.float32)
+    for start in range(0, len(faces), _NORMALS_CHUNK):
+        part = faces[start: start + _NORMALS_CHUNK]
+        v0 = vertices[part[:, 0]]
+        face_normals = np.cross(vertices[part[:, 1]] - v0, vertices[part[:, 2]] - v0)
+        norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        face_normals /= norms
+        # Accumulate onto vertices (bincount: many times quicker than np.add.at on big meshes)
+        corners = part.reshape(-1)
+        for axis in range(3):
+            weights = np.repeat(face_normals[:, axis], 3)
+            vert_normals[:, axis] += np.bincount(corners, weights=weights, minlength=len(vertices)).astype(np.float32)
 
     v_norms = np.linalg.norm(vert_normals, axis=1, keepdims=True)
     v_norms[v_norms == 0] = 1.0
     vert_normals /= v_norms
 
-    return vert_normals.astype(np.float32)
+    return vert_normals
 
 
 def _normalize_geometry(
@@ -83,6 +87,7 @@ def _normalize_geometry(
 
     if raw_verts is None or len(raw_verts) == 0:
         mesh.vertices, mesh.faces, mesh.normals = _get_default_preview_cube()
+        mesh.stand_in = True
         mesh.metadata = metadata
         return mesh
 
@@ -104,11 +109,10 @@ def _normalize_geometry(
     max_dim = float(max(dx, dy, dz, 1e-5))
     scale = 1.8 / max_dim
 
-    # Center model at origin
-    norm_verts = np.empty_like(verts, dtype=np.float32)
-    norm_verts[:, 0] = (verts[:, 0] - cx) * scale
-    norm_verts[:, 1] = (verts[:, 1] - cy) * scale
-    norm_verts[:, 2] = (verts[:, 2] - cz) * scale
+    # Center model at origin (in place when the array is our own: a sculpt's is hundreds of MB)
+    norm_verts = verts if verts is not raw_verts or raw_verts.flags.owndata and raw_verts.flags.writeable else verts.copy()
+    norm_verts -= np.array([cx, cy, cz], dtype=np.float32)
+    norm_verts *= np.float32(scale)
 
     ground_y = float((min_b[1] - cy) * scale)
 
@@ -145,7 +149,23 @@ def parse_fbx_file(file_path: Path) -> Mesh3D:
         "File Size": f"{file_path.stat().st_size / (1024*1024):.2f} MB",
     }
 
-    # 1. Try binary FBX loader
+    # 1. Binary FBX: the quick reader (core.fbx_fast), then fbxloader for what it can't read
+    try:
+        from core.fbx_fast import FbxError, read_fbx
+
+        verts, faces, meshes = read_fbx(file_path)
+        metadata["Subtype"] = "Binary FBX"
+        if meshes > 1:
+            metadata["Meshes"] = f"{meshes:,}"
+        return _normalize_geometry(
+            name=file_path.name, raw_verts=verts, raw_faces=faces, raw_normals=None, format_type="FBX", metadata=metadata,
+        )
+    except FbxError as exc:
+        fast_note = str(exc)  # (shown only if nothing else can read it either)
+    except MemoryError:
+        raise
+    except Exception as exc:  # pylint: disable=broad-except
+        fast_note = f"{type(exc).__name__}: {exc}"
     try:
         import fbxloader
 
@@ -211,8 +231,10 @@ def parse_fbx_file(file_path: Path) -> Mesh3D:
     except Exception:
         pass
 
+    metadata.setdefault("Binary Loader Note", fast_note)
     mesh = Mesh3D(name=file_path.name, format_type="FBX")
     mesh.vertices, mesh.faces, mesh.normals = _get_default_preview_cube()
+    mesh.stand_in = True
     mesh.metadata = metadata
     return mesh
 
@@ -297,6 +319,7 @@ def parse_obj_file(file_path: Path) -> Mesh3D:
 
     mesh = Mesh3D(name=file_path.name, format_type="OBJ")
     mesh.vertices, mesh.faces, mesh.normals = _get_default_preview_cube()
+    mesh.stand_in = True
     mesh.metadata = metadata
     return mesh
 
@@ -328,6 +351,7 @@ def parse_gltf_file(file_path: Path) -> Mesh3D:
 
     mesh = Mesh3D(name=file_path.name, format_type="glTF")
     mesh.vertices, mesh.faces, mesh.normals = _get_default_preview_cube()
+    mesh.stand_in = True
     mesh.metadata = metadata
     return mesh
 
@@ -359,6 +383,7 @@ def parse_generic_mesh_file(file_path: Path, format_name: str) -> Mesh3D:
 
     mesh = Mesh3D(name=file_path.name, format_type=format_name)
     mesh.vertices, mesh.faces, mesh.normals = _get_default_preview_cube()
+    mesh.stand_in = True
     mesh.metadata = metadata
     return mesh
 

@@ -53,6 +53,10 @@ QImageReader.setAllocationLimit(2048)
 MAX_DISK_CACHE_BYTES = 512 * 1024 * 1024
 _CACHE_VERSION = 1  # bump when thumbnail drawing changes, so old cached pictures aren't reused
 _COMPANION_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")  # model.png next to model.fbx
+# 3D models without a companion picture get one rendered (core.model_thumbnail), one at a time.
+# Bigger files only when they're opened in the viewer (it has loaded them already): reading a
+# 300 MB sculpt takes seconds and about a GB of memory, too much just for scrolling past it.
+MAX_RENDERED_MODEL_BYTES = 150 * 1024 * 1024
 
 # Format-specific color palettes for badges
 PALETTE_MAP = {
@@ -237,40 +241,66 @@ def load_texture_thumbnail_image(file_path: Path, category_name: str, size: int 
             inner_h,
             QImage.Format.Format_RGBA8888,
         ).copy()
-
-        # Compose inside a styled card
-        card_img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
-        card_img.fill(Qt.GlobalColor.transparent)
-
-        p = QPainter(card_img)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        card_rect = QRectF(2, 2, size - 4, size - 4)
-        p.setBrush(QBrush(_CARD_STYLE["card"]))
-        p.setPen(QPen(_CARD_STYLE["border"], 1))
-        p.drawRoundedRect(card_rect, 6, 6)
-
-        # Center texture preview
-        dx = (size - inner_w) / 2.0
-        dy = (size - 18 - inner_h) / 2.0 + 4
-        p.drawImage(int(dx), int(dy), inner_qimg)
-
-        # Format pill badge
-        badge_rect = QRectF(size * 0.18, size - 20, size * 0.64, 15)
-        badge_col = PALETTE_MAP.get(category_name, (QColor(16, 185, 129), None, None))[0]
-        p.setBrush(QBrush(badge_col))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(badge_rect, 3, 3)
-
-        p.setPen(QPen(Qt.GlobalColor.white))
-        p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-        p.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, category_name)
-
-        p.end()
-        return card_img
+        return compose_card(inner_qimg, category_name, size)
 
     except Exception:
         return None
+
+
+def compose_card(inner_qimg: QImage, category_name: str, size: int) -> QImage:
+    """A picture centred in a styled card, with the file type's badge (fits (size - 16) x (size - 32))."""
+    inner_w, inner_h = inner_qimg.width(), inner_qimg.height()
+    card_img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    card_img.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(card_img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    card_rect = QRectF(2, 2, size - 4, size - 4)
+    p.setBrush(QBrush(_CARD_STYLE["card"]))
+    p.setPen(QPen(_CARD_STYLE["border"], 1))
+    p.drawRoundedRect(card_rect, 6, 6)
+
+    # Center the picture
+    dx = (size - inner_w) / 2.0
+    dy = (size - 18 - inner_h) / 2.0 + 4
+    p.drawImage(int(dx), int(dy), inner_qimg)
+
+    # Format pill badge
+    badge_rect = QRectF(size * 0.18, size - 20, size * 0.64, 15)
+    badge_col = PALETTE_MAP.get(category_name, (QColor(16, 185, 129), None, None))[0]
+    p.setBrush(QBrush(badge_col))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(badge_rect, 3, 3)
+
+    p.setPen(QPen(Qt.GlobalColor.white))
+    p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+    p.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, category_name)
+
+    p.end()
+    return card_img
+
+
+def render_model_thumbnail(vertices, faces, normals, category_name: str, size: int) -> Optional[QImage]:
+    """A 3D model's rendered picture in its card (thread-safe: CPU only)."""
+    from .model_thumbnail import render_model
+
+    inner = max(16, size - 32)
+    picture = render_model(vertices, faces, normals, inner)
+    return compose_card(picture, category_name, size) if picture is not None else None
+
+
+def load_model_thumbnail_image(file_path: Path, category_name: str, size: int = 110) -> Optional[QImage]:
+    """Read a 3D model and render its picture (None if it can't be read)."""
+    from .model_loader import load_3d_model
+
+    try:
+        mesh = load_3d_model(file_path)
+    except Exception:  # pylint: disable=broad-except
+        return None
+    if mesh.stand_in:
+        return None  # (no picture beats a picture of the stand-in cube)
+    return render_model_thumbnail(mesh.vertices, mesh.faces, mesh.normals, category_name, size)
 
 
 def load_video_thumbnail_image(file_path: Path, category_name: str, size: int = 110) -> Optional[QImage]:
@@ -358,9 +388,9 @@ def disk_cache_path(asset: AssetItem, size: int) -> Optional[Path]:
 
     The name covers everything the picture depends on (file, size, modified time, thumbnail
     size, theme card colors), so a changed file or theme simply gets a new entry.
-    3D models aren't cached: their picture comes from a companion image that can change.
+    For 3D models it's their rendered picture (a companion image isn't cached: it can change).
     """
-    if not (asset.is_texture or asset.is_video or (asset.is_document and asset.extension == ".pdf")):
+    if not (asset.is_texture or asset.is_video or asset.is_3d_model or (asset.is_document and asset.extension == ".pdf")):
         return None
     from . import video_tools  # CACHE_ROOT can be redirected (tests)
 
@@ -395,11 +425,12 @@ def prune_disk_cache(max_bytes: int = MAX_DISK_CACHE_BYTES) -> int:
 class _ThumbnailRunnable(QRunnable):
     """Background task to decode image/texture and generate thumbnail."""
 
-    def __init__(self, asset: AssetItem, size: int, cache_file: Optional[Path]):
+    def __init__(self, asset: AssetItem, size: int, cache_file: Optional[Path], render_model: bool = False):
         super().__init__()
         self.asset = asset
         self.size = size
         self.cache_file = cache_file  # computed on the UI thread (the theme colors live there)
+        self.render_model = render_model  # a 3D model without a companion picture: render one
         self.signals = _WorkerSignals()
 
     def run(self) -> None:
@@ -444,6 +475,8 @@ class _ThumbnailRunnable(QRunnable):
             qimg = load_pdf_thumbnail_image(self.asset.path, self.size)
         elif self.asset.is_video:
             qimg = load_video_thumbnail_image(self.asset.path, self.asset.category_name, self.size)
+        elif self.asset.is_3d_model and self.render_model:
+            qimg = load_model_thumbnail_image(self.asset.path, self.asset.category_name, self.size)
         elif self.asset.is_3d_model:
             # Check for companion preview images (model.png, etc.)
             for preview_ext in _COMPANION_EXTENSIONS:
@@ -453,6 +486,22 @@ class _ThumbnailRunnable(QRunnable):
                     if qimg is not None:
                         break
         return qimg
+
+
+class _ModelPictureRunnable(_ThumbnailRunnable):
+    """Renders a model the viewer has already loaded (its arrays), and caches the picture."""
+
+    def __init__(self, asset: AssetItem, size: int, cache_file: Optional[Path], arrays: tuple):
+        super().__init__(asset, size, cache_file)
+        self.arrays = arrays
+
+    def run(self) -> None:
+        vertices, faces, normals = self.arrays
+        self.arrays = None
+        qimg = render_model_thumbnail(vertices, faces, normals, self.asset.category_name, self.size)
+        if qimg is not None and not qimg.isNull():
+            self._to_disk(qimg)
+            self.signals.ready.emit(str(self.asset.path), qimg)
 
 
 # ----------------------------------------------------------------------
@@ -470,9 +519,15 @@ class ThumbnailManager(QObject):
         # Placeholders depend only on the file type and size: draw each once
         self._placeholders: dict[tuple[str, int], QPixmap] = {}
         self._has_companion: dict[str, bool] = {}  # 3D model -> has a model.png etc. next to it
+        self._rendered_on_disk: dict[str, bool] = {}  # big 3D model -> its picture (from the viewer) is cached
+        self._sizes: dict[str, int] = {}  # the size each file's thumbnail was asked for
         self._thread_pool = QThreadPool()
         # Limit concurrent image worker threads to prevent disk IO saturation
         self._thread_pool.setMaxThreadCount(4)
+        # Rendering 3D models: one at a time (each can take a few hundred MB while it's read)
+        self._model_pool = QThreadPool()
+        self._model_pool.setMaxThreadCount(1)
+        self.render_models = True  # (core.settings model_view "thumbnails"; set by the main window)
 
     def cached(self, asset: AssetItem) -> Optional[QPixmap]:
         return self._cache.get(str(asset.path))
@@ -484,13 +539,29 @@ class ThumbnailManager(QObject):
             pixmap = self._placeholders[key] = QPixmap.fromImage(render_placeholder_image(asset, size))
         return pixmap
 
-    def _needs_async(self, asset: AssetItem) -> bool:
-        if asset.is_texture or asset.is_document or asset.is_video:
-            return True
+    def _has_companion_picture(self, asset: AssetItem) -> bool:
         key = str(asset.path)
         if key not in self._has_companion:
             self._has_companion[key] = any(asset.path.with_suffix(ext).exists() for ext in _COMPANION_EXTENSIONS)
         return self._has_companion[key]
+
+    def _renders(self, asset: AssetItem, size: int) -> bool:
+        """Whether this 3D model's picture is rendered: small enough to read for it, or already
+        rendered and cached (opened in the viewer)."""
+        if not self.render_models or not asset.is_3d_model or self._has_companion_picture(asset):
+            return False
+        if asset.size_bytes <= MAX_RENDERED_MODEL_BYTES:
+            return True
+        key = f"{asset.path}|{size}"
+        if key not in self._rendered_on_disk:
+            cache_file = disk_cache_path(asset, size)
+            self._rendered_on_disk[key] = cache_file is not None and cache_file.is_file()
+        return self._rendered_on_disk[key]
+
+    def _needs_async(self, asset: AssetItem, size: int = 110) -> bool:
+        if asset.is_texture or asset.is_document or asset.is_video:
+            return True
+        return self._has_companion_picture(asset) or self._renders(asset, size)
 
     def get_thumbnail(self, asset: AssetItem, size: int = 110) -> QPixmap:
         """Return cached thumbnail if present; otherwise returns placeholder and queues background load."""
@@ -499,13 +570,35 @@ class ThumbnailManager(QObject):
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        if self._needs_async(asset) and cache_key not in self._pending:
+        self._sizes[cache_key] = size
+        if self._needs_async(asset, size) and cache_key not in self._pending:
             self._pending.add(cache_key)
-            runnable = _ThumbnailRunnable(asset, size, disk_cache_path(asset, size))
+            rendered = self._renders(asset, size)
+            cache_file = disk_cache_path(asset, size) if not asset.is_3d_model or rendered else None
+            runnable = _ThumbnailRunnable(asset, size, cache_file, render_model=rendered)
             runnable.signals.ready.connect(self._on_worker_ready)
-            self._thread_pool.start(runnable)
+            (self._model_pool if rendered else self._thread_pool).start(runnable)
 
         return self.placeholder(asset, size)
+
+    def model_viewed(self, asset: AssetItem, mesh) -> None:
+        """A model was opened in the viewer: give it a rendered picture now if it has none (its
+        arrays are used as they are: nothing is read again). Call before the viewer lets them go."""
+        key = str(asset.path)
+        size = self._sizes.get(key)
+        if (
+            size is None or not self.render_models or self._has_companion_picture(asset) or mesh.vertices is None
+            or mesh.stand_in
+        ):
+            return
+        cache_file = disk_cache_path(asset, size)
+        if key in self._cache and self._renders(asset, size) or cache_file is None or cache_file.is_file():
+            return
+        self._pending.add(key)
+        runnable = _ModelPictureRunnable(asset, size, cache_file, (mesh.vertices, mesh.faces, mesh.normals))
+        runnable.signals.ready.connect(self._on_worker_ready)
+        self._model_pool.start(runnable)
+        self._rendered_on_disk[f"{asset.path}|{size}"] = True
 
     def _on_worker_ready(self, path_str: str, qimg: QImage) -> None:
         """Slot executed on main GUI thread when a background thumbnail completes."""
@@ -519,8 +612,9 @@ class ThumbnailManager(QObject):
     def shutdown(self, timeout_ms: int = 5000) -> bool:
         """Drop queued thumbnail jobs and wait for the running ones (before the app quits)."""
         self._thread_pool.clear()
+        self._model_pool.clear()
         self._pending.clear()
-        return self._thread_pool.waitForDone(timeout_ms)
+        return self._thread_pool.waitForDone(timeout_ms) and self._model_pool.waitForDone(timeout_ms)
 
     def invalidate(self, path_str: str) -> None:
         """Forget one file's thumbnail (it was edited)."""
@@ -533,3 +627,4 @@ class ThumbnailManager(QObject):
         self._pending.clear()
         self._placeholders.clear()
         self._has_companion.clear()
+        self._rendered_on_disk.clear()

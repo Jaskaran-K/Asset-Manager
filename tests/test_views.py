@@ -10,7 +10,7 @@ from PySide6.QtGui import QStandardItem, QStandardItemModel, QWheelEvent
 from PySide6.QtWidgets import QApplication, QListView, QPlainTextEdit, QTreeWidget, QTreeWidgetItem
 
 from ui.animations import set_motion_mode
-from ui.themes import apply_theme, build_stylesheet
+from ui.themes import THEMES, apply_theme, build_stylesheet
 from ui.views import RowHighlightDelegate, install_view_effects
 
 
@@ -55,7 +55,7 @@ def long_list(qapp):
 
 def test_stylesheet_paints_no_tree_item_backgrounds():
     # Those also land in the indentation left of the row (the stray square); the delegate draws them
-    for theme in ("dark", "light", "dark_purple"):
+    for theme in THEMES:
         sheet = build_stylesheet(theme)
         assert "QTreeWidget::item:hover" not in sheet
         assert "QTreeWidget::item:selected" not in sheet
@@ -109,19 +109,56 @@ def test_wheel_glides_instead_of_jumping(qapp):
     assert bar.value() >= start + 200
 
 
-def test_a_glide_left_over_from_another_scroll_bar_is_replaced(qapp):
-    """(A glide's animation pointing at a scroll bar that's gone raised "already deleted".)"""
+def test_a_glide_whose_animation_is_gone_is_replaced(qapp):
+    import shiboken6
+
     from ui import views
 
     view = long_list(qapp)
     bar = view.verticalScrollBar()
     stale = views._glide_for(bar)
-    stale.anim.setTargetObject(None)
+    shiboken6.delete(stale.anim)
     assert wheel(view.viewport()).isAccepted()
     pump(qapp, 0.5)
     assert bar.value() >= 100
     fresh = views._glide_for(bar)
     assert fresh is not stale and views._glide_for(bar) is fresh  # (one new glide, kept)
+
+
+def test_a_glide_leaves_no_reference_cycle_through_its_scroll_bar(qapp):
+    """Collecting such a cycle freed the real scroll bar under its open view, and Qt crashed the
+    next time the view laid itself out (the 0.5.x PDF viewer and Settings crashes)."""
+    import gc
+
+    import shiboken6
+    from PySide6.QtWidgets import QScrollBar
+
+    from ui import views
+
+    view = long_list(qapp)
+    gc.collect()
+    gc.set_debug(gc.DEBUG_SAVEALL)  # (garbage is kept, not freed, so it can be looked at)
+    try:
+        for notches in (-1, 1, -1):  # (the second notch, reusing the glide, made the cycle)
+            wheel(view.viewport(), notches)
+            pump(qapp, 0.3)
+        gc.collect()
+        own = {shiboken6.getCppPointer(bar)[0] for bar in (view.verticalScrollBar(), view.horizontalScrollBar())}
+        found = [  # (this view's: windows other tests closed can still be on their way out)
+            obj for obj in gc.garbage
+            if isinstance(obj, (QScrollBar, views._Glide)) and shiboken6.isValid(obj)
+            and shiboken6.getCppPointer(obj if isinstance(obj, QScrollBar) else obj.parent())[0] in own
+        ]
+    finally:
+        gc.set_debug(0)
+        _kept_garbage.extend(gc.garbage)  # (never freed here: freeing a cycle like that is the crash)
+        gc.garbage.clear()
+    assert found == []
+    assert view.verticalScrollBar().value() > 0
+
+
+_kept_garbage: list = []
+
 
 
 def test_wheel_at_the_end_is_left_to_the_parent(qapp):

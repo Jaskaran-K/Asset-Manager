@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -74,6 +75,7 @@ from core.settings import (
     get_motion,
     get_scan_folders,
     get_theme,
+    get_model_view,
     get_thumbnail_size,
     import_category_icon,
     parse_extension_list,
@@ -88,6 +90,7 @@ from core.settings import (
     set_motion,
     set_scan_folders,
     set_theme,
+    set_model_view,
     set_thumbnail_size,
 )
 from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagError, TagRepository, get_repository
@@ -116,7 +119,7 @@ from ui.icons import (
 )
 from ui import shortcuts
 from ui.tag_widgets import next_tag_color, run_job
-from ui.themes import THEMES, apply_theme_soon, current_theme_id, theme_color
+from ui.themes import THEMES, apply_theme_soon, current_theme_id, parse_color, theme_color
 
 # Data roles on category tree items
 EXTENSIONS_ROLE = Qt.ItemDataRole.UserRole
@@ -627,13 +630,17 @@ class CategoriesPage(QWidget):
 # General > Appearance
 # ----------------------------------------------------------------------
 def _theme_background(theme_id: str, width: int, height: int) -> QBrush:
-    """Brush for a theme's window background (the purple theme's is a gradient)."""
-    if theme_id == "dark_purple":
+    """Brush for a theme's window background (a colour, or a gradient: Dark Purple's)."""
+    from ui.theme_pack import gradient_stops
+
+    value = THEMES[theme_id]["window_bg"]
+    stops = gradient_stops(value)
+    if stops:
         background = QLinearGradient(0, 0, width, height)
-        background.setColorAt(0.0, QColor("#241338"))
-        background.setColorAt(1.0, QColor("#0c0716"))
+        for at, color in stops:
+            background.setColorAt(at, parse_color(color))
         return QBrush(background)
-    return QBrush(QColor(THEMES[theme_id]["window_bg"]))
+    return QBrush(parse_color(value))
 
 
 def _theme_swatch(theme_id: str, width: int = 64, height: int = 40) -> QPixmap:
@@ -832,6 +839,13 @@ class AppearancePage(QWidget):
         size_row.addWidget(lbl_large)
         size_row.addWidget(self.lbl_size)
         layout.addLayout(size_row)
+        self.chk_model_pictures = QCheckBox("Pictures of 3D models", self)
+        self.chk_model_pictures.setChecked(get_model_view()["thumbnails"])
+        self.chk_model_pictures.setToolTip(
+            "Render a picture of each 3D model for its thumbnail (once; then it's kept). Models over 150 MB get theirs "
+            "when you first open them. A picture next to the model (model.png) is used instead when there is one."
+        )
+        layout.addWidget(self.chk_model_pictures)
 
         self.grid_preview = QListWidget()
         self.grid_preview.setObjectName("assetGrid")
@@ -1337,6 +1351,7 @@ class ArtbookPage(QWidget):
 DOCS_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
 GUIDES = {  # page name in Settings -> the Markdown file, from DOCS_ROOT
     "Artbook Guide": "docs/artbook-guide.md",
+    "Theme Studio": "docs/theme-studio.md",
     "Read Me": "README.md",
 }
 
@@ -1878,6 +1893,7 @@ class SettingsDialog(QDialog):
         self.categories_changed = False
         self.theme_changed = False
         self.thumbnail_size_changed = False
+        self.model_thumbnails_changed = False
 
         self.page_folders = FoldersPage(self._orig_folders)
         self.page_files = FilesPage(self._orig_extensions)
@@ -2047,6 +2063,7 @@ class SettingsDialog(QDialog):
         self.categories_changed = categories != self._orig_categories
         self.theme_changed = theme_id != self._orig_theme
         self.thumbnail_size_changed = thumbnail_size != self._orig_thumbnail_size
+        self.model_thumbnails_changed = self.page_appearance.chk_model_pictures.isChecked() != get_model_view()["thumbnails"]
 
         if self.folders_changed:
             set_scan_folders(folders)
@@ -2064,6 +2081,8 @@ class SettingsDialog(QDialog):
             set_glass_frost(self.page_appearance.frost())
         if self.thumbnail_size_changed:
             set_thumbnail_size(thumbnail_size)
+        if self.model_thumbnails_changed:
+            set_model_view(thumbnails=self.page_appearance.chk_model_pictures.isChecked())
         motion = self.page_appearance.cb_motion.currentData()
         if motion != get_motion():
             set_motion(motion)

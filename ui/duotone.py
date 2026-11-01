@@ -21,7 +21,7 @@ ICONS. See CLAUDE.md: no emoji or symbol characters as icons.
 from __future__ import annotations
 
 import math
-from typing import Callable, Optional, Union
+from typing import Callable, Mapping, Optional, Union
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import (
@@ -52,17 +52,18 @@ TONES: dict[str, tuple[str, str]] = {
     "light": ("#ffffff", "#fff7ed"),  # on a colored button (e.g. the amber "In Library")
 }
 DISABLED = ("text_faint", "text_faint")
+Tokens = Optional[Mapping[str, str]]  # colours to use instead of the current theme's (the Theme Studio's preview)
 
 
-def _color(token: str) -> QColor:
-    tokens = theme_tokens(current_theme_id())
+def _color(token: str, tokens: Tokens = None) -> QColor:
+    tokens = theme_tokens(current_theme_id()) if tokens is None else tokens
     color = parse_color(tokens.get(token, token))
     return color if color.isValid() else QColor("#9ca3af")
 
 
-def tone_colors(tone: Tone, disabled: bool = False) -> tuple[QColor, QColor]:
+def tone_colors(tone: Tone, disabled: bool = False, tokens: Tokens = None) -> tuple[QColor, QColor]:
     primary, secondary = DISABLED if disabled else (TONES[tone] if isinstance(tone, str) else tone)
-    return _color(primary), _color(secondary)
+    return _color(primary, tokens), _color(secondary, tokens)
 
 
 # ----------------------------------------------------------------------
@@ -401,6 +402,21 @@ def _import(p, primary, secondary):
     _line(p, primary, 2.1, (8, 10.5), (12, 14.5), (16, 10.5))
 
 
+def _save(p, primary, secondary):
+    _body(p, _rounded(4, 4, 16, 16, 2.6), secondary)  # a disk
+    _line(p, primary, 1.7, (8, 4.5), (8, 8.5), (15, 8.5), (15, 4.5))  # its shutter
+    _line(p, primary, 1.8, (8.5, 15.5), (15.5, 15.5))  # its label
+
+
+def _palette(p, primary, secondary):
+    board = QPainterPath()
+    board.addEllipse(QRectF(3, 4, 18, 16))
+    _body(p, board, secondary)  # a painter's palette
+    for x, y in ((8, 9), (12.5, 7.5), (16.5, 10)):
+        p.fillPath(_circle(x, y, 1.6), primary)  # its paints
+    p.fillPath(_circle(9.5, 15, 2.1), primary)
+
+
 def _lock(p, primary, secondary):
     shackle = QPainterPath(QPointF(8, 11))
     shackle.lineTo(8, 8)
@@ -490,6 +506,23 @@ def _redo(p, primary, secondary):
     _turn_arrow(p, primary, secondary, True)
 
 
+def _light(p, primary, secondary):
+    """A sun: the lights (the 3D viewer's)."""
+    _body(p, _circle(12, 12, 5.6), secondary)
+    for i in range(8):
+        angle = math.radians(45 * i)
+        cos, sin = math.cos(angle), math.sin(angle)
+        _line(p, primary, 1.9, (12 + 8.0 * cos, 12 + 8.0 * sin), (12 + 10.4 * cos, 12 + 10.4 * sin))
+    p.fillPath(_circle(12, 12, 2.2), primary)
+
+
+def _cube(p, primary, secondary):
+    """A cube: a 3D model's shading and material."""
+    _body(p, _polygon((12, 2.5), (20.5, 7), (20.5, 17), (12, 21.5), (3.5, 17), (3.5, 7)), secondary)
+    _line(p, primary, 1.7, (3.8, 7.2), (12, 11.6), (20.2, 7.2))
+    _line(p, primary, 1.7, (12, 11.6), (12, 21))
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -526,14 +559,15 @@ ICONS: dict[str, IconPainter] = {
     "align_left": _align_left,
     "align_center": _align_center,
     "align_right": _align_right,
-    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "import": _import, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
+    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "save": _save, "palette": _palette, "import": _import, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
+    "light": _light, "cube": _cube,
 }
 
 
-def draw_icon(p: QPainter, rect: QRectF, name: str, tone: Tone = "accent", disabled: bool = False) -> None:
-    primary, secondary = tone_colors(tone, disabled)
+def draw_icon(p: QPainter, rect: QRectF, name: str, tone: Tone = "accent", disabled: bool = False, tokens: Tokens = None) -> None:
+    primary, secondary = tone_colors(tone, disabled, tokens)
     p.save()
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.translate(rect.topLeft())
@@ -546,14 +580,14 @@ def draw_icon(p: QPainter, rect: QRectF, name: str, tone: Tone = "accent", disab
 # QIcon / widgets
 # ----------------------------------------------------------------------
 class _DuotoneEngine(QIconEngine):
-    """Paints the icon on demand, in the colors of the theme active at that moment."""
+    """Paints the icon on demand, in the colors of the theme active at that moment (or of tokens)."""
 
-    def __init__(self, name: str, tone: Tone):
+    def __init__(self, name: str, tone: Tone, tokens: Tokens = None):
         super().__init__()
-        self.name, self.tone = name, tone
+        self.name, self.tone, self.tokens = name, tone, tokens
 
     def paint(self, painter: QPainter, rect: QRect, mode: QIcon.Mode, _state: QIcon.State) -> None:
-        draw_icon(painter, QRectF(rect), self.name, self.tone, mode == QIcon.Mode.Disabled)
+        draw_icon(painter, QRectF(rect), self.name, self.tone, mode == QIcon.Mode.Disabled, self.tokens)
 
     def pixmap(self, size: QSize, mode: QIcon.Mode, state: QIcon.State) -> QPixmap:
         return self.scaledPixmap(size, mode, state, 1.0)
@@ -568,25 +602,28 @@ class _DuotoneEngine(QIconEngine):
         return pixmap
 
     def clone(self) -> "_DuotoneEngine":
-        return _DuotoneEngine(self.name, self.tone)
+        return _DuotoneEngine(self.name, self.tone, self.tokens)
 
 
-_cache: dict[tuple[str, Tone], tuple[QIcon, _DuotoneEngine]] = {}
+_cache: dict[tuple[str, Tone, int], tuple[QIcon, _DuotoneEngine]] = {}
 
 
-def duotone_icon(name: str, tone: Tone = "accent") -> QIcon:
+def duotone_icon(name: str, tone: Tone = "accent", tokens: Tokens = None) -> QIcon:
+    """The icon, in the current theme's colours, or in tokens' (a dict kept and changed in place,
+    so icons made from it follow it when they're repainted)."""
     if name not in ICONS:
         raise KeyError(f"no duotone icon named {name!r}; add it to ui.duotone.ICONS")
-    key = (name, tone)
+    key = (name, tone, id(tokens) if tokens is not None else 0)  # (the engine keeps tokens alive, so its id stays its own)
     if key not in _cache:
-        engine = _DuotoneEngine(name, tone)
+        engine = _DuotoneEngine(name, tone, tokens)
         _cache[key] = (QIcon(engine), engine)  # keep the engine alive alongside its icon
     return _cache[key][0]
 
 
-def set_icon(target: Union[QAbstractButton, QAction], name: Optional[str], tone: Tone = "accent", size: int = 0) -> None:
+def set_icon(target: Union[QAbstractButton, QAction], name: Optional[str], tone: Tone = "accent", size: int = 0,
+             tokens: Tokens = None) -> None:
     """Give a button / action a duotone icon (None removes it); size sets a button's icon size."""
-    target.setIcon(duotone_icon(name, tone) if name else QIcon())
+    target.setIcon(duotone_icon(name, tone, tokens) if name else QIcon())
     if size and isinstance(target, QAbstractButton):
         target.setIconSize(QSize(size, size))
 
@@ -594,9 +631,10 @@ def set_icon(target: Union[QAbstractButton, QAction], name: Optional[str], tone:
 class DuotoneGlyph(QWidget):
     """Just an icon, as a widget (painted live, so it follows theme changes)."""
 
-    def __init__(self, name: Optional[str] = None, tone: Tone = "accent", size: int = 16, parent: Optional[QWidget] = None):
+    def __init__(self, name: Optional[str] = None, tone: Tone = "accent", size: int = 16, parent: Optional[QWidget] = None,
+                 tokens: Tokens = None):
         super().__init__(parent)
-        self.name, self.tone = name, tone
+        self.name, self.tone, self.tokens = name, tone, tokens
         self.setFixedSize(size, size)
 
     def set_icon(self, name: Optional[str], tone: Tone = "accent") -> None:
@@ -606,7 +644,7 @@ class DuotoneGlyph(QWidget):
     def paintEvent(self, _event) -> None:
         if self.name:
             painter = QPainter(self)
-            draw_icon(painter, QRectF(self.rect()), self.name, self.tone, not self.isEnabled())
+            draw_icon(painter, QRectF(self.rect()), self.name, self.tone, not self.isEnabled(), self.tokens)
 
 
 class IconLabel(QWidget):

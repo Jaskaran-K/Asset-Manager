@@ -37,7 +37,11 @@ and are never touched by installing, updating or uninstalling.
   hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
   their colors from the theme. Lists scroll smoothly, categories slide open, and when the window is resized
   the grid's cards glide into their new rows.
-- **Help:** **Settings > Guide** has the Artbook guide and this Read Me, right in the app.
+- **Your own themes:** the **Theme Studio** (Start menu: Asset Manager Theme Studio, or
+  `AssetManager.exe --theme-studio`) is a separate window for making themes and backgrounds. You edit every
+  colour with a live preview of the app, and make background patterns or tiles from your own images. It
+  saves `.amtheme` files and never changes the app's settings. See **Settings > Guide > Theme Studio**.
+- **Help:** **Settings > Guide** has the Artbook guide, the Theme Studio guide and this Read Me, right in the app.
 
 ## The Artbook
 
@@ -140,6 +144,25 @@ making your first board. The list below is the full reference.
   second time. Export as PNG and Copy always use the full pictures, whatever is showing.
 - **Motion:** arranging, aligning, stacking and undoing glide images to their new places, and pictures fade in
   as they load. The Motion setting in Settings > Appearance turns this off (or follows Windows).
+
+## Viewing 3D models
+
+Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid to turn it round in 3D.
+
+- **Big models:** the viewer opens at once and the model loads in the background. A 300 MB, 14-million-triangle
+  sculpt takes a few seconds (binary FBX is read with a quick reader of its own, `core/fbx_fast.py`).
+- **Moving round:** drag to turn the model, right-drag (or middle-drag) to pan, scroll to zoom. **R** resets the
+  view, **G** the ground grid, **W** cycles shaded / wireframe / both.
+- **Its look:** pick a **material** (Matte, Clay, Phong, Glossy, Metallic, Toon, or Normals to check the
+  model's normals), a **colour** (the Artbook's colour picker: the model follows as you drag) and a
+  **lighting** set-up (Studio, Soft, Dramatic, Top, Headlight). They're remembered for every model.
+- **Turning the lights:** Shift+drag turns the lights round the model instead of the model; or switch on
+  **Turn Lights** (**L**) to make a plain drag do it. The dial in the top right shows where the main light is
+  (hollow when it's behind the model). **Reset View** puts the lights back too.
+- **Thumbnails:** models get a rendered picture in the grid, made once and kept with the other thumbnails.
+  Models over 150 MB get theirs the first time you open them (reading one just for the grid would take
+  seconds and a lot of memory). A picture next to the model (`model.png`) is used instead when there is one;
+  Settings > Appearance > **Pictures of 3D models** turns them off.
 
 ## Reading PDFs
 

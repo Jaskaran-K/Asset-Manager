@@ -48,6 +48,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
 )
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -88,6 +89,7 @@ from core.settings import (
     get_motion,
     get_scan_folders,
     get_theme,
+    get_model_view,
     get_thumbnail_size,
     is_scan_folder,
     set_scan_folders,
@@ -106,7 +108,7 @@ from ui.duotone import set_icon
 from ui.duplicates_dialog import DuplicatesDialog
 from ui.glass import set_frost
 from ui.icons import app_icon, category_icon, color_dot_icon, resolve_category_colors
-from ui import main_thread_gc
+from ui import main_thread_gc, scroll_bar_watch
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SidebarHost
@@ -217,6 +219,7 @@ class MainWindow(QMainWindow):
 
         # Asynchronous thumbnail loader & in-memory cache
         self.thumbnail_manager = ThumbnailManager(self)
+        self.thumbnail_manager.render_models = get_model_view()["thumbnails"]
         self.thumbnail_manager.thumbnail_loaded.connect(self._on_async_thumbnail_loaded)
 
         # Picks up files added / removed / edited in the scanned folders while the app is open
@@ -229,6 +232,11 @@ class MainWindow(QMainWindow):
 
         self._init_ui()
         self._load_library()
+        # The first OpenGL widget in a window makes Qt remake the window for OpenGL, and the 3D
+        # viewer's made it remake this one too: it vanished and came back the first time a model
+        # was opened. A hidden one from the start makes it that way once, before it's shown.
+        self._opengl_ready = QOpenGLWidget(self)
+        self._opengl_ready.hide()
 
     def _init_ui(self) -> None:
         """Construct the UI layout and widgets."""
@@ -949,7 +957,10 @@ class MainWindow(QMainWindow):
             self.thumbnail_size = get_thumbnail_size()
             self._apply_grid_size()
 
-        if dialog.theme_changed or dialog.thumbnail_size_changed:
+        if dialog.model_thumbnails_changed:
+            self.thumbnail_manager.render_models = get_model_view()["thumbnails"]
+
+        if dialog.theme_changed or dialog.thumbnail_size_changed or dialog.model_thumbnails_changed:
             # Thumbnails bake in the card colors and size, so regenerate them
             self.thumbnail_manager.clear_cache()
             self._refresh_grid_display()
@@ -1420,7 +1431,7 @@ class MainWindow(QMainWindow):
         dialog = AssetViewerDialog(
             asset, self, tags=target.tags, edit_tags=target.edit_tags,
             navigate=navigate if row is not None and len(assets) > 1 else None, position=target.position,
-            artbook=self,
+            artbook=self, model_viewed=self.thumbnail_manager.model_viewed,
         )
         dialog.exec()
         # Free the viewer (GL context, decoded image, video player) instead of keeping it parented
@@ -1780,7 +1791,8 @@ def run_self_test(log_path: Optional[str]) -> int:
             lines.append(f"FAIL  {name}\n{traceback.format_exc()}")
 
     def check_imports():
-        import fbxloader, OpenGL.GL, scipy.spatial, trimesh  # noqa: E401,F401
+        import fbxloader, fbxloader.utils, OpenGL.GL, scipy.spatial, trimesh  # noqa: E401,F401
+        import core.fbx_fast  # noqa: F401  (binary FBX: uses fbxloader's transforms)
         return f"trimesh {trimesh.__version__}"
 
     def check_models():
@@ -1795,7 +1807,10 @@ def run_self_test(log_path: Optional[str]) -> int:
                 if mesh.face_count != 12:
                     raise RuntimeError(f"{ext}: expected 12 faces, got {mesh.face_count}")
                 results.append(ext)
-            return ", ".join(results)
+            from core.thumbnail_manager import render_model_thumbnail
+            if render_model_thumbnail(mesh.vertices, mesh.faces, mesh.normals, "STL", 110) is None:
+                raise RuntimeError("rendering a model's thumbnail failed")
+            return ", ".join(results) + ", rendered thumbnail"
 
     def check_images():
         from PIL import Image
@@ -1875,6 +1890,11 @@ def main() -> None:
         index = sys.argv.index("--self-test")
         log_path = sys.argv[index + 1] if index + 1 < len(sys.argv) else None
         sys.exit(run_self_test(log_path))
+    if "--theme-studio" in sys.argv:
+        # The Theme Studio on its own (ui.theme_studio): the app's window isn't made at all
+        from ui.theme_studio import run as run_theme_studio
+
+        sys.exit(run_theme_studio(sys.argv))
 
     from PySide6.QtCore import QtMsgType, QTimer, qInstallMessageHandler
 
@@ -1919,6 +1939,7 @@ def main() -> None:
     install_popup_animations(app)
     install_view_effects(app)
     main_thread_gc.install(app)  # a collection on a worker thread can free UI objects there, and crash
+    scroll_bar_watch.install(app)  # logs which view had its scroll bar freed under it (a crash that follows)
 
     # Hang watchdog: if the UI thread stops ticking, crash_log dumps every thread's stack
     heartbeat = QTimer(app)

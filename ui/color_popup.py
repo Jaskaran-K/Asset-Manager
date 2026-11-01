@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QSlider,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -215,14 +216,95 @@ class _Swatch(QToolButton):
             painter.drawLine(box.bottomLeft() + QPointF(4, -4), box.topRight() + QPointF(-4, 4))
 
 
+class _Channels(QWidget):
+    """The colour as numbers: a slider and a number box per channel (R, G, B or H, S, L, then
+    opacity), following the picker's HEX / RGB / HSL box (HEX shows R, G, B)."""
+
+    moved = Signal(QColor)
+    ROWS = {
+        "RGB": (("R", 255, "Red"), ("G", 255, "Green"), ("B", 255, "Blue")),
+        "HSL": (("H", 359, "Hue (degrees)"), ("S", 100, "Saturation (%)"), ("L", 100, "Lightness (%)")),
+    }
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.mode = "RGB"
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(3)
+        self.labels: list[QLabel] = []
+        self.sliders: list[QSlider] = []
+        self.boxes: list[QSpinBox] = []
+        for row in range(4):
+            label = QLabel()
+            label.setFixedWidth(14)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            box = QSpinBox()
+            box.setFixedWidth(58)
+            box.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            slider.valueChanged.connect(box.setValue)
+            box.valueChanged.connect(slider.setValue)
+            box.valueChanged.connect(self._on_value)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(slider, row, 1)
+            grid.addWidget(box, row, 2)
+            self.labels.append(label)
+            self.sliders.append(slider)
+            self.boxes.append(box)
+        self._set_rows()
+
+    def _set_rows(self) -> None:
+        rows = self.ROWS[self.mode] + (("A", 100, "Opacity (%: 100 is solid)"),)
+        for (name, top, tip), label, slider, box in zip(rows, self.labels, self.sliders, self.boxes):
+            label.setText(name)
+            label.setToolTip(tip)
+            for widget in (slider, box):
+                widget.blockSignals(True)
+                widget.setRange(0, top)
+                widget.blockSignals(False)
+            slider.setToolTip(tip)
+            box.setToolTip(tip)
+
+    def set_mode(self, mode: str, color: QColor) -> None:
+        self.mode = "HSL" if mode == "HSL" else "RGB"
+        self._set_rows()
+        self.show_color(color)
+
+    def show_color(self, color: QColor) -> None:
+        if self.mode == "RGB":
+            values = [color.red(), color.green(), color.blue()]
+        else:
+            hsl = color.toHsl()
+            values = [max(0, hsl.hslHue()), round(hsl.hslSaturationF() * 100), round(hsl.lightnessF() * 100)]
+        values.append(round(color.alphaF() * 100))
+        for value, slider, box in zip(values, self.sliders, self.boxes):
+            for widget in (slider, box):
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+
+    def color(self) -> QColor:
+        a, b, c, alpha = (box.value() for box in self.boxes)
+        if self.mode == "RGB":
+            color = QColor(a, b, c)
+        else:
+            color = QColor.fromHslF(a / 360, b / 100, c / 100).toRgb()
+        color.setAlphaF(alpha / 100)
+        return color
+
+    def _on_value(self, _value: int) -> None:
+        self.moved.emit(self.color())
+
+
 class ColorPopup(QFrame):
-    """See the module docstring."""
+    """See the module docstring. channels: also the colour as sliders with number boxes."""
 
     changed = Signal(QColor)
     default_picked = Signal()
     finished = Signal()
 
-    def __init__(self, title: str, color: QColor, parent: QWidget):
+    def __init__(self, title: str, color: QColor, parent: QWidget, channels: bool = False):
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setObjectName("colorPopup")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -285,7 +367,7 @@ class ColorPopup(QFrame):
         self.mode_box.addItems(MODES)
         self.mode_box.setToolTip("Show the colour as HEX, RGB or HSL")
         self.mode_box.setFixedWidth(64)
-        self.mode_box.currentIndexChanged.connect(self._show_text)
+        self.mode_box.currentIndexChanged.connect(self._on_mode)
         values.addWidget(self.mode_box)
         self.value_edit = QLineEdit()
         self.value_edit.setObjectName("colorPopupValue")
@@ -308,6 +390,13 @@ class ColorPopup(QFrame):
         self.opacity_box.valueChanged.connect(self._on_opacity_box)
         values.addWidget(self.opacity_box)
         layout.addLayout(values)
+
+        self.channels: Optional[_Channels] = None
+        self._from_channels = False  # (a change made with the sliders: they aren't redrawn under the pointer)
+        if channels:
+            self.channels = _Channels(self)
+            self.channels.moved.connect(self._on_channels)
+            layout.addWidget(self.channels)
 
         swatches = QGridLayout()
         swatches.setSpacing(5)
@@ -348,6 +437,8 @@ class ColorPopup(QFrame):
         self.opacity_box.setValue(round(self._alpha * 100))
         self.opacity_box.blockSignals(False)
         self._show_text()
+        if self.channels is not None and not self._from_channels:
+            self.channels.show_color(self.color())
 
     def _show_text(self) -> None:
         color, mode = self.color(), self.mode_box.currentText()
@@ -384,6 +475,18 @@ class ColorPopup(QFrame):
         return QColor.fromHslF((h % 360) / 360, min(100, max(0, s)) / 100, min(100, max(0, lightness)) / 100).toRgb()
 
     # ------------------ handlers ------------------
+    def _on_mode(self, _index: int) -> None:
+        self._show_text()
+        if self.channels is not None:
+            self.channels.set_mode(self.mode_box.currentText(), self.color())
+
+    def _on_channels(self, color: QColor) -> None:
+        self._from_channels = True
+        try:
+            self.set_color(color, emit=True)
+        finally:
+            self._from_channels = False
+
     def _on_square(self, sat: float, val: float) -> None:
         self._sat, self._val = sat, val
         self._changed()

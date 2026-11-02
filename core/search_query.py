@@ -7,8 +7,18 @@
     poly:<10k         3D model faces (k = 1,000, m = 1,000,000)
 
 Comparisons: = < <= > >=; a bare number means "at least" for rating and res, and
-"equal" otherwise. Files whose details aren't known yet (still being read) don't
-match a res / dur / poly filter.
+"equal" otherwise. "Equal" sizes, lengths and face counts match to the precision
+typed: size:10mb is 9.5-10.5 MB, size:10.2mb is 10.15-10.25 MB, poly:10k is
+9,500-10,500. A minus in front excludes: -ext:png, -is:fav. Files whose details
+aren't known yet (still being read) don't match a res / dur / poly filter, with
+or without the minus.
+
+Name text: every word must be in the file name, in any order ("rock wall" finds
+Wall_Rock_02.png); "quoted words" must appear together.
+
+Tag tokens (tag:name, -tag:name, tag:a|b) are parsed by the search bar
+(ui.tag_widgets); their grammar is here so saved searches can be updated when a
+tag is renamed (rename_tag_in_query).
 """
 
 from __future__ import annotations
@@ -21,7 +31,12 @@ from typing import Callable, Optional
 from .scanner import AssetItem
 from .tag_repository import NO_MARKS, AssetMeta, Marks
 
-_TOKEN = re.compile(r"(?<!\S)(is|rating|ext|type|size|res|dur|poly):(\S*)", re.IGNORECASE)
+_TOKEN = re.compile(r"(?<!\S)(-?)(is|rating|ext|type|size|res|dur|poly):(\S*)", re.IGNORECASE)
+_WORD = re.compile(r'"([^"]*)"|(\S+)')
+
+# Tag tokens:  tag:name   tag:"two words"   -tag:name (must not have)   tag:a|b|"c d" (any of)
+TAG_NAME = r'(?:"[^"]+"|[^\s|"]+)'
+TAG_TOKEN = re.compile(rf'(?<!\S)(-?)tag:({TAG_NAME}(?:\|{TAG_NAME})*)\|?(?!\S)', re.IGNORECASE)
 _COMPARISON = re.compile(r"^(<=|>=|<|>|=)?(.+)$")
 _OPS: dict[str, Callable[[float, float], bool]] = {
     "=": operator.eq, "<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge,
@@ -34,8 +49,15 @@ class DetailFilter:
     field: str  # "favorite", "rating", "ext", "size", "res", "dur", "poly"
     op: str
     value: object
+    negate: bool = False  # typed with a minus: files that don't match
+    tolerance: float = 0  # "=" matches value +- tolerance (half a step of the last digit typed)
 
     def matches(self, asset: AssetItem, marks: Marks, meta: Optional[AssetMeta]) -> bool:
+        if meta is None and self.field in ("res", "dur", "poly"):
+            return False  # not read yet: unknown either way
+        return self._test(asset, marks, meta) != self.negate
+
+    def _test(self, asset: AssetItem, marks: Marks, meta: Optional[AssetMeta]) -> bool:
         if self.field == "favorite":
             return marks.favorite
         if self.field == "ext":
@@ -44,20 +66,23 @@ class DetailFilter:
             actual: Optional[float] = marks.rating
         elif self.field == "size":
             actual = asset.size_bytes
-        elif meta is None:
-            return False
         elif self.field == "res":
             actual = max(meta.width or 0, meta.height or 0) or None
         elif self.field == "dur":
             actual = meta.duration_ms
         else:
             actual = meta.poly_count
-        return actual is not None and _OPS[self.op](actual, self.value)
+        if actual is None:
+            return False
+        if self.op == "=" and self.tolerance:
+            return self.value - self.tolerance <= actual < self.value + self.tolerance
+        return _OPS[self.op](actual, self.value)
 
 
 @dataclass
 class ParsedQuery:
     text: str = ""  # what's left: matched against file names
+    words: list[str] = field(default_factory=list)  # text as casefolded words / "quoted phrases"
     filters: list[DetailFilter] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -69,66 +94,98 @@ class ParsedQuery:
     def uses_meta(self) -> bool:
         return any(f.field in ("res", "dur", "poly") for f in self.filters)
 
+    def name_matches(self, name: str) -> bool:
+        folded = name.casefold()
+        return all(word in folded for word in self.words)
+
     def matches(self, asset: AssetItem, marks: Marks = NO_MARKS, meta: Optional[AssetMeta] = None) -> bool:
         return all(f.matches(asset, marks, meta) for f in self.filters)
 
 
-def _number(text: str, units: dict[str, float], default_unit: float = 1) -> float:
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([a-z]*)", text.lower())
-    if not match or (match.group(2) and match.group(2) not in units):
+def _number(text: str, units: dict[str, float], default_unit: float = 1) -> tuple[float, float]:
+    """(value, size of a step in the last digit typed): "10mb" -> (10 MB, 1 MB), "10.5mb" -> (10.5 MB, 0.1 MB)."""
+    match = re.fullmatch(r"(\d+)(?:\.(\d+))?\s*([a-z]*)", text.lower())
+    if not match or (match.group(3) and match.group(3) not in units):
         raise ValueError(text)
-    return float(match.group(1)) * (units[match.group(2)] if match.group(2) else default_unit)
+    whole, decimals, unit = match.group(1), match.group(2) or "", match.group(3)
+    scale = units[unit] if unit else default_unit
+    return float(f"{whole}.{decimals or 0}") * scale, scale / 10 ** len(decimals)
 
 
-def _duration_ms(text: str) -> float:
+def _duration_ms(text: str) -> tuple[float, float]:
     if ":" in text:  # 1:30 or 1:02:03
         seconds = 0.0
         for part in text.split(":"):
             seconds = seconds * 60 + float(part)
-        return seconds * 1000
+        return seconds * 1000, 1000
     return _number(text, {"s": 1000, "sec": 1000, "m": 60_000, "min": 60_000, "h": 3_600_000}, 1000)
 
 
-def _parse_filter(key: str, raw: str) -> DetailFilter:
+def _parse_filter(key: str, raw: str, negate: bool = False) -> DetailFilter:
     key = key.lower()
     if key == "is":
         if raw.lower() in ("fav", "favorite", "favourite", "starred"):
-            return DetailFilter("favorite", "=", True)
+            return DetailFilter("favorite", "=", True, negate)
         raise ValueError(raw)
     if key in ("ext", "type"):
         exts = frozenset(e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip())
         if not exts:
             raise ValueError(raw)
-        return DetailFilter("ext", "=", exts)
+        return DetailFilter("ext", "=", exts, negate)
     match = _COMPARISON.match(raw)
     if not match:
         raise ValueError(raw)
     op, value = match.group(1), match.group(2)
+    step = 0.0  # exact: ratings, and resolutions (res:=4k is 4096 pixels)
     if key == "rating":
         number, default_op = float(value), ">="
         if not 0 <= number <= 5:
             raise ValueError(raw)
     elif key == "size":
-        number, default_op = _number(value, _SIZE_UNITS, 1024 ** 2), "="
+        (number, step), default_op = _number(value, _SIZE_UNITS, 1024 ** 2), "="
     elif key == "res":
-        number, default_op = _number(value, {"k": 1024, "px": 1}), ">="
+        (number, _step), default_op = _number(value, {"k": 1024, "px": 1}), ">="
     elif key == "dur":
-        number, default_op = _duration_ms(value), "="
+        (number, step), default_op = _duration_ms(value), "="
     else:  # poly
-        number, default_op = _number(value, {"k": 1000, "m": 1_000_000}), "="
-    return DetailFilter(key, op or default_op, number)
+        (number, step), default_op = _number(value, {"k": 1000, "m": 1_000_000}), "="
+    return DetailFilter(key, op or default_op, number, negate, step / 2)
+
+
+def _words(text: str) -> list[str]:
+    words = (" ".join((quoted or plain).strip('"').split()).casefold() for quoted, plain in _WORD.findall(text))
+    return [w for w in words if w]
 
 
 def parse_query(text: str) -> ParsedQuery:
     """Split the search text (tag tokens already removed) into detail filters and name text."""
     result = ParsedQuery()
     for match in _TOKEN.finditer(text):
-        key, raw = match.group(1), match.group(2)
+        minus, key, raw = match.groups()
         if not raw:
             continue  # still being typed
         try:
-            result.filters.append(_parse_filter(key, raw))
+            result.filters.append(_parse_filter(key, raw, negate=bool(minus)))
         except ValueError:
             result.errors.append(match.group(0))
     result.text = " ".join(_TOKEN.sub(" ", text).split())
+    result.words = _words(result.text)
     return result
+
+
+def quote_tag_name(name: str) -> str:
+    return f'"{name}"' if re.search(r'[\s|]', name) else name
+
+
+def rename_tag_in_query(query: str, old: str, new: str) -> str:
+    """Saved search text with tag:old (in any tag token, any case) changed to tag:new."""
+    folded = " ".join(old.split()).casefold()
+
+    def renamed(match: re.Match) -> str:
+        names = [
+            quote_tag_name(new) if name.strip('"').casefold() == folded else name
+            for name in re.findall(TAG_NAME, match.group(2))
+        ]
+        return f"{match.group(1)}tag:{'|'.join(names)}"
+
+    return TAG_TOKEN.sub(renamed, query)

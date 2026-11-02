@@ -122,10 +122,30 @@ def big_texture():
     ("dur:>1:30", NO_MARKS, AssetMeta(duration_ms=60_000), False),
     ("poly:<10k", NO_MARKS, AssetMeta(poly_count=9_500), True),
     ("poly:>1m", NO_MARKS, AssetMeta(poly_count=9_500), False),
+    # "equal" is as precise as the number typed (the texture is 12 MB)
+    ("size:12mb", NO_MARKS, None, True),
+    ("size:12.4", NO_MARKS, None, False),
+    ("size:11.8-", NO_MARKS, None, False),  # (a typo, reported rather than matched)
+    ("poly:10k", NO_MARKS, AssetMeta(poly_count=9_500), True),
+    ("poly:9.4k", NO_MARKS, AssetMeta(poly_count=9_500), False),
+    ("poly:9500", NO_MARKS, AssetMeta(poly_count=9_501), False),
+    ("dur:12s", NO_MARKS, AssetMeta(duration_ms=12_400), True),
+    ("dur:0:13", NO_MARKS, AssetMeta(duration_ms=12_400), False),
+    ("res:=4k", NO_MARKS, AssetMeta(4000, 4000), False),  # resolutions stay exact
+    # a minus excludes
+    ("-ext:png", NO_MARKS, None, False),
+    ("-ext:jpg,fbx", NO_MARKS, None, True),
+    ("-is:fav", NO_MARKS, None, True),
+    ("-rating:3", Marks(False, 4), None, False),
+    ("-poly:>10k", NO_MARKS, AssetMeta(4096, 4096), True),  # an image has no faces
+    ("-res:>=2048", NO_MARKS, None, False),  # not read yet: unknown, with or without the minus
 ])
 def test_detail_filters(query, marks, meta, expected):
     parsed = parse_query(query)
-    assert not parsed.errors and parsed.text == ""
+    if parsed.errors:
+        assert expected is False and parsed.filters == []
+        return
+    assert parsed.text == ""
     assert parsed.matches(big_texture(), marks, meta) is expected
 
 
@@ -134,3 +154,21 @@ def test_query_keeps_name_text_and_reports_mistakes():
     assert parsed.text == "rock moss"
     assert parsed.errors == ["size:lots"]  # "ext:" is still being typed, not a mistake
     assert parsed.uses_meta and not parsed.uses_marks
+
+
+def test_minus_filters_leave_no_name_text():
+    parsed = parse_query("-ext:png moss -is:fav")
+    assert parsed.text == "moss" and [f.negate for f in parsed.filters] == [True, True]
+    assert parse_query("-size:lots").errors == ["-size:lots"]
+
+
+@pytest.mark.parametrize("query, name, expected", [
+    ("rock wall", "Wall_Rock_02.png", True),  # every word, in any order
+    ("rock wall", "Rock_01.png", False),
+    ("ROCK", "rock.png", True),
+    ('"rock wall"', "Wall_Rock_02.png", False),  # quoted words must appear together
+    ('"rock wall" big', "big rock wall.png", True),
+    ("", "anything.png", True),
+])
+def test_name_words(query, name, expected):
+    assert parse_query(query).name_matches(name) is expected

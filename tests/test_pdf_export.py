@@ -141,14 +141,14 @@ def test_the_main_window_puts_a_sent_page_on_an_artbook_page(qapp):
     try:
         menu = QMenu()
         picked = []
-        window.fill_artbook_menu(menu, picked.append)
+        window.artbook_sender.fill_artbook_menu(menu, picked.append)  # (the viewer gets artbook_sender)
         assert menu.actions()[0].text() == "New Page"
         menu.actions()[0].trigger()
         assert picked == [None]
         menu.deleteLater()
         picture = QImage(120, 80, QImage.Format.Format_RGB32)
         picture.fill(QColor("#336699"))
-        message = window.send_image_to_artbook(picture, "book, p. 4", None)
+        message = window.artbook_sender.send_image_to_artbook(picture, "book, p. 4", None)
         assert message.startswith("Sent 1 image")
         board = window.artbook_panel.board
         assert pump(qapp, lambda: len(board.items_list()) == 1)

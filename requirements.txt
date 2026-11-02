@@ -7,3 +7,4 @@ trimesh>=4.0.0
 fbxloader>=0.0.2
 PyOpenGL>=3.1.0
 scipy>=1.10.0
+OpenEXR>=3.3  # .exr thumbnails and viewing (core.hdr_image)

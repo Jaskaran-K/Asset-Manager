@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 
 # Supported file formats organized by type
@@ -126,6 +126,11 @@ class AssetItem:
         return self.asset_group == "Videos"
 
 
+def asset_sort_key(asset: AssetItem) -> tuple[str, str]:
+    """By name, then by folder: the same order every time for same-named files."""
+    return asset.name.lower(), str(asset.path).lower()
+
+
 def determine_asset_group(extension: str) -> str:
     """Classify file extension into an asset group."""
     ext = extension.lower()
@@ -201,7 +206,11 @@ class AssetScanner:
         return path.name.lower() in self.excluded_dirs
 
     def scan(
-        self, folder_path: str | Path, recursive: bool = True, directories: set[Path] | None = None
+        self,
+        folder_path: str | Path,
+        recursive: bool = True,
+        directories: set[Path] | None = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> list[AssetItem]:
         """Scan a folder and return a list of AssetItem objects found.
 
@@ -210,67 +219,67 @@ class AssetScanner:
             recursive: If True, recursively scan subdirectories.
             directories: If given, every folder walked (the root included) is added to it,
                 for watching the library for changes.
+            should_stop: Checked before each folder; when it returns True the scan stops and
+                returns what it has (a newer scan replaced this one).
 
         Returns:
-            A list of AssetItem objects sorted by name.
+            A list of AssetItem objects sorted by name (then path).
         """
         root = Path(folder_path).resolve()
-        if not root.exists() or not root.is_dir():
+        if not root.is_dir():
             return []
 
         assets: list[AssetItem] = []
         if directories is not None:
             directories.add(root)
 
-        if recursive:
-            iterator = root.rglob("*")
-        else:
-            iterator = root.glob("*")
-
-        for item_path in iterator:
+        # os.scandir: one directory listing gives each entry's type, size and date on Windows,
+        # where rglob plus is_dir / is_file / stat asked the disk again for every file (13-17x
+        # slower on a real library). Excluded folders (.git, node_modules) are never entered.
+        # Like rglob, linked folders aren't followed (is_dir(follow_symlinks=False)).
+        pending = [str(root)]
+        while pending:
+            if should_stop is not None and should_stop():
+                break
+            folder = pending.pop()
             try:
-                # Skip excluded directories (e.g. .git, .venv, node_modules) inside the library;
-                # the library's own location (say D:\build\assets) doesn't count
-                if any(part.lower() in self.excluded_dirs for part in item_path.relative_to(root).parts[:-1]) \
-                        or (item_path.is_dir() and self.is_excluded_dir(item_path)):
-                    continue
-
-                if not item_path.is_file():
-                    if directories is not None and recursive and item_path.is_dir():
-                        directories.add(item_path)
-                    continue
-
-                # Filter out compiler build artifacts like foo.cpp.obj
-                lower_name = item_path.name.lower()
-                if lower_name.endswith((".cpp.obj", ".c.obj", ".cc.obj", ".cxx.obj")):
-                    continue
-
-                # Skip macOS AppleDouble metadata files (e.g. "._texture.psd")
-                if lower_name.startswith("._"):
-                    continue
-
-                ext = item_path.suffix.lower()
-                if ext in self.supported_extensions:
-                    stat = item_path.stat()
-                    group = determine_asset_group(ext)
-                    cat_name = determine_category_name(ext)
-
-                    asset = AssetItem(
-                        path=item_path,
-                        name=item_path.name,
+                with os.scandir(folder) as listing:
+                    entries = list(listing)
+            except OSError:
+                continue  # inaccessible or gone meanwhile
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if recursive and entry.name.lower() not in self.excluded_dirs:
+                            pending.append(entry.path)
+                            if directories is not None:
+                                directories.add(Path(entry.path))
+                        continue
+                    lower_name = entry.name.lower()
+                    # Filter out compiler build artifacts like foo.cpp.obj
+                    if lower_name.endswith((".cpp.obj", ".c.obj", ".cc.obj", ".cxx.obj")):
+                        continue
+                    # Skip macOS AppleDouble metadata files (e.g. "._texture.psd")
+                    if lower_name.startswith("._"):
+                        continue
+                    ext = os.path.splitext(lower_name)[1]
+                    if ext not in self.supported_extensions or not entry.is_file():
+                        continue
+                    stat = entry.stat()
+                    assets.append(AssetItem(
+                        path=Path(entry.path),
+                        name=entry.name,
                         extension=ext,
                         size_bytes=stat.st_size,
                         modified_timestamp=stat.st_mtime,
-                        asset_group=group,
-                        category_name=cat_name,
-                    )
-                    assets.append(asset)
-            except (PermissionError, FileNotFoundError, OSError):
-                # Skip inaccessible or transient files safely
-                continue
+                        asset_group=determine_asset_group(ext),
+                        category_name=determine_category_name(ext),
+                    ))
+                except OSError:
+                    # Skip inaccessible or transient files safely
+                    continue
 
-        # Sort alphabetically by file name
-        assets.sort(key=lambda a: a.name.lower())
+        assets.sort(key=asset_sort_key)
         return assets
 
     @staticmethod

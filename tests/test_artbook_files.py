@@ -82,11 +82,15 @@ def test_copy_file_path_show_in_explorer_and_open(qapp, panel, pictures, monkeyp
     assert board.copy_file_paths()
     assert QApplication.clipboard().text().splitlines() == [str(pictures / "wide.png"), str(pictures / "square.png")]
 
-    launched, opened = [], []
+    shown, launched, opened = [], [], []
+    monkeypatch.setattr(file_actions, "_select_in_explorer", lambda path: shown.append(path) or True)
     monkeypatch.setattr(file_actions.subprocess, "Popen", lambda args, **kw: launched.append(args))
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url.toLocalFile()) or True))
     board.show_in_explorer()
-    assert launched == [["explorer", f"/select,{pictures / 'wide.png'}"]]
+    assert shown == [str((pictures / "wide.png").resolve())] and launched == []
+    monkeypatch.setattr(file_actions, "_select_in_explorer", lambda path: False)  # (Windows refused: explorer.exe)
+    board.show_in_explorer()
+    assert launched == [["explorer", "/select,", str((pictures / "wide.png").resolve())]]
     board.open_source_files()
     assert [Path(p) for p in opened] == [pictures / "wide.png", pictures / "square.png"]
 

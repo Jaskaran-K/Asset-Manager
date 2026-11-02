@@ -178,22 +178,30 @@ class ArtbookPanel(QWidget):
                 return
             self.save_now()
         page = None
+        problem = ""
         candidates = [page_id] if page_id else []
         candidates += [p for p in store.ordered_page_ids() if p != page_id]
         for candidate in candidates:
             try:
                 page = store.load_page(candidate)
                 break
-            except store.PageError:
+            except store.PageError as exc:
+                problem = problem or (str(exc) if candidate == page_id else "")
                 continue
         if page is None:
             page = store.create_page(DEFAULT_PAGE_NAME)
+        if store.take_restored(page["id"]) and not problem:  # (the page asked for comes first)
+            problem = ("This page's file was damaged, so its previous save was opened instead: "
+                       "the last changes made to it may be missing.")
+        store.remove_unused_images(page)  # (before there's undo history that could need them)
         self.page = page
         self._dirty = False
         set_artbook_page(page["id"])
         self._show_name()
         self.board.load_page(page)
         self.pages.rebuild()
+        if problem:
+            self.board.show_message(problem)
 
     def leave_pages(self) -> None:
         """Save and let go of the open page (before the pages folder changes; reload_pages after)."""

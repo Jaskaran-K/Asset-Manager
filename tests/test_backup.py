@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -63,6 +64,81 @@ def test_restore_brings_back_the_old_state(repo):
     repo.restore_database(backup)
     assert custom_names(repo, hero_id) == ["Hero"]
     assert any("before-restore" in p.name for p in repo.list_backups())  # undoable too
+
+
+def _damage(repo):
+    """Overwrite the middle of the database file (a bad sector, a sync tool)."""
+    repo._conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    repo.close_thread_connection()
+    path = Path(repo.db_path)
+    with open(path, "r+b") as f:
+        f.seek(path.stat().st_size // 2)
+        f.write(b"\xa5" * 8192)  # (the same damage every run)
+
+
+def _filled(repo):
+    ids = repo.sync_assets([make_asset(fr"C:\lib\file{i}.png") for i in range(400)])  # (several pages)
+    tag = repo.create_custom_tag("Hero")
+    repo.add_tags([ids[r"C:\lib\file0.png"]], [tag.id])
+    return ids
+
+
+def test_the_daily_backup_is_made_once_a_day_and_kept_apart(repo, monkeypatch):
+    monkeypatch.setattr(tag_repository, "MAX_BACKUPS", 2)
+    monkeypatch.setattr(tag_repository, "MAX_DAILY_BACKUPS", 2)
+    repo.create_custom_tag("Hero")
+    first = repo.backup_if_due()
+    assert first is not None and first.stem.endswith("_daily")
+    assert repo.backup_if_due() is None  # (not due again for a day)
+    for i in range(3):
+        repo.backup_database(f"manual{i}")
+    assert first in repo.list_backups()  # manual ones don't push the daily one out...
+    old = first.stat().st_mtime - tag_repository.DAILY_BACKUP_SECONDS - 1
+    os.utime(first, (old, old))
+    for _ in range(3):
+        second = repo.backup_if_due()
+        os.utime(second, (old, old))
+    assert len([b for b in repo.list_backups() if b.stem.endswith("_daily")]) == 2
+    assert len([b for b in repo.list_backups() if not b.stem.endswith("_daily")]) == 2  # ...nor the other way
+
+
+def test_a_damaged_database_is_never_backed_up_and_its_good_backup_restores(repo):
+    ids = _filled(repo)
+    good = repo.backup_if_due()
+    os.utime(good, (good.stat().st_mtime - tag_repository.DAILY_BACKUP_SECONDS - 1,) * 2)  # (due again)
+    _damage(repo)
+    with pytest.raises(sqlite3.DatabaseError) as error:  # (what a scan meets)
+        repo.sync_assets([make_asset(fr"C:\lib\file{i}.png") for i in range(400)])
+    assert tag_repository.is_damage_error(str(error.value))
+    with pytest.raises(TagError):
+        repo.backup_if_due()  # (a damaged copy would push out good ones)
+    assert repo.newest_good_backup() == good
+    repo.restore_database(good)
+    assert custom_names(repo, ids[r"C:\lib\file0.png"]) == ["Hero"]
+    assert not list(repo.backup_dir().glob("*-wal")) and not list(repo.backup_dir().glob("*-shm"))  # (checked read-only)
+
+
+def test_a_badly_damaged_database_is_kept_aside_and_restored_into_a_fresh_one(repo):
+    ids = _filled(repo)
+    good = repo.backup_database("manual")
+    repo._conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    repo.close_thread_connection()
+    path = Path(repo.db_path)
+    data = path.read_bytes()
+    path.write_bytes(data[:100] + b"\xa5" * (len(data) - 100))  # (SQLite can't even copy it now)
+    repo.restore_database(good)
+    assert custom_names(repo, ids[r"C:\lib\file0.png"]) == ["Hero"]
+    kept = [b for b in repo.list_backups() if b.stem.endswith("_damaged")]
+    assert len(kept) == 1 and kept[0].read_bytes()[100:200] == b"\xa5" * 100  # (as it was)
+
+
+def test_damaged_backups_are_never_offered(repo):
+    _filled(repo)
+    backup = repo.backup_database("manual")
+    with open(backup, "r+b") as f:
+        f.seek(backup.stat().st_size // 2)
+        f.write(b"\xa5" * 8192)  # (the same damage every run)
+    assert repo.newest_good_backup() is None
 
 
 def test_restore_rejects_other_files(repo, tmp_path):

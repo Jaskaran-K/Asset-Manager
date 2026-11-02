@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Iterable, Optional
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
-from .scanner import AssetItem, AssetScanner
+from .scanner import AssetItem, AssetScanner, asset_sort_key
 
 if TYPE_CHECKING:
     from .tag_repository import Marks, Tag, TagRepository
@@ -59,7 +59,7 @@ class FolderRescan:
             return not any(key.startswith(tree + os.sep) for tree in trees)
 
         merged = [a for a in assets if keep(a)] + self.assets
-        merged.sort(key=lambda a: a.name.lower())
+        merged.sort(key=asset_sort_key)
         return merged
 
 
@@ -82,7 +82,11 @@ def rescan_folders(
         result.folders.append(Path(folder))
         result.assets.extend(scanner.scan(folder, recursive=False))
         try:
-            subdirs = {path_key(p): p for p in Path(folder).iterdir() if p.is_dir() and not scanner.is_excluded_dir(p)}
+            with os.scandir(folder) as listing:  # (as the scanner walks: linked folders aren't followed)
+                subdirs = {
+                    path_key(e.path): Path(e.path) for e in listing
+                    if e.is_dir(follow_symlinks=False) and e.name.lower() not in scanner.excluded_dirs
+                }
         except OSError:
             subdirs = {}
         for child in watched_children.get(key, set()) - set(subdirs):
@@ -107,8 +111,7 @@ class LibraryWatcher(QObject):
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
-        self._watcher = QFileSystemWatcher(self)
-        self._watcher.directoryChanged.connect(self._on_directory_changed)
+        self._watcher = self._new_watcher()
         self._watched: dict[str, Path] = {}
         self._dirty: dict[str, Path] = {}
         self._complete = True
@@ -117,14 +120,24 @@ class LibraryWatcher(QObject):
         self._timer.setInterval(DEBOUNCE_MS)
         self._timer.timeout.connect(self._flush)
 
+    def _new_watcher(self) -> QFileSystemWatcher:
+        watcher = QFileSystemWatcher(self)
+        watcher.directoryChanged.connect(self._on_directory_changed)
+        return watcher
+
     def watch(self, directories: Iterable[Path]) -> None:
         """Replace the watched folders (call after a full scan)."""
         self.clear()
         self.add_directories(directories)
 
     def clear(self) -> None:
+        # A fresh QFileSystemWatcher rather than removing every folder from this one: on Windows,
+        # folders removed in bulk and added straight back were refused beyond the first 63, so
+        # after a rescan most of the library went unwatched (and changes there went unnoticed)
         if self._watcher.directories():
-            self._watcher.removePaths(self._watcher.directories())
+            old, self._watcher = self._watcher, self._new_watcher()
+            old.directoryChanged.disconnect(self._on_directory_changed)
+            old.deleteLater()
         self._watched.clear()
         self._dirty.clear()
         self._timer.stop()
@@ -142,6 +155,8 @@ class LibraryWatcher(QObject):
             new.append((key, Path(directory)))
         if new:
             failed = set(self._watcher.addPaths([str(p) for _k, p in new]))
+            if failed:
+                self._complete = False  # (changes there show up on the next Refresh)
             for key, path in new:
                 if str(path) not in failed:
                     self._watched[key] = path

@@ -102,3 +102,22 @@ def test_saved_searches(lib):
     assert [(s.name, s.query) for s in repo.list_saved_searches()] == [("Heroes", "tag:Hero rock")]
     repo.delete_saved_search(saved.id)
     assert repo.list_saved_searches() == []
+
+
+def test_renaming_a_tag_updates_saved_searches(lib):
+    repo, _ids, t = lib
+    repo.save_search("Heroes", 'tag:hero|Nature -tag:WIP moss')
+    repo.save_search("Other", "tag:Heroic rock")
+    repo.rename_custom_tag(t["Hero"], "Main Hero")
+    assert {s.name: s.query for s in repo.list_saved_searches()} == {
+        "Heroes": 'tag:"Main Hero"|Nature -tag:WIP moss',
+        "Other": "tag:Heroic rock",  # another tag that only starts the same way
+    }
+    repo.rename_custom_tag(t["Hero"], "Hero")  # (as undo in Settings > Tags does)
+    assert repo.list_saved_searches()[0].query == "tag:Hero|Nature -tag:WIP moss"
+
+
+def test_text_words_match_in_any_order(lib):
+    repo, ids, t = lib
+    assert names(ids, repo.find_assets(any_of=[[t["Nature"], t["Hero"]]], text="FBX ro")) == ["hero.fbx", "rock.fbx"]
+    assert names(ids, repo.find_assets(any_of=[[t["Nature"], t["Hero"]]], text="fbx  rock")) == ["rock.fbx"]

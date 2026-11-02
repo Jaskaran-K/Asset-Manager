@@ -4,6 +4,7 @@ and the Pages sidebar (opening, renaming, moving, searching, deleting)."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 
@@ -113,7 +114,11 @@ def test_index_repairs_itself(qapp):
     assert tree["pages"] == [a["id"], c["id"]]
     assert [f["id"] for f in tree["folders"]] == [folder] and tree["folders"][0]["pages"] == [b["id"]]
 
-    store.index_path().write_text("not json", encoding="utf-8")  # unreadable: everything at the top level
+    store.index_path().write_text("not json", encoding="utf-8")  # unreadable: its backup is used (core.json_files)
+    tree = store.page_tree()
+    assert set(tree["pages"]) == {a["id"], c["id"]} and tree["folders"][0]["pages"] == [b["id"]]
+    for name in ("index.json", "index.json.bak"):
+        (store.pages_dir() / name).write_text("not json", encoding="utf-8")  # neither readable: all at the top level
     assert set(store.page_tree()["pages"]) == {a["id"], b["id"], c["id"]}
 
 
@@ -193,6 +198,103 @@ def test_unique_page_names(qapp):
     store.create_page("Page 1")
     store.create_page("page 3")
     assert store.unique_page_name() == "Page 2"
+
+
+# ----------------------------------------------------------------------
+# Damaged pages, and image files no item uses
+# ----------------------------------------------------------------------
+def damage(page_id):
+    (store.page_dir(page_id) / "page.json").write_text("{not json", encoding="utf-8")
+
+
+def test_each_save_keeps_the_one_before_as_a_backup(qapp):
+    page = store.create_page("Mood")
+    folder = store.page_dir(page["id"])
+    assert not (folder / "page.json.bak").exists()  # (nothing before the first save)
+    store.save_page(dict(page, name="Second", modified=time.time() + 1))
+    assert json.loads((folder / "page.json.bak").read_text(encoding="utf-8"))["name"] == "Mood"
+    store.save_page(dict(page, name="Third", modified=time.time() + 2))
+    assert json.loads((folder / "page.json.bak").read_text(encoding="utf-8"))["name"] == "Second"
+    assert not list(folder.glob("*.tmp"))
+
+
+def test_a_damaged_page_opens_from_its_backup(qapp, monkeypatch):
+    from core import crash_log
+
+    logged = []
+    monkeypatch.setattr(crash_log, "log_error", lambda title, details="": logged.append(title))
+    page = store.create_page("Mood")
+    store.save_page(dict(page, name="Saved twice", modified=time.time() + 1))
+    damage(page["id"])
+    assert store.load_page(page["id"])["name"] == "Mood"  # (the save before)
+    assert store.take_restored(page["id"]) and not store.take_restored(page["id"])  # (said once)
+    assert [p["name"] for p in store.list_pages()] == ["Mood"]
+    assert len(logged) == 1 and "couldn't be read" in logged[0]  # (once, however often it's read)
+
+    # Saving again sets the damaged file aside, rather than making it the backup
+    store.save_page(dict(page, name="Fixed", modified=time.time() + 2))
+    folder = store.page_dir(page["id"])
+    assert (folder / "page.json.damaged").read_text(encoding="utf-8") == "{not json"
+    assert json.loads((folder / "page.json.bak").read_text(encoding="utf-8"))["name"] == "Mood"
+    assert store.load_page(page["id"])["name"] == "Fixed"
+
+
+def test_a_page_too_damaged_to_open_keeps_its_place(qapp):
+    folder_id = store.create_folder("Refs")
+    page = store.create_page("Broken", folder_id)
+    damage(page["id"])  # (and no backup: it was saved once)
+    with pytest.raises(store.PageError, match="damaged"):
+        store.load_page(page["id"])
+    assert [(p["name"], p.get("damaged")) for p in store.list_pages()] == [("Damaged page", True)]
+    index = store.page_tree()
+    assert index["folders"][0]["pages"] == [page["id"]]  # still filed in its folder
+    assert page["id"] in json.loads(store.index_path().read_text(encoding="utf-8"))["folders"][0]["pages"]
+
+
+def test_opening_a_damaged_page_says_what_happened(qapp, panel, monkeypatch):
+    messages = []
+    monkeypatch.setattr(panel.board, "show_message", messages.append)
+    restorable = store.create_page("Restorable")
+    store.save_page(dict(restorable, modified=time.time() + 1))
+    broken = store.create_page("Broken")
+    damage(restorable["id"])
+    damage(broken["id"])
+    panel.pages.rebuild()
+    assert "Damaged page" in names(panel) and "Restorable" in names(panel)
+
+    panel.open_page(restorable["id"])
+    assert panel.page["id"] == restorable["id"] and "previous save was opened" in messages[-1]
+    panel.open_page(broken["id"])
+    assert panel.page["id"] != broken["id"] and "couldn't be opened" in messages[-1]
+    assert broken["id"] in store.ordered_page_ids()  # (still listed, to delete or fix)
+
+
+def test_image_files_no_item_uses_are_removed_when_the_page_opens(qapp, panel, monkeypatch):
+    page = store.create_page("Board")
+    used = store.store_blob(page["id"], b"used", ".png")
+    only_in_backup = store.store_blob(page["id"], b"backup", ".png")
+    unused = store.store_blob(page["id"], b"unused", ".png")
+    new_unused = store.store_blob(page["id"], b"just added", ".png")
+    store.save_page(dict(page, items=[{"id": "b", "kind": "image", "source": {"path": None, "blob": only_in_backup}}],
+                         modified=time.time() + 1))
+    store.save_page(dict(page, items=[{"id": "a", "kind": "image", "source": {"path": "C:/x.png", "blob": used}}],
+                         modified=time.time() + 2))
+    old = time.time() - 2 * store.UNUSED_IMAGE_AGE
+    for name in (used, only_in_backup, unused):
+        os.utime(store.blob_path(page["id"], name), (old, old))
+
+    panel.open_page(page["id"])
+    left = {f.name for f in store.images_dir(page["id"]).iterdir()}
+    assert left == {used, only_in_backup, new_unused}  # (an unused one added in the last hour stays too)
+
+
+def test_storing_an_image_already_there_marks_it_as_new(qapp):
+    page = store.create_page("Board")
+    name = store.store_blob(page["id"], b"data", ".png")
+    old = time.time() - 2 * store.UNUSED_IMAGE_AGE
+    os.utime(store.blob_path(page["id"], name), (old, old))
+    assert store.store_blob(page["id"], b"data", ".png") == name  # (e.g. dropped in again)
+    assert store.remove_unused_images(store.load_page(page["id"])) == 0
 
 
 # ----------------------------------------------------------------------

@@ -1,4 +1,5 @@
-"""Thumbnails are cached on disk, keyed so edits and theme changes never show a stale picture."""
+"""Thumbnails: cached on disk (without their card, so theme changes don't reread files) and in
+memory (the most recently used), made newest first, and never stale after edits or theme changes."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import os
 import time
 
 from PIL import Image
+from PySide6.QtGui import QColor
 
 from core import thumbnail_manager as tm
 from core import video_tools
@@ -46,7 +48,7 @@ def test_second_load_comes_from_disk(tmp_path, qapp, monkeypatch):
     assert renders == [] and fresh_loaded[0].width() == 110
 
 
-def test_cache_key_changes_with_the_file_size_and_theme(tmp_path, qapp):
+def test_cache_key_changes_with_the_file_and_size_but_not_the_theme(tmp_path, qapp):
     asset = make_png(tmp_path)
     key = tm.disk_cache_path(asset, 110)
     asset.modified_timestamp += 1
@@ -56,9 +58,134 @@ def test_cache_key_changes_with_the_file_size_and_theme(tmp_path, qapp):
     original = dict(tm._CARD_STYLE)
     try:
         tm.set_thumbnail_card_style(original["card"].lighter(150), original["border"], original["badge"], original["badge_text"])
-        assert tm.disk_cache_path(asset, 110) != edited
+        assert tm.disk_cache_path(asset, 110) == edited  # (the picture is stored without its card)
     finally:
         tm._CARD_STYLE.update(original)
+
+
+def card_color(pixmap):
+    return pixmap.toImage().pixelColor(5, pixmap.height() // 2).name()
+
+
+def test_a_theme_change_reuses_the_pictures_in_new_colors(tmp_path, qapp, monkeypatch):
+    asset = make_png(tmp_path)
+    original = dict(tm._CARD_STYLE)
+    try:
+        tm.set_thumbnail_card_style(QColor("#442222"), QColor("#553333"), QColor("#221111"), QColor("#ffffff"))
+        manager = tm.ThumbnailManager()
+        manager.get_thumbnail(asset, 110)
+        assert wait_for(qapp, lambda: manager.cached(asset) is not None)
+        assert card_color(manager.cached(asset)) == "#442222"
+
+        reads = []
+        monkeypatch.setattr(tm, "load_texture_picture", lambda *args: reads.append(1))
+        tm.set_thumbnail_card_style(QColor("#224422"), QColor("#335533"), QColor("#112211"), QColor("#ffffff"))
+        manager.clear_cache()
+        manager.get_thumbnail(asset, 110)
+        assert wait_for(qapp, lambda: manager.cached(asset) is not None)
+        assert card_color(manager.cached(asset)) == "#224422" and reads == []  # (from the disk cache)
+        manager.shutdown()
+    finally:
+        tm._CARD_STYLE.update(original)
+
+
+def slow_pictures(monkeypatch, seconds=0.05, order=None):
+    real = tm.load_texture_picture
+
+    def slow(path, size=110):
+        if order is not None:
+            order.append(path.name)
+        time.sleep(seconds)
+        return real(path, size)
+
+    monkeypatch.setattr(tm, "load_texture_picture", slow)
+
+
+def make_pngs(tmp_path, count):
+    for i in range(count):
+        Image.new("RGB", (32, 32), (i * 10, 80, 80)).save(tmp_path / f"img{i:02}.png")
+    return AssetScanner().scan(tmp_path)
+
+
+def test_newest_requests_are_made_first(tmp_path, qapp, monkeypatch):
+    order = []
+    slow_pictures(monkeypatch, order=order)
+    assets = make_pngs(tmp_path, 8)
+    manager = tm.ThumbnailManager()
+    manager._thread_pool.setMaxThreadCount(1)
+    for asset in assets:  # (scrolling down: each card asked for after the one before)
+        manager.get_thumbnail(asset, 110)
+    assert wait_for(qapp, lambda: len(manager._cache) == 8)
+    assert order[1:] == [a.name for a in reversed(assets[1:])]  # (the first had already started)
+    manager.shutdown()
+
+
+def test_cards_that_scrolled_away_are_skipped(tmp_path, qapp, monkeypatch):
+    slow_pictures(monkeypatch, seconds=0.1)
+    monkeypatch.setattr(tm, "STALE_SECONDS", 0.05)
+    assets = make_pngs(tmp_path, 6)
+    manager = tm.ThumbnailManager()
+    manager._thread_pool.setMaxThreadCount(1)
+    skipped = []
+    manager.thumbnail_skipped.connect(skipped.append)
+    for asset in assets:
+        manager.get_thumbnail(asset, 110)
+    assert wait_for(qapp, lambda: not manager._pending)
+    assert len(manager._cache) < 6 and len(skipped) == 6 - len(manager._cache)
+    manager.get_thumbnail(assets[0], 110)  # back on screen: asked for again, and made
+    assert wait_for(qapp, lambda: manager.cached(assets[0]) is not None)
+    manager.shutdown()
+
+
+def test_memory_keeps_the_most_recently_used(tmp_path, qapp):
+    assets = make_pngs(tmp_path, 5)
+    manager = tm.ThumbnailManager()
+    manager.max_memory_bytes = 3 * 110 * 110 * 4  # room for three cards
+    for asset in assets[:3]:
+        manager.get_thumbnail(asset, 110)
+    assert wait_for(qapp, lambda: len(manager._cache) == 3)
+    manager.get_thumbnail(assets[0], 110)  # used again: now the most recent
+    for asset in assets[3:]:
+        manager.get_thumbnail(asset, 110)
+    assert wait_for(qapp, lambda: manager.cached(assets[4]) is not None and manager.cached(assets[3]) is not None)
+    assert [a.name for a in assets if manager.cached(a) is not None] == ["img00.png", "img03.png", "img04.png"]
+    assert manager.memory_used() <= manager.max_memory_bytes
+    manager.shutdown()
+
+
+def test_results_from_before_a_reset_are_dropped(tmp_path, qapp, monkeypatch):
+    slow_pictures(monkeypatch, seconds=0.1)
+    asset = make_png(tmp_path)
+    manager = tm.ThumbnailManager()
+    manager.get_thumbnail(asset, 110)
+    time.sleep(0.02)  # (its job is running)
+    manager.clear_cache()  # e.g. the thumbnail size changed
+    manager._thread_pool.waitForDone()
+    qapp.processEvents()
+    assert manager.cached(asset) is None  # (an old-size picture never lands)
+    manager.get_thumbnail(asset, 144)
+    assert wait_for(qapp, lambda: manager.cached(asset) is not None)
+    assert manager.cached(asset).width() == 144
+    manager.shutdown()
+
+
+def same_picture(pixmap, image):
+    return pixmap.toImage() == image.convertToFormat(pixmap.toImage().format())
+
+
+def test_unreadable_and_huge_images_say_so(tmp_path, qapp, monkeypatch):
+    big = make_png(tmp_path, "huge.png")
+    (tmp_path / "broken.png").write_bytes(b"not an image")
+    broken = next(a for a in AssetScanner().scan(tmp_path) if a.name == "broken.png")
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)  # (64 x 64 is now "too large")
+    manager = tm.ThumbnailManager()
+    for asset in (big, broken):
+        manager.get_thumbnail(asset, 110)
+    assert wait_for(qapp, lambda: manager.cached(big) is not None and manager.cached(broken) is not None)
+    assert same_picture(manager.cached(big), tm.render_placeholder_image(big, 110, note="Too large to preview"))
+    assert same_picture(manager.cached(broken), tm.render_placeholder_image(broken, 110, note="No preview"))
+    assert not manager._pending  # (not left waiting: they aren't asked for again this session)
+    manager.shutdown()
 
 
 CUBE_OBJ = """v -1 -1 -1
@@ -144,19 +271,21 @@ def test_no_model_pictures_when_turned_off_or_unreadable(tmp_path, qapp):
     manager.get_thumbnail(broken, 110)
     manager._model_pool.waitForDone(10000)
     qapp.processEvents()
-    assert manager.cached(broken) is None  # (no picture of the stand-in cube)
+    # (not a picture of the stand-in cube)
+    assert same_picture(manager.cached(broken), tm.render_placeholder_image(broken, 110, note="No preview"))
     manager.shutdown()
 
 
-def test_pruning_drops_least_recently_used(tmp_path):
+def test_pruning_drops_old_versions_and_least_recently_used(tmp_path):
     video_tools.THUMB_DIR.mkdir(parents=True)
     for i in range(10):
-        f = video_tools.THUMB_DIR / f"{i}.png"
+        f = video_tools.THUMB_DIR / f"{tm._CACHE_PREFIX}{i}.png"
         f.write_bytes(b"x" * 1000)
         os.utime(f, (1_000_000 + i, 1_000_000 + i))
-    assert tm.prune_disk_cache(max_bytes=20_000) == 0  # under the limit: nothing to do
+    (video_tools.THUMB_DIR / "0123abcd.png").write_bytes(b"x")  # an older version's
+    assert tm.prune_disk_cache(max_bytes=20_000) == 1  # under the limit: only the old version goes
     removed = tm.prune_disk_cache(max_bytes=5_000)
-    left = sorted(p.name for p in video_tools.THUMB_DIR.iterdir())
+    left = sorted(p.name.removeprefix(tm._CACHE_PREFIX) for p in video_tools.THUMB_DIR.iterdir())
     assert removed == 6 and left == ["6.png", "7.png", "8.png", "9.png"]
 
 

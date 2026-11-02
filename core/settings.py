@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import uuid
@@ -107,23 +108,57 @@ _COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 # ----------------------------------------------------------------------
 # Raw config I/O
 # ----------------------------------------------------------------------
-def _load_raw_config() -> dict[str, Any]:
-    """Load configuration dictionary from disk."""
-    if not CONFIG_FILE_PATH.exists():
-        return {}
+def _backup_path() -> Path:
+    """The last good copy of the config (the one before the latest save)."""
+    return CONFIG_FILE_PATH.with_name(CONFIG_FILE_PATH.name + ".bak")
+
+
+_reported_damaged: set[str] = set()  # (each damaged file is reported once per session)
+
+
+def _read_config_file(path: Path) -> dict[str, Any] | None:
+    """The file's settings, or None if it's missing or damaged (a damaged one is logged)."""
     try:
-        with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError) as exc:
+        if str(path) not in _reported_damaged:
+            _reported_damaged.add(str(path))
+            from . import crash_log
+
+            crash_log.log_error(f"Settings file couldn't be read ({path}): {exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _load_raw_config() -> dict[str, Any]:
+    """Load configuration dictionary from disk (the last good copy if the file is damaged)."""
+    for path in (CONFIG_FILE_PATH, _backup_path()):
+        data = _read_config_file(path)
+        if data is not None:
+            return data
+    return {}
 
 
 def _save_raw_config(data: dict[str, Any]) -> None:
-    """Save configuration dictionary to disk."""
+    """Save configuration dictionary to disk. Written to a separate file and swapped in, so a
+    crash or power cut mid-save can't leave it half written (which used to lose every setting:
+    a damaged file read as empty, and the next save made that permanent). The copy it replaces
+    is kept as the backup."""
+    partial = CONFIG_FILE_PATH.with_name(CONFIG_FILE_PATH.name + ".partial")
     try:
-        with open(CONFIG_FILE_PATH, "w", encoding="utf-8") as f:
+        with open(partial, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if _read_config_file(CONFIG_FILE_PATH) is not None:
+            try:
+                os.replace(CONFIG_FILE_PATH, _backup_path())  # (only a good copy becomes the backup)
+            except OSError:
+                pass  # the backup is only a fallback
+        os.replace(partial, CONFIG_FILE_PATH)
     except OSError as exc:
         print(f"Warning: Failed to persist config to {CONFIG_FILE_PATH}: {exc}")
 

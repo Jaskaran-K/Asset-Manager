@@ -50,4 +50,4 @@ hover / selection, and wheels scroll smoothly. Don't give `::item` a background 
 for trees: Qt paints it into the indentation too (a stray square left of the row).
 
 ## Tests
-`python -m pytest` (dev setup: `pip install -r requirements-dev.txt`). Run it before finishing a change.
+`python -m pytest` (dev setup: `pip install -r requirements-dev.txt -c requirements.lock`). Run it before finishing a change.

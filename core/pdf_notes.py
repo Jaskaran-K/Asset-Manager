@@ -3,17 +3,18 @@ and drawings. The PDF itself is never written to.
 
 Each PDF gets one JSON file in NOTES_DIR, named after the file's contents (core.fingerprint
 quick_hash), so it follows the PDF through renames and moves. Writes go to a temporary file that
-is swapped in, so a crash mid-save never leaves a broken file.
+is swapped in, so a crash mid-save never leaves a broken file, and the version replaced is kept
+as <key>.json.bak: a damaged notes file opens from that instead of reading as "no notes" (which
+the next mark would then have saved over). See core.json_files.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from core import json_files
 from core.fingerprint import quick_hash
 
 NOTES_DIR: Path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AssetManager" / "pdf-notes"
@@ -29,15 +30,16 @@ def key_for(path: Path) -> Optional[str]:
     return quick_hash(path)
 
 
+def _is_notes(data: Any) -> bool:
+    return isinstance(data, dict)
+
+
 def load(key: Optional[str]) -> dict[str, Any]:
-    """What's kept for a PDF ({} for one never opened, or a damaged file)."""
+    """What's kept for a PDF ({} for one never opened; its backup if the file is damaged)."""
     if not key:
         return {}
-    try:
-        data = json.loads((notes_dir() / f"{key}.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    data, _from_backup = json_files.read_with_backup(notes_dir() / f"{key}.json", _is_notes)
+    return data if data is not None else {}
 
 
 def save(key: Optional[str], data: dict[str, Any]) -> None:
@@ -45,7 +47,4 @@ def save(key: Optional[str], data: dict[str, Any]) -> None:
         return
     folder = notes_dir()
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{key}.json"
-    temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
-    temp.write_text(json.dumps({**data, "version": FORMAT_VERSION}, indent=1), encoding="utf-8")
-    os.replace(temp, target)
+    json_files.write(folder / f"{key}.json", {**data, "version": FORMAT_VERSION}, _is_notes)

@@ -22,8 +22,10 @@ Known limitations:
 - Relinking needs the file's content to be unchanged and the new location to be
   inside a scanned folder; a file moved and edited before the next scan, or two
   identical copies, start untagged rather than risk tagging the wrong file.
-- Rows for files that disappear are kept (a library drive may just be offline),
-  so the database can accumulate stale assets until a cleanup feature exists.
+- After a full library scan, forget_unscanned_assets() drops the rows of files the
+  scan didn't find (folders browsed with Open Folder, deleted files) unless they have
+  custom tags, a favorite or a rating. Those are kept, for relinking if the file turns
+  up again, and so are files on a drive that's offline.
 - Tag hierarchies (a tag inside a tag) aren't supported; searches combine tags with
   AND / OR / NOT (find_assets).
 """
@@ -32,13 +34,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Sequence
+from urllib.parse import quote
 
 from .fingerprint import quick_hash
 from .scanner import AssetItem, determine_category_name
@@ -46,7 +51,10 @@ from .scanner import AssetItem, determine_category_name
 DB_PATH: Path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AssetManager" / "library.db"
 
 MAX_TAG_NAME_LENGTH = 40
-MAX_BACKUPS = 10
+MAX_BACKUPS = 10  # (manual ones and those made before updates / restores)
+DAILY_BACKUP = "daily"  # the automatic one (backup_if_due): kept apart, so they never push the others out
+MAX_DAILY_BACKUPS = 7
+DAILY_BACKUP_SECONDS = 24 * 3600
 MAX_RATING = 5
 EXPORT_FORMAT = "asset-manager-tags"
 _CHUNK = 900  # stay well under SQLite's bound-parameter limit
@@ -195,6 +203,28 @@ def _placeholders(count: int) -> str:
     return ",".join("?" * count)
 
 
+def is_damage_error(message: str) -> bool:
+    """Whether a database error means the file itself is damaged (not, say, locked or busy)."""
+    return any(sign in message.lower() for sign in ("malformed", "not a database", "file is encrypted", "corrupt"))
+
+
+def _healthy(conn: sqlite3.Connection) -> bool:
+    try:
+        return conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _read_only_uri(backup: Path) -> str:
+    """Open a backup only to read it, leaving no -wal / -shm files beside it (a finished backup
+    has nothing waiting in a write-ahead log, so it's safe to treat as unchanging)."""
+    return f"file:{quote(backup.as_posix(), safe='/:')}?mode=ro&immutable=1"  # (a "#" or "%" in the path is escaped)
+
+
+def _is_daily(backup: Path) -> bool:
+    return backup.stem.endswith(f"_{DAILY_BACKUP}")
+
+
 class TagRepository:
     """Data access for assets and tags. Safe to use from several threads."""
 
@@ -212,11 +242,15 @@ class TagRepository:
                 Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             # isolation_level=None: transactions are explicit (see _transaction)
             conn = sqlite3.connect(self.db_path, isolation_level=None, timeout=10)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            if self.db_path != ":memory:":
-                conn.execute("PRAGMA journal_mode = WAL")
-            self._migrate(conn)
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys = ON")
+                if self.db_path != ":memory:":
+                    conn.execute("PRAGMA journal_mode = WAL")
+                self._migrate(conn)
+            except BaseException:
+                conn.close()  # (now: a damaged file stays open otherwise, until garbage collection, and can't be replaced)
+                raise
             self._local.conn = conn
         return conn
 
@@ -254,18 +288,53 @@ class TagRepository:
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         safe_reason = "".join(c if c.isalnum() or c in "-." else "-" for c in reason)
         target = folder / f"library_{stamp}_{safe_reason}.db"
+        count = 1
+        while target.exists():  # (two in the same second: neither replaces the other)
+            count += 1
+            target = folder / f"library_{stamp}-{count}_{safe_reason}.db"
         dest = sqlite3.connect(target)
         try:
             conn.backup(dest)
         finally:
             dest.close()
-        backups = sorted(folder.glob("library_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in backups[MAX_BACKUPS:]:
+        daily = _is_daily(target)
+        backups = [b for b in self.list_backups() if _is_daily(b) == daily]  # (each kind has its own limit)
+        for old in backups[MAX_DAILY_BACKUPS if daily else MAX_BACKUPS:]:
             try:
                 old.unlink()
             except OSError:
                 pass
         return target
+
+    def backup_if_due(self) -> Optional[Path]:
+        """The automatic backup: made when the newest one is a day old (or there's none), and only
+        of a healthy database, so a damaged one never replaces good copies. Returns the copy, or
+        None if none was due. TagError if the database is damaged. Safe off the UI thread."""
+        if self.db_path == ":memory:":
+            return None
+        daily = [b for b in self.list_backups() if _is_daily(b)]
+        if daily and time.time() - daily[0].stat().st_mtime < DAILY_BACKUP_SECONDS:
+            return None
+        if not _healthy(self._conn()):
+            raise TagError("The library database is damaged.")
+        return self.backup_database(DAILY_BACKUP)
+
+    def newest_good_backup(self) -> Optional[Path]:
+        """The newest backup that's a readable, undamaged library (to offer when the database is damaged)."""
+        for backup in self.list_backups():
+            try:
+                source = sqlite3.connect(_read_only_uri(backup), uri=True)
+            except sqlite3.Error:
+                continue
+            try:
+                version = source.execute("PRAGMA user_version").fetchone()[0]
+                if 1 <= version <= len(MIGRATIONS) and _healthy(source):
+                    return backup
+            except sqlite3.DatabaseError:
+                pass
+            finally:
+                source.close()
+        return None
 
     def list_backups(self) -> list[Path]:
         """Backups, newest first."""
@@ -274,19 +343,46 @@ class TagRepository:
         return sorted(self.backup_dir().glob("library_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
 
     def restore_database(self, backup: Path | str) -> None:
-        """Replace the library's contents with a backup (a backup of the current state is made first)."""
-        source = sqlite3.connect(f"file:{Path(backup).as_posix()}?mode=ro", uri=True)
+        """Replace the library's contents with a backup (a backup of the current state is made first).
+        A damaged database can't be copied or written over page by page: it's kept as it is in
+        backups/ (library_..._damaged.db) and the backup goes into a fresh database instead."""
+        source = sqlite3.connect(_read_only_uri(Path(backup)), uri=True)
         try:
-            version = source.execute("PRAGMA user_version").fetchone()[0]
-            if not 1 <= version <= len(MIGRATIONS):
-                raise TagError("That file isn't an Asset Manager library backup, or it's from a newer version.")
-            self.backup_database("before-restore")
-            source.backup(self._conn())
-        except sqlite3.DatabaseError as exc:
-            raise TagError(f"The backup couldn't be read: {exc}") from exc
+            try:
+                version = source.execute("PRAGMA user_version").fetchone()[0]
+                readable = 1 <= version <= len(MIGRATIONS) and _healthy(source)
+            except sqlite3.DatabaseError as exc:
+                raise TagError(f"The backup couldn't be read: {exc}") from exc
+            if not readable:
+                raise TagError("That file isn't an Asset Manager library backup, it's damaged, or it's from a newer version.")
+            if self._is_healthy():
+                self.backup_database("before-restore")
+                source.backup(self._conn())
+            else:
+                self._start_afresh_keeping_the_damaged_file()
+                source.backup(self._conn())
         finally:
             source.close()
         self._migrate(self._conn())  # an older backup is upgraded to the current schema
+
+    def _is_healthy(self) -> bool:
+        try:
+            return _healthy(self._conn())
+        except sqlite3.DatabaseError:
+            return False
+
+    def _start_afresh_keeping_the_damaged_file(self) -> None:
+        self.close_thread_connection()
+        path = Path(self.db_path)
+        folder = self.backup_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(path, folder / f"library_{datetime.now():%Y-%m-%d_%H%M%S}_damaged.db")
+            for part in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+                part.unlink(missing_ok=True)
+        except OSError as exc:  # (still open in a background job)
+            raise TagError("The damaged database is still in use. Close and reopen Asset Manager, then restore again "
+                           f"(Tools > Restore Library Backup). ({exc})") from exc
 
     # ------------------------------------------------------------------
     # Export / import (JSON)
@@ -426,7 +522,10 @@ class TagRepository:
                 # an edited file needs a new fingerprint
                 "quick_hash = CASE WHEN assets.size = excluded.size AND assets.mtime = excluded.mtime "
                 "THEN assets.quick_hash END, "
-                "size = excluded.size, mtime = excluded.mtime",
+                "size = excluded.size, mtime = excluded.mtime "
+                # unchanged rows aren't rewritten (most of them, on every scan)
+                "WHERE assets.path IS NOT excluded.path OR assets.size IS NOT excluded.size "
+                "OR assets.mtime IS NOT excluded.mtime",
                 rows,
             )
             tag_ids: dict[str, int] = {}
@@ -518,6 +617,30 @@ class TagRepository:
                 )
         return len(moves)
 
+    def forget_unscanned_assets(self, assets: Iterable[AssetItem]) -> int:
+        """Delete the rows of files that a full library scan (assets) didn't find, e.g. files in
+        folders opened with Open Folder, or deleted ones, unless they have custom tags, a favorite
+        or a rating to keep. Files on a drive that's offline are kept. Returns how many were removed."""
+        scanned = {path_key(a.path) for a in assets}
+        drives: dict[str, bool] = {}
+
+        def drive_online(path: str) -> bool:
+            anchor = Path(path).anchor or "."
+            if anchor not in drives:
+                drives[anchor] = os.path.exists(anchor)
+            return drives[anchor]
+
+        with self._transaction() as conn:  # (a file tagged meanwhile can't be removed)
+            gone = [
+                row["id"] for row in conn.execute(
+                    f"SELECT a.id, a.path_key, a.path FROM assets a WHERE NOT {self._CUSTOM_TAGGED}"
+                )
+                if row["path_key"] not in scanned and drive_online(row["path"])
+            ]
+            for chunk in _chunks(gone):
+                conn.execute(f"DELETE FROM assets WHERE id IN ({_placeholders(len(chunk))})", chunk)
+        return len(gone)
+
     def fill_missing_hashes(self) -> int:
         """Fingerprint tagged / favorite / rated files that don't have one yet (so they can be relinked if moved)."""
         rows = self._conn().execute(
@@ -553,10 +676,21 @@ class TagRepository:
         return Tag(tag_id, name, "custom", color, 0)
 
     def rename_custom_tag(self, tag_id: int, new_name: str) -> Tag:
-        self._require_custom(tag_id)
+        """Rename a custom tag; saved searches that use it are changed to the new name."""
+        from .search_query import rename_tag_in_query  # (it imports this module)
+
+        old_name = self._require_custom(tag_id).name
         new_name = self.validate_tag_name(new_name, exclude_tag_id=tag_id)
         with self._transaction() as conn:
             conn.execute("UPDATE tags SET name = ? WHERE id = ?", (new_name, tag_id))
+            searches = conn.execute("SELECT id, query FROM saved_searches").fetchall()
+            conn.executemany(
+                "UPDATE saved_searches SET query = ? WHERE id = ?",
+                [
+                    (query, row["id"]) for row in searches
+                    if (query := rename_tag_in_query(row["query"], old_name, new_name)) != row["query"]
+                ],
+            )
         return self.get_tag(tag_id)
 
     def set_tag_color(self, tag_id: int, color: Optional[str]) -> Tag:
@@ -806,18 +940,18 @@ class TagRepository:
         text: Optional[str] = None,
     ) -> set[int]:
         """Ids of assets that have every tag in all_of, at least one tag from each group in
-        any_of, none of none_of, and (if given) text in the file name, ignoring case.
-        With no conditions at all, returns an empty set."""
-        folded = (text or "").strip().casefold()
+        any_of, none of none_of, and (if given) every word of text in the file name, in any
+        order and ignoring case. With no conditions at all, returns an empty set."""
+        words = list(dict.fromkeys((text or "").casefold().split()))
         any_of = [list(dict.fromkeys(group)) for group in any_of if group]
-        if not (all_of or any_of or none_of or folded):
+        if not (all_of or any_of or none_of or words):
             return set()
         has_tag = "EXISTS (SELECT 1 FROM asset_tags at WHERE at.asset_id = a.id AND at.tag_id {})"
         conditions: list[str] = []
         params: list = []
-        if folded:
+        for word in words:
             conditions.append("instr(a.name_fold, ?) > 0")
-            params.append(folded)
+            params.append(word)
         for tag_id in dict.fromkeys(all_of):
             conditions.append(has_tag.format("= ?"))
             params.append(tag_id)

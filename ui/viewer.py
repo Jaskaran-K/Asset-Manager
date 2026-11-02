@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import math
-import subprocess
-import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -41,7 +40,6 @@ from PySide6.QtGui import (
     QGuiApplication,
     QIcon,
     QImage,
-    QImageReader,
     QMatrix4x4,
     QPainter,
     QPalette,
@@ -68,12 +66,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.full_image import LoadedImage, load_full_image
 from core.model_loader import Mesh3D, load_3d_model
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions
 from core.settings import get_model_view, set_model_view
 from core.scanner import AssetItem
 from core.tag_repository import Tag
-from ui import shortcuts
+from ui import file_actions, shortcuts
 from ui.duotone import set_icon
 from ui.pdf_viewer import PdfViewer
 from ui.tag_widgets import run_job, tag_chip_cloud
@@ -781,44 +780,6 @@ def _swatch_icon(color: QColor) -> QIcon:
 # ----------------------------------------------------------------------
 # Texture / Image Viewer (Interactive Zoom & Pan)
 # ----------------------------------------------------------------------
-def load_full_texture(file_path: Path) -> tuple[QPixmap, bool]:
-    """Load high-resolution texture safely without hitting 256MB memory limit.
-
-    Returns the pixmap and whether the image actually contains transparent pixels.
-    """
-    QImageReader.setAllocationLimit(2048)
-    try:
-        from PIL import Image
-        from core.thumbnail_manager import _safe_convert_pil_to_rgba, open_image
-
-        with open_image(file_path) as im:
-            # Convert to RGBA first – normalizes 16-bit / HDR images and
-            # avoids Pillow BILINEAR crash on I;16 mode.
-            rgba = _safe_convert_pil_to_rgba(im)
-
-            # If extremely large (e.g. > 8192px), downsample to prevent GPU VRAM exhaustion
-            if rgba.width > 8192 or rgba.height > 8192:
-                rgba.thumbnail((8192, 8192), Image.Resampling.BILINEAR)
-
-            # Every image is RGBA after conversion, so check the alpha values themselves
-            has_alpha = rgba.getchannel("A").getextrema()[0] < 255
-            qimg = QImage(
-                rgba.tobytes(), rgba.width, rgba.height, QImage.Format.Format_RGBA8888
-            ).copy()
-            return QPixmap.fromImage(qimg), has_alpha
-    except Exception:
-        pass
-
-    # Fallback to Qt QImageReader
-    reader = QImageReader(str(file_path))
-    reader.setAutoTransform(True)
-    reader.setAllocationLimit(2048)
-    qimg = reader.read()
-    if not qimg.isNull():
-        return QPixmap.fromImage(qimg), qimg.hasAlphaChannel()
-    return QPixmap(), False
-
-
 def _checker_brush(tile_size: int = 8) -> QBrush:
     """Repeating light grey / white checker (the usual transparency pattern)."""
     tile = QPixmap(tile_size * 2, tile_size * 2)
@@ -832,12 +793,16 @@ def _checker_brush(tile_size: int = 8) -> QBrush:
 
 
 class TextureViewerWidget(QWidget):
-    """Interactive texture and image viewer supporting zoom, pan, and alpha checkerboard."""
+    """Interactive texture and image viewer supporting zoom, pan, and alpha checkerboard.
+
+    It starts empty, saying the image is loading: the dialog decodes it on a worker thread
+    (core.full_image) and hands it over with set_image, or says why it can't with set_message."""
 
     def __init__(self, file_path: Path, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.file_path = file_path
-        self.pixmap, self.has_alpha = load_full_texture(file_path)
+        self.pixmap, self.has_alpha = QPixmap(), False
+        self.message = f"Loading {file_path.name}..."
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.zoom: float = 1.0
@@ -849,6 +814,19 @@ class TextureViewerWidget(QWidget):
 
         self.last_mouse_pos: Optional[QPoint] = None
         self._fit_to_screen_requested: bool = True
+
+    def set_image(self, pixmap: QPixmap, has_alpha: bool) -> None:
+        self.pixmap, self.has_alpha, self.message = pixmap, has_alpha, ""
+        self.show_checkerboard = has_alpha
+        self._fit_to_screen_requested = True
+        self.fit_to_screen()
+        if self.width() > 20 and self.height() > 20:
+            self._fit_to_screen_requested = False
+        self.update()
+
+    def set_message(self, text: str) -> None:
+        self.message = text
+        self.update()
 
     def fit_to_screen(self) -> None:
         """Scale image to fit within the viewport window."""
@@ -923,9 +901,9 @@ class TextureViewerWidget(QWidget):
         if self.pixmap.isNull():
             painter.setPen(QColor(160, 160, 170))
             painter.drawText(
-                QRectF(0, 0, w, h),
-                Qt.AlignmentFlag.AlignCenter,
-                f"Unable to load image format:\n{self.file_path.name}",
+                QRectF(20, 0, w - 40, h),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                self.message or f"Unable to load image format:\n{self.file_path.name}",
             )
             return
 
@@ -1003,7 +981,7 @@ class AssetViewerDialog(QDialog):
         edit_tags: opens the tagging dialog; returns the updated tags, or None if nothing changed.
         navigate: navigate(-1 / +1) returns the previous / next file, or None at either end;
         it enables the < > buttons and Page Up / Page Down. position: e.g. "3 of 120".
-        artbook: the main window (fill_artbook_menu, send_image_to_artbook): a PDF's pages can be
+        artbook: a ui.asset_menu.ArtbookSender (fill_artbook_menu, send_image_to_artbook): a PDF's pages can be
         sent to the Artbook (None: they can't). model_viewed(asset, mesh): a 3D model was loaded
         (the grid renders its picture from it; its arrays are let go after the call)."""
         super().__init__(parent)
@@ -1032,6 +1010,7 @@ class AssetViewerDialog(QDialog):
 
     def show_target(self, target: ViewerTarget) -> None:
         """Switch to another file, keeping the window (and full screen) as it is."""
+        self._cancel_load()
         if self.video_player is not None:
             self.video_player.set_fullscreen(False)
             self.video_player.stop()
@@ -1169,23 +1148,11 @@ class AssetViewerDialog(QDialog):
             layout.addWidget(self._build_model_toolbar(viewport))
             layout.addWidget(viewport, 1)
 
-        # Case B: Texture / Image Viewer
+        # Case B: Texture / Image Viewer (decoded on a worker thread: a big one takes seconds)
         elif self.asset.is_texture:
             tex_viewer = TextureViewerWidget(self.asset.path)
-
-            if not tex_viewer.pixmap.isNull():
-                w = tex_viewer.pixmap.width()
-                h = tex_viewer.pixmap.height()
-                gcd_val = math.gcd(w, h)
-                aspect = f"{w // gcd_val}:{h // gcd_val}" if gcd_val > 0 else "N/A"
-                metadata.update(
-                    {
-                        "Resolution": f"{w} × {h} px",
-                        "Aspect Ratio": aspect,
-                        "Color Depth": f"{tex_viewer.pixmap.depth()}-bit",
-                        "Transparency": "Yes" if tex_viewer.has_alpha else "No",
-                    }
-                )
+            self.tex_viewer = tex_viewer
+            self._load_image(tex_viewer)
 
             # Texture Control Toolbar
             t_toolbar = QWidget()
@@ -1207,6 +1174,7 @@ class AssetViewerDialog(QDialog):
             btn_checker = QPushButton("Checkerboard")
             btn_checker.setCheckable(True)
             btn_checker.setChecked(tex_viewer.show_checkerboard)
+            self._btn_checker = btn_checker  # (on once the image turns out to have transparency)
             btn_checker.setToolTip("Check Transparency")
             btn_checker.toggled.connect(tex_viewer.toggle_checkerboard)
             tb_layout.addWidget(btn_checker)
@@ -1244,10 +1212,51 @@ class AssetViewerDialog(QDialog):
     # ------------------------------------------------------------------
     # 3D models
     # ------------------------------------------------------------------
+    def _next_load(self) -> tuple[int, threading.Event]:
+        """Start a new background load: the previous one's result is dropped, and a model still
+        being read stops (it would hold GBs for minutes after the viewer moved on)."""
+        self._cancel_load()
+        self._load_stop = threading.Event()
+        return self._load_token, self._load_stop
+
+    def _cancel_load(self) -> None:
+        self._load_token = getattr(self, "_load_token", 0) + 1
+        stop = getattr(self, "_load_stop", None)
+        if stop is not None:
+            stop.set()
+
+    def _load_image(self, tex_viewer: TextureViewerWidget) -> None:
+        """Decode the image on a worker thread; show it (and its size) when it's ready."""
+        token, _stop = self._next_load()
+        path = self.asset.path
+
+        def done(loaded: Optional[LoadedImage]) -> None:
+            if loaded is None or token != self._load_token or not shiboken6.isValid(tex_viewer):
+                return  # (another file is shown now, or the viewer was closed)
+            tex_viewer.set_image(QPixmap.fromImage(loaded.image), loaded.has_alpha)
+            self._btn_checker.setChecked(loaded.has_alpha)
+            w, h = loaded.size
+            gcd_val = math.gcd(w, h)
+            self._metadata.update({
+                "Resolution": f"{w} × {h} px",
+                "Aspect Ratio": f"{w // gcd_val}:{h // gcd_val}" if gcd_val > 0 else "N/A",
+                "Color Depth": f"{tex_viewer.pixmap.depth()}-bit",
+                "Transparency": "Yes" if loaded.has_alpha else "No",
+            })
+            if (loaded.image.width(), loaded.image.height()) != (w, h):
+                self._metadata["Shown At"] = f"{loaded.image.width()} × {loaded.image.height()} px (big images are shown smaller)"
+            self._refresh_inspector()
+
+        def failed(message: str) -> None:
+            if token == self._load_token and shiboken6.isValid(tex_viewer):
+                tex_viewer.set_message(f"This image couldn't be opened.\n{message}")
+
+        run_job(lambda: load_full_image(path, still_wanted=lambda: token == self._load_token), done, failed)
+
     def _load_model(self, viewport: Model3DViewportWidget) -> None:
         """Read the model on a worker thread; show it (and its details) when it's ready."""
-        self._load_token = getattr(self, "_load_token", 0) + 1
-        token, path = self._load_token, self.asset.path
+        token, stop = self._next_load()
+        path = self.asset.path
 
         def done(mesh: Mesh3D) -> None:
             if token != self._load_token or not shiboken6.isValid(viewport):
@@ -1262,7 +1271,7 @@ class AssetViewerDialog(QDialog):
             if token == self._load_token and shiboken6.isValid(viewport):
                 viewport.set_status(f"This model couldn't be opened.\n{message}")
 
-        run_job(lambda: load_3d_model(path), done, failed)
+        run_job(lambda: load_3d_model(path, should_stop=stop.is_set), done, failed)
 
     def _refresh_inspector(self) -> None:
         sizes = self._splitter.sizes()
@@ -1527,6 +1536,7 @@ class AssetViewerDialog(QDialog):
 
     def done(self, result: int) -> None:
         """Stop playback and release the video file however the dialog closes."""
+        self._cancel_load()  # (a model still being read stops)
         if self.video_player is not None:
             self.video_player.stop()
         if self.pdf_viewer is not None:
@@ -1542,13 +1552,5 @@ class AssetViewerDialog(QDialog):
 
     def _reveal_in_explorer(self) -> None:
         """Reveal file in Windows File Explorer."""
-        try:
-            if sys.platform == "win32":
-                import os
-                norm_path = os.path.normpath(str(self.asset.path.resolve()))
-                subprocess.Popen(f'explorer /select,"{norm_path}"', shell=True)
-            else:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.asset.path.parent)))
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"Error revealing in explorer: {exc}")
+        file_actions.reveal(self.asset.path)
 

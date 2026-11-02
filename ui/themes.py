@@ -14,10 +14,12 @@ grid; the glass_* tokens color the frosted sidebar (ui.sidebar).
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from string import Template
+from typing import Optional
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QApplication, QToolTip
 
 from core.thumbnail_manager import set_thumbnail_card_style
@@ -78,8 +80,8 @@ THEMES: dict[str, dict[str, str]] = {
         "border": "#e5e7eb",
         "text": "#1f2937",
         "text_strong": "#111827",
-        "text_muted": "#6b7280",
-        "text_faint": "#9ca3af",
+        "text_muted": "#676d7b",  # (4.5:1 on every light background)
+        "text_faint": "#858b96",  # (3:1 on the grid, for headings and hints)
         "button": "#ffffff",
         "button_border": "#d1d5db",
         "button_hover": "#f3f4f6",
@@ -268,6 +270,7 @@ QLineEdit, QComboBox {
     color: $text;
 }
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border: 1px solid $accent_border; }
+QLineEdit:disabled, QComboBox:disabled { color: $text_faint; }
 /* Renaming in a list (ui.views.RowHighlightDelegate): as tall as the row, so no padding to clip the text */
 QLineEdit#inlineEditor { padding: 0px 6px; border-radius: 5px; border: 1px solid $accent_border; }
 QComboBox QAbstractItemView {
@@ -301,6 +304,11 @@ QRadioButton::indicator:checked {
         stop:0 $accent, stop:0.5 $accent, stop:0.56 $input_bg, stop:1 $input_bg);
 }
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { border-color: $border; background-color: transparent; }
+/* Group boxes (e.g. the PDF export's Pages / Save as): the app's rounded frame, the title above it */
+QGroupBox { border: 1px solid $border; border-radius: 8px; margin-top: 22px; padding: 2px 10px 6px 10px; }
+QGroupBox::title {
+    subcontrol-origin: margin; subcontrol-position: top left; left: 2px; padding: 0px 2px; color: $text_strong;
+}
 #guideText { background-color: $input_bg; border: 1px solid $input_border; border-radius: 8px; padding: 10px 14px; color: $text; }
 
 QMenu { background-color: $surface; border: 1px solid $border; padding: 4px; }
@@ -472,6 +480,20 @@ QDialog, QMainWindow #assetGrid, #welcomePanel, #emptyState, #artbookBoard {
 QMainWindow #assetGrid { background-attachment: fixed; }
 """)
 
+# Pictures the stylesheet needs (see style_images): a dropdown's arrow (Qt draws none once the
+# arrow's box is styled, and unstyled it's a square bevelled box poking out of the rounded field)
+# and the tick in a ticked checkbox.
+STYLE_IMAGES_QSS_TEMPLATE = Template("""
+QComboBox::drop-down {
+    subcontrol-origin: padding; subcontrol-position: center right; width: 22px; border: none; background: transparent;
+}
+QComboBox::down-arrow { image: url("$arrow"); width: 10px; height: 6px; }
+QComboBox::down-arrow:disabled { image: url("$arrow_disabled"); }
+QCheckBox::indicator:checked { image: url("$tick"); }
+QCheckBox::indicator:checked:disabled { background-color: $text_faint; border-color: $text_faint; }
+""")
+STYLE_IMAGES_VERSION = 1
+
 _current_theme_id = DEFAULT_THEME
 _current_texture_id = "none"
 
@@ -499,9 +521,60 @@ def stylesheet_from(tokens: dict[str, str], tile=None) -> str:
     """The stylesheet for a full set of tokens, with a background tile (a PNG path) or none.
     (Also what the Theme Studio previews with: ui.theme_studio.)"""
     sheet = APP_QSS_TEMPLATE.substitute(tokens)
+    images = style_images(tokens)
+    if images is not None:
+        sheet += STYLE_IMAGES_QSS_TEMPLATE.substitute(tokens, **{k: p.as_posix() for k, p in images.items()})
     if tile is not None:
         sheet += TEXTURE_QSS_TEMPLATE.substitute(tile=tile.as_posix())
     return sheet
+
+
+def style_images(tokens: dict[str, str]) -> Optional[dict[str, Path]]:
+    """The stylesheet's pictures in a theme's colours: drawn in code once, then reused (PNGs with
+    @2x copies for scaled screens, in the cache folder). None if they can't be saved: the
+    stylesheet then leaves those parts to Qt."""
+    from core import video_tools  # CACHE_ROOT can be redirected (tests)
+
+    folder = video_tools.CACHE_ROOT / "style"
+    pictures = {
+        "arrow": ("arrow", _solid(tokens["text_muted"], "#9ca3af")),
+        "arrow_disabled": ("arrow", _solid(tokens["text_faint"], "#6b7280")),
+        "tick": ("tick", QColor("#ffffff")),  # (on the accent, like the menu highlight's text)
+    }
+    paths = {}
+    try:
+        for key, (shape, color) in pictures.items():
+            name = f"{shape}-{color.name(QColor.NameFormat.HexArgb)[1:]}-v{STYLE_IMAGES_VERSION}"
+            path = folder / f"{name}.png"
+            for scale, target in ((1, path), (2, folder / f"{name}@2x.png")):
+                if not target.is_file():
+                    folder.mkdir(parents=True, exist_ok=True)
+                    if not _draw_style_image(shape, color, scale).save(str(target)):
+                        return None
+            paths[key] = path
+    except OSError:
+        return None
+    return paths
+
+
+def _draw_style_image(shape: str, color: QColor, scale: int) -> QImage:
+    """A dropdown arrow (10 x 6: a chevron) or a checkbox tick (14 x 14), round-capped strokes."""
+    width, height = (10, 6) if shape == "arrow" else (14, 14)
+    image = QImage(width * scale, height * scale, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(scale, scale)
+    pen = QPen(color, 1.6 if shape == "arrow" else 2.0)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    if shape == "arrow":
+        painter.drawPolyline([QPointF(1.2, 1.2), QPointF(5, 4.8), QPointF(8.8, 1.2)])
+    else:
+        painter.drawPolyline([QPointF(3.4, 7.4), QPointF(6, 10), QPointF(10.8, 4.4)])
+    painter.end()
+    return image
 
 
 def palette_from(tokens: dict[str, str]) -> QPalette:
@@ -592,6 +665,7 @@ def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str 
     app = app or QApplication.instance()
     if theme_id not in THEMES:
         theme_id = DEFAULT_THEME
+    previous = _current_theme_id
     _current_theme_id = theme_id
     if texture_id is not None:
         _current_texture_id = texture_id
@@ -604,3 +678,23 @@ def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str 
         QColor(t["thumb_card"]), QColor(t["thumb_border"]),
         QColor(t["thumb_badge"]), QColor(t["thumb_badge_text"]),
     )
+    from ui import title_bar
+
+    title_bar.restyle_all()
+    if theme_id != previous:
+        theme_signals().changed.emit()
+
+
+class ThemeSignals(QObject):
+    changed = Signal()  # the theme changed (e.g. thumbnails bake in its card colours)
+
+
+_signals: Optional[ThemeSignals] = None
+
+
+def theme_signals() -> ThemeSignals:
+    """Connect a window's method to theme_signals().changed (a method: disconnected when it's freed)."""
+    global _signals
+    if _signals is None:
+        _signals = ThemeSignals(QApplication.instance())
+    return _signals

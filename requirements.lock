@@ -1,0 +1,34 @@
+# The exact versions the tests pass with (Python 3.14, Windows): CI and release builds install
+# these (pip install -r requirements-dev.txt -c requirements.lock), so a release never ships a
+# version nobody tested. A pip constraints file: it pins what gets installed, adds nothing.
+#
+# To update: pip install --upgrade -r requirements-dev.txt pyinstaller, run the tests, then
+#   python -m pip freeze --exclude pip --exclude setuptools > requirements.lock
+# and put this header back. (requirements.txt keeps the ranges the app works with.)
+altgraph==0.17.5
+certifi==2026.7.22
+charset-normalizer==3.5.2
+colorama==0.4.6
+fbxloader==0.0.2
+idna==3.20
+iniconfig==2.3.1
+numpy==2.5.4
+OpenEXR==3.5.3
+packaging==26.3
+pefile==2024.8.26
+pillow==12.3.0
+pluggy==1.7.0
+Pygments==2.21.0
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9
+PyOpenGL==3.1.10
+PySide6==6.11.3
+PySide6_Addons==6.11.3
+PySide6_Essentials==6.11.3
+pytest==9.1.1
+pywin32-ctypes==0.2.3
+requests==2.34.2
+scipy==1.18.1
+shiboken6==6.11.3
+trimesh==5.1.1
+urllib3==2.8.0

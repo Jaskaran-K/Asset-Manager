@@ -84,7 +84,7 @@ def test_main_window_undo_redo(tmp_path, qapp):
     set_scan_folders([tmp_path / "lib"])
     window = open_window(qapp)
     select(window, "a.png")
-    asset_id = window._asset_ids[str((tmp_path / "lib" / "a.png").resolve())]
+    asset_id = window.library.ids[str((tmp_path / "lib" / "a.png").resolve())]
     press(window, Qt.Key.Key_4, "4")
     press(window, Qt.Key.Key_F, "f")
     assert window.repo.marks_by_asset([asset_id]) == {asset_id: Marks(True, 4)}
@@ -95,5 +95,5 @@ def test_main_window_undo_redo(tmp_path, qapp):
     window._on_undo()
     assert window.repo.marks_by_asset([asset_id]) == {} and not window.action_undo.isEnabled()
     window._on_redo()
-    assert window._asset_marks[asset_id] == Marks(False, 4)
+    assert window.library.marks[asset_id] == Marks(False, 4)
     window.close()

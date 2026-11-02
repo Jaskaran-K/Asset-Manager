@@ -1,64 +1,46 @@
 """Asset Manager - Windows desktop application using PySide6.
 
-Features:
-- Category and format navigation sidebar (3D Models, Textures, Documents)
-- Grid view area for asset thumbnails with multi-format support
-- Status bar for asset counts and selection details
-- Settings for library folders, scanned file types, sidebar categories, and appearance
-- Built-in lightweight interactive viewer for 3D objects, textures, PDFs, and videos
-- Tagging: automatic file type tags, custom tags (bulk tagging), and tag:name search
+The main window puts the parts together and runs what the user asks for. The parts:
+- ui.library_state     the files and their tags / favorites / details: scans, live updates, the snapshot
+- core.asset_filter    which files the grid shows (sidebar row, tag matches, search words and filters)
+- ui.library_sidebar   the sidebar's rows: categories, favorites, collections
+- ui.asset_grid        the virtual grid, its card painting
+- ui.asset_menu        the grid's right-click menu, and sending pictures to Artbook pages
+- ui.library_tools     the Tools menu: duplicates, tag export / import, backups
+- ui.tag_widgets       the search bar with tag chips, the tagging dialog
+- ui.viewer            the asset viewer (3D, images, PDFs, video); ui.artbook the Artbook
+- self_test            the release build's --self-test
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 import threading
-import time
 from functools import partial
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from PySide6.QtCore import (
     QItemSelection,
     QItemSelectionModel,
-    QObject,
-    QPointF,
-    QRectF,
     QSize,
     Qt,
-    QThread,
     QTimer,
     QUrl,
-    Signal,
 )
 from PySide6.QtGui import (
     QAction,
-    QBrush,
-    QColor,
     QDesktopServices,
-    QFont,
-    QGuiApplication,
-    QIcon,
-    QImage,
     QKeyEvent,
-    QPainter,
-    QPen,
     QPixmap,
-    QPolygonF,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
-    QLineEdit,
     QListView,
     QMainWindow,
     QMenu,
@@ -67,21 +49,16 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolButton,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from core import crash_log
-from core.library_snapshot import load_snapshot, save_snapshot
-from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
-from core.scanner import AssetItem, AssetScanner
+from core.asset_filter import filter_assets
+from core.library_snapshot import load_snapshot
+from core.scanner import AssetItem
 from core import artbook_store
 from core.settings import (
-    category_extensions,
-    get_artbook_page,
-    get_categories,
     get_pages_dir,
     get_background_texture,
     get_file_extensions,
@@ -94,9 +71,8 @@ from core.settings import (
     is_scan_folder,
     set_scan_folders,
 )
-from core.metadata import read_cost, read_details
 from core.search_query import ParsedQuery, parse_query
-from core.tag_repository import NO_MARKS, AssetMeta, Marks, Tag, TagChange, TagError, get_repository
+from core.tag_repository import NO_MARKS, Marks, SavedSearch, Tag, TagChange, get_repository, is_damage_error
 from core.thumbnail_manager import ThumbnailManager, prune_disk_cache
 from core.updater import cleanup_after_update
 from core.video_tools import apply_media_backend
@@ -104,77 +80,27 @@ from core.version import APP_NAME, APP_VERSION
 from ui.animations import install_popup_animations, set_motion_mode
 from ui.artbook import ArtbookPanel
 from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, GridView, rating_text
+from ui.asset_menu import RATING_SHORTCUTS, ArtbookSender, AssetMenuActions, build_asset_menu
 from ui.duotone import set_icon
-from ui.duplicates_dialog import DuplicatesDialog
+from ui import file_actions
 from ui.glass import set_frost
-from ui.icons import app_icon, category_icon, color_dot_icon, resolve_category_colors
+from ui.icons import app_icon
+from ui.library_sidebar import LibrarySidebar
+from ui.library_tools import LibraryTools
+from ui.library_state import LibraryState, LiveUpdate, ScanReport
 from ui import main_thread_gc, scroll_bar_watch
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SidebarHost
 from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, wait_for_background
-from ui.themes import apply_theme
-from ui.toolbar import CompactToolbar
+from ui.themes import apply_theme, theme_signals
+from ui import title_bar
+from ui.toolbar import CompactToolbar, PathField
 from ui.undo import UndoHistory, UndoStep
 from ui.view_modes import ViewModes, ViewSwitchButton
 from ui.viewer import AssetViewerDialog, ViewerTarget
 from ui.views import install_view_effects
-
-# ----------------------------------------------------------------------
-# Background Scanner Thread
-# ----------------------------------------------------------------------
-class ScanWorker(QObject):
-    """Background worker to scan folders without blocking the UI thread."""
-
-    finished = Signal(list, object)  # assets, info ({"ids", "tags", "relinked", "error", "dirs"})
-    failed = Signal(str)
-
-    def __init__(self, folders: list[Path], extensions: list[str], save_snapshot: bool = False):
-        super().__init__()
-        self.folders = folders
-        self.extensions = extensions
-        self.save_snapshot = save_snapshot  # library scans are remembered for an instant next launch
-
-    def run(self) -> None:
-        try:
-            scanner = AssetScanner(supported_extensions=self.extensions)
-            assets: list[AssetItem] = []
-            seen: set[Path] = set()
-            directories: set[Path] = set()  # every folder walked, for the library watcher
-            # Overlapping folders (e.g. a parent and its subfolder) must not duplicate files
-            for folder in self.folders:
-                for asset in scanner.scan(folder, recursive=True, directories=directories):
-                    if asset.path not in seen:
-                        seen.add(asset.path)
-                        assets.append(asset)
-            assets.sort(key=lambda a: a.name.lower())
-            info = self._sync_tags(assets)
-            info["dirs"] = directories
-            if self.save_snapshot and info["error"] is None:
-                save_snapshot(self.folders, self.extensions, assets, info["ids"])
-            self.finished.emit(assets, info)
-        except Exception as exc:  # pylint: disable=broad-except
-            self.failed.emit(str(exc))
-
-    @staticmethod
-    def _sync_tags(assets: list[AssetItem]) -> dict:
-        """Record the assets and their default file type tags (also backfills older libraries)."""
-        repo = get_repository()
-        try:
-            relinked = repo.relink_moved_assets(assets)  # before sync, so moved files keep their rows
-            ids = repo.sync_assets(assets)
-            repo.fill_missing_hashes()
-            asset_ids = list(ids.values())
-            return {
-                "ids": ids, "tags": repo.tags_by_asset(asset_ids), "marks": repo.marks_by_asset(asset_ids),
-                "relinked": relinked, "error": None,
-            }
-        except Exception as exc:  # pylint: disable=broad-except
-            # Browsing still works without the tag database
-            return {"ids": {}, "tags": {}, "marks": {}, "relinked": 0, "error": str(exc)}
-        finally:
-            repo.close_thread_connection()
-
+from self_test import run_self_test
 
 # ----------------------------------------------------------------------
 # Main Application Window
@@ -190,45 +116,42 @@ class MainWindow(QMainWindow):
 
         # None = library mode (all scan folders); otherwise a single folder opened via "Open Folder"
         self.browse_folder: Optional[Path] = None
-        self.all_assets: list[AssetItem] = []
 
         # Sidebar filter: ("all", None), ("exts", frozenset of extensions), ("uncategorized", None)
         self.filter_mode: str = "all"
         self.filter_value: Optional[frozenset[str]] = None
-        self.search_filter: str = ""
-        # Tagging: database ids by str(asset.path), each asset's tags, and the tag search result
-        # (None when no tag filter is active)
+        # The files and what's known about them (tags, favorites, details), kept up to date in the
+        # background: scans, live updates, the snapshot (ui.library_state)
         self.repo = get_repository()
-        self._asset_ids: dict[str, int] = {}
-        self._asset_tags: dict[int, list[Tag]] = {}
-        self._asset_marks: dict[int, Marks] = {}  # favorites / ratings (unmarked files are left out)
-        self._asset_meta: dict[int, AssetMeta] = {}  # resolution / duration / faces, read in the background
-        self._meta_generation = 0
-        self._meta_todo = 0
-        self._query = ParsedQuery()  # detail filters in the search text
+        self.library = LibraryState(self.repo, self)
+        self.library.scan_finished.connect(self._on_scan_finished)
+        self.library.scan_failed.connect(self._on_scan_failed)
+        self.library.snapshot_details.connect(self._on_snapshot_details)
+        self.library.live_update.connect(self._on_live_update)
+        self.library.live_update_failed.connect(self._on_live_update_failed)
+        self.library.details_loaded.connect(self._on_details_loaded)
+        self.library.files_edited.connect(self._on_files_edited)
+        # The search: name words and detail filters, and the tag search result (None: no tag filter)
+        self._query = ParsedQuery()
         self._tag_match_ids: Optional[set[int]] = None
         self._tag_search_generation = 0
         self.thumbnail_size: int = get_thumbnail_size()
-        # (tree item, display name, extensions) for every category row, for count updates
-        self._sidebar_rows: list[tuple[QTreeWidgetItem, str, frozenset[str]]] = []
-        self._categorized_exts: frozenset[str] = frozenset()
-
-        # Background scan worker thread
-        self.scan_thread: Optional[QThread] = None
-        self.scan_worker: Optional[ScanWorker] = None
 
         # Asynchronous thumbnail loader & in-memory cache
         self.thumbnail_manager = ThumbnailManager(self)
         self.thumbnail_manager.render_models = get_model_view()["thumbnails"]
         self.thumbnail_manager.thumbnail_loaded.connect(self._on_async_thumbnail_loaded)
+        self.thumbnail_manager.thumbnail_skipped.connect(self._on_thumbnail_skipped)
+        theme_signals().changed.connect(self._on_theme_changed)  # (also while previewing in Settings)
 
-        # Picks up files added / removed / edited in the scanned folders while the app is open
-        self.watcher = LibraryWatcher(self)
-        self.watcher.folders_changed.connect(self._on_folders_changed)
-        self._rescan_busy = False
-        self._queued_folders: list[Path] = []
-        self._scan_done_once = False  # a real scan has finished (snapshot data is outdated then)
         self.undo_history = UndoHistory(on_change=lambda: self._update_undo_actions())
+        # Tools menu: duplicates, tag export / import, backups (ui.library_tools)
+        self.library_tools = LibraryTools(self.repo, lambda: self.library.assets, self)
+        self._daily_backup_started = False  # (the automatic backup, once per session: after the first good scan)
+        self.library_tools.status.connect(self._show_status)
+        self.library_tools.tags_imported.connect(self._on_tags_imported)
+        self.library_tools.restored.connect(self._on_backup_restored)
+        self.library_tools.duplicates_removed.connect(self._on_duplicates_removed)
 
         self._init_ui()
         self._load_library()
@@ -252,7 +175,10 @@ class MainWindow(QMainWindow):
         asset_layout.setContentsMargins(0, 0, 0, 0)
         asset_layout.setSpacing(0)
         asset_layout.addWidget(self._build_control_bar())
-        sidebar_tree = self._build_sidebar()
+        # The sidebar's rows: categories, favorites, collections (ui.library_sidebar)
+        self.sidebar_tree = sidebar_tree = LibrarySidebar(self.repo)
+        sidebar_tree.row_chosen.connect(self._on_sidebar_row)
+        sidebar_tree.collection_chosen.connect(self._on_collection_chosen)
         self.grid_container = self._build_grid_view()
         self.sidebar = SidebarHost(sidebar_tree, self.grid_container)
         self.sidebar.watch(self.list_grid.viewport())
@@ -273,6 +199,8 @@ class MainWindow(QMainWindow):
         elif pages_dir:  # (a drive that isn't plugged in: the setting stays, for next time)
             pages_note = f"Your pages folder ({pages_dir}) isn't available, so the default one is used for now."
         self.artbook_panel = ArtbookPanel()
+        # Sends images from the grid, and PDF pages from the viewer, to Artbook pages
+        self.artbook_sender = ArtbookSender(self.artbook_panel, self._show_status)
         if pages_note:
             self.artbook_panel.board.show_message(pages_note)
         self.view_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -421,9 +349,8 @@ class MainWindow(QMainWindow):
         self.btn_tag.clicked.connect(lambda: self._open_tag_dialog())
         layout.addWidget(self.btn_tag)
 
-        # Path display field
-        self.txt_path = QLineEdit()
-        self.txt_path.setReadOnly(True)
+        # Path display field (a long path is shortened in the middle; the tooltip has all of it)
+        self.txt_path = PathField()
         self.txt_path.setPlaceholderText("No library folders. Add some in Settings > Folders, or click 'Open Folder'...")
         layout.addWidget(self.txt_path, 1)
 
@@ -468,24 +395,7 @@ class MainWindow(QMainWindow):
             self.addAction(action)
         menu.addSeparator()
         self._update_undo_actions()
-        entries = (
-            ("Find Duplicates...", "Find identical files in the files shown, and recycle extra copies", self._on_find_duplicates),
-            None,
-            ("Export Tags...", "Save your custom tags and the files they're on to a .json file", self._on_export_tags),
-            ("Import Tags...", "Add tags from an exported .json file (nothing is removed)", self._on_import_tags),
-            None,
-            ("Back Up Library Now", "Save a copy of the tag database (tags, favorites, ratings)", self._on_backup_now),
-            ("Restore Library Backup...", "Go back to an earlier copy of the tag database", self._on_restore_backup),
-            ("Open Backups Folder", "Backups are also made automatically before upgrades and updates", self._on_open_backups),
-        )
-        for entry in entries:
-            if entry is None:
-                menu.addSeparator()
-                continue
-            text, tip, handler = entry
-            action = menu.addAction(text)
-            action.setToolTip(tip)
-            action.triggered.connect(handler)
+        self.library_tools.add_to(menu)
         return menu
 
     def _update_undo_actions(self) -> None:
@@ -524,220 +434,39 @@ class MainWindow(QMainWindow):
 
         self.undo_history.push(UndoStep(text, undo, redo))
 
-    def _on_find_duplicates(self) -> None:
-        if not self.all_assets:
-            QMessageBox.information(self, "Find Duplicates", "There are no files to compare. Scan a folder first.")
-            return
-        dialog = DuplicatesDialog(self.repo, self.all_assets, self)
-        dialog.exec()
-        dialog.deleteLater()
-        if dialog.removed:
-            self.status_label.setText(f"Moved {dialog.removed} duplicate file{'s' if dialog.removed != 1 else ''} to the Recycle Bin.")
-            # The library watcher drops them from the grid; rescan if folders aren't all watched
-            if not self.watcher.is_complete():
-                self._rescan_current_folder()
+    def _show_status(self, text: str) -> None:
+        self.status_label.setText(text)
 
-    def _on_export_tags(self) -> None:
-        default = Path.home() / "Documents" / "asset-manager-tags.json"
-        target, _ = QFileDialog.getSaveFileName(self, "Export Tags", str(default), "Tag export (*.json)")
-        if not target:
-            return
-        try:
-            files = self.repo.export_tags(target)
-        except OSError as exc:
-            QMessageBox.warning(self, "Export Failed", f"The file couldn't be saved:\n{exc}")
-            return
-        self.status_label.setText(f"Exported tags for {files} file{'s' if files != 1 else ''} to {target}")
+    def _on_tags_imported(self) -> None:
+        self._after_tags_changed()  # (tags, and the collections)
+        self._reload_marks()  # (the export's favorites and ratings)
 
-    def _on_import_tags(self) -> None:
-        source, _ = QFileDialog.getOpenFileName(self, "Import Tags", str(Path.home() / "Documents"), "Tag export (*.json)")
-        if not source:
-            return
-        try:
-            result = self.repo.import_tags(source)
-        except TagError as exc:
-            QMessageBox.warning(self, "Import Failed", str(exc))
-            return
-        self._after_tags_changed()
-        self._rebuild_collections()
-        message = (
-            f"Tagged {result['files']} file{'s' if result['files'] != 1 else ''}; "
-            f"created {result['tags_created']} new tag{'s' if result['tags_created'] != 1 else ''}."
-        )
-        if result["skipped_tags"]:
-            message += f"\n\n{result['skipped_tags']} tag(s) were skipped: a file type tag now has that name."
-        QMessageBox.information(self, "Tags Imported", message)
-
-    def _on_backup_now(self) -> None:
-        try:
-            backup = self.repo.backup_database("manual")
-        except Exception as exc:  # pylint: disable=broad-except
-            QMessageBox.warning(self, "Backup Failed", str(exc))
-            return
-        self.status_label.setText(f"Library backed up to {backup}")
-
-    def _on_restore_backup(self) -> None:
-        folder = self.repo.backup_dir()
-        source, _ = QFileDialog.getOpenFileName(self, "Restore Library Backup", str(folder), "Library backup (*.db)")
-        if not source:
-            return
-        answer = QMessageBox.question(
-            self, "Restore Backup",
-            f"Replace your current tags, favorites and ratings with the backup\n{Path(source).name}?\n\n"
-            "A backup of the current state is made first, so this can be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            self.repo.restore_database(source)
-        except TagError as exc:
-            QMessageBox.warning(self, "Restore Failed", str(exc))
-            return
-        self._rebuild_collections()
+    def _on_backup_restored(self) -> None:
+        self.sidebar_tree.reload_collections()
         self.undo_history.clear()  # undo steps refer to the replaced data
         self._rescan_current_folder()  # file ids may differ in the backup: resync everything
-        self.status_label.setText("Backup restored. Rescanning the library...")
 
-    def _on_open_backups(self) -> None:
-        folder = self.repo.backup_dir()
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
-
-    def _build_sidebar(self) -> QTreeWidget:
-        """Build the category navigation sidebar; rows come from the Categories settings."""
-        tree = QTreeWidget()
-        tree.setObjectName("sidebarTree")
-        tree.setHeaderHidden(True)
-        tree.setIconSize(QSize(16, 16))
-        tree.setIndentation(16)
-        tree.itemClicked.connect(self._on_sidebar_item_clicked)
-        tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        tree.customContextMenuRequested.connect(self._show_sidebar_menu)
-        self.sidebar_tree = tree
-        self._rebuild_sidebar()
-        return tree
-
-    def _rebuild_collections(self) -> None:
-        root = self.item_collections
-        root.takeChildren()
-        try:
-            searches = self.repo.list_saved_searches()
-        except Exception:  # pylint: disable=broad-except
-            searches = []  # tag database unavailable: browsing still works
-        for saved in searches:
-            item = QTreeWidgetItem(root, [saved.name])
-            item.setIcon(0, color_dot_icon("#fde68a"))
-            item.setData(0, Qt.ItemDataRole.UserRole, ("collection", saved))
-            item.setToolTip(0, f"{saved.query}\nRight-click to rename or delete")
-        root.setHidden(not searches)
+    def _on_duplicates_removed(self) -> None:
+        # The library watcher drops them from the grid; rescan if folders aren't all watched
+        if not self.library.watcher.is_complete():
+            self._rescan_current_folder()
 
     def _on_save_search(self) -> None:
         query = self.search_bar.query_text()
         if not query:
             return
-        name, ok = QInputDialog.getText(self, "Save Collection", f"Name for this search:\n{query}")
-        while ok:
-            try:
-                self.repo.save_search(name, query)
-            except TagError as exc:
-                QMessageBox.warning(self, "Can't Save Collection", str(exc))
-                name, ok = QInputDialog.getText(self, "Save Collection", f"Name for this search:\n{query}", text=name)
-                continue
-            self._rebuild_collections()
-            self.status_label.setText(f'Saved the collection "{" ".join(name.split())}".')
-            return
-
-    def _show_sidebar_menu(self, pos) -> None:
-        item = self.sidebar_tree.itemAt(pos)
-        data = item.data(0, Qt.ItemDataRole.UserRole) if item else None
-        if not data or data[0] != "collection":
-            return
-        saved = data[1]
-        menu = QMenu(self)
-        action_rename = menu.addAction("Rename...")
-        action_delete = menu.addAction("Delete")
-        chosen = menu.exec(self.sidebar_tree.viewport().mapToGlobal(pos))
-        if chosen is action_rename:
-            name, ok = QInputDialog.getText(self, "Rename Collection", "Name:", text=saved.name)
-            if ok:
-                try:
-                    self.repo.rename_saved_search(saved.id, name)
-                except TagError as exc:
-                    QMessageBox.warning(self, "Can't Rename Collection", str(exc))
-                self._rebuild_collections()
-        elif chosen is action_delete:
-            self.repo.delete_saved_search(saved.id)
-            self._rebuild_collections()
+        name = self.sidebar_tree.save_collection(query)
+        if name:
+            self.status_label.setText(f'Saved the collection "{name}".')
 
     def _rebuild_sidebar(self) -> None:
-        """(Re)create sidebar rows from the saved categories and reset the filter to All Assets."""
-        tree = self.sidebar_tree
-        tree.clear()
-        self._sidebar_rows.clear()
-
-        self.item_all = QTreeWidgetItem(tree, ["All Assets (0)"])
-        self.item_all.setIcon(0, color_dot_icon("#93c5fd"))
-        self.item_all.setData(0, Qt.ItemDataRole.UserRole, ("all", None))
-
-        self.item_favorites = QTreeWidgetItem(tree, ["Favorites (0)"])
-        self.item_favorites.setIcon(0, color_dot_icon("#fbbf24"))
-        self.item_favorites.setData(0, Qt.ItemDataRole.UserRole, ("favorites", None))
-        self.item_favorites.setToolTip(0, "Files you starred: select files and press F")
-
-        categorized: set[str] = set()
-        for main in resolve_category_colors(get_categories()):
-            main_exts = frozenset(category_extensions(main))
-            categorized |= main_exts
-            main_item = QTreeWidgetItem(tree, [main["name"]])
-            main_item.setIcon(0, category_icon(main["color"], main.get("icon")))
-            main_item.setData(0, Qt.ItemDataRole.UserRole, ("exts", main_exts))
-            main_item.setToolTip(0, ", ".join(sorted(main_exts)) or "No file types assigned")
-            main_item.setExpanded(True)
-            self._sidebar_rows.append((main_item, main["name"], main_exts))
-
-            for sub in main["subcategories"]:
-                sub_exts = frozenset(sub["extensions"])
-                sub_item = QTreeWidgetItem(main_item, [sub["name"]])
-                sub_item.setIcon(0, category_icon(sub["color"], sub.get("icon")))
-                sub_item.setData(0, Qt.ItemDataRole.UserRole, ("exts", sub_exts))
-                sub_item.setToolTip(0, ", ".join(sorted(sub_exts)) or "No file types assigned")
-                self._sidebar_rows.append((sub_item, sub["name"], sub_exts))
-
-        self._categorized_exts = frozenset(categorized)
-
-        # Catch-all for scanned file types that aren't assigned to any category
-        self.item_uncategorized = QTreeWidgetItem(tree, ["Uncategorized (0)"])
-        self.item_uncategorized.setIcon(0, color_dot_icon("#6b7280"))
-        self.item_uncategorized.setData(0, Qt.ItemDataRole.UserRole, ("uncategorized", None))
-        self.item_uncategorized.setHidden(True)
-
-        # Saved searches
-        self.item_collections = QTreeWidgetItem(tree, ["Collections"])
-        self.item_collections.setIcon(0, color_dot_icon("#fbbf24"))
-        self.item_collections.setToolTip(0, "Saved searches: search for something, then click the star in the search box")
-        self.item_collections.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.item_collections.setExpanded(True)
-        self._rebuild_collections()
-
-        tree.setCurrentItem(self.item_all)
+        """Recreate the sidebar rows (the categories changed) and show All Assets."""
+        self.sidebar_tree.rebuild()
         self.filter_mode, self.filter_value = "all", None
         self._update_sidebar_counts()
 
     def _update_sidebar_counts(self) -> None:
-        """Refresh the asset counts shown on each sidebar row."""
-        ext_counts: dict[str, int] = {}
-        for asset in self.all_assets:
-            ext_counts[asset.extension] = ext_counts.get(asset.extension, 0) + 1
-
-        self.item_all.setText(0, f"All Assets ({len(self.all_assets)})")
-        self.item_favorites.setText(0, f"Favorites ({sum(1 for a in self.all_assets if self._marks_of(a).favorite)})")
-        for item, name, exts in self._sidebar_rows:
-            item.setText(0, f"{name} ({sum(ext_counts.get(e, 0) for e in exts)})")
-
-        uncategorized = sum(c for e, c in ext_counts.items() if e not in self._categorized_exts)
-        self.item_uncategorized.setText(0, f"Uncategorized ({uncategorized})")
-        self.item_uncategorized.setHidden(uncategorized == 0)
+        self.sidebar_tree.update_counts(self.library.assets, lambda asset: self._marks_of(asset).favorite)
 
     def _build_grid_view(self) -> QWidget:
         """Build thumbnail grid widget and empty placeholder state."""
@@ -879,14 +608,14 @@ class MainWindow(QMainWindow):
         self._update_library_controls()
         folders = [f for f in get_scan_folders() if f.is_dir()]
         if folders:
-            if not self.all_assets:
+            if not self.library.assets:
                 # First load: show last session's library right away while the real scan runs
                 snapshot = load_snapshot(folders, get_file_extensions())
                 if snapshot is not None:
                     self._show_snapshot(*snapshot)
             self._start_scan(folders, save_snapshot=True)
         else:
-            self.all_assets = []
+            self.library.clear()
             self._update_sidebar_counts()
             self._refresh_grid_display()
             self.status_label.setText("No library folders set. Add folders in Settings > Folders.")
@@ -897,7 +626,7 @@ class MainWindow(QMainWindow):
         toggle = self.action_library_toggle
         if in_library_mode:
             folders = get_scan_folders()
-            self.txt_path.setText("; ".join(str(f) for f in folders))
+            self.txt_path.set_path_text("; ".join(str(f) for f in folders))
             self.txt_path.setToolTip("\n".join(str(f) for f in folders))
             self.btn_library.setToolTip(
                 "Showing your library: every folder in Settings > Folders. Click to scan it again.\n"
@@ -908,7 +637,7 @@ class MainWindow(QMainWindow):
             toggle.setEnabled(False)
             set_icon(toggle, "star")
         else:
-            self.txt_path.setText(str(self.browse_folder))
+            self.txt_path.set_path_text(str(self.browse_folder))
             self.txt_path.setToolTip(str(self.browse_folder))
             toggle.setEnabled(True)
             if is_scan_folder(self.browse_folder):
@@ -948,6 +677,8 @@ class MainWindow(QMainWindow):
         """Open the settings dialog and apply any saved changes."""
         dialog = SettingsDialog(self, artbook=self.artbook_panel)
         accepted = dialog.exec() == SettingsDialog.DialogCode.Accepted
+        # Free it (a child of the window): each one kept would be restyled on every theme change
+        dialog.deleteLater()  # (it can't close while moving pages or updating, so nothing is left running)
         if dialog.page_tags.changed:
             self._after_tags_changed()
         if not accepted:
@@ -960,8 +691,8 @@ class MainWindow(QMainWindow):
         if dialog.model_thumbnails_changed:
             self.thumbnail_manager.render_models = get_model_view()["thumbnails"]
 
-        if dialog.theme_changed or dialog.thumbnail_size_changed or dialog.model_thumbnails_changed:
-            # Thumbnails bake in the card colors and size, so regenerate them
+        if dialog.thumbnail_size_changed or dialog.model_thumbnails_changed:
+            # Thumbnails bake in the size, so regenerate them (a new theme already did: _on_theme_changed)
             self.thumbnail_manager.clear_cache()
             self._refresh_grid_display()
 
@@ -999,21 +730,11 @@ class MainWindow(QMainWindow):
             self._load_library()
 
     def _show_snapshot(self, assets: list[AssetItem], ids: dict[str, int]) -> None:
-        self.all_assets, self._asset_ids = assets, ids
+        self.library.show_snapshot(assets, ids)
         self._update_sidebar_counts()
         self._refresh_grid_display()
-        asset_ids = list(ids.values())
-        run_in_background(
-            self.repo,
-            lambda repo: (repo.tags_by_asset(asset_ids), repo.marks_by_asset(asset_ids)),
-            self._on_snapshot_details,
-            self._ignore_result,
-        )
 
-    def _on_snapshot_details(self, result) -> None:
-        if self._scan_done_once:
-            return  # the real scan already delivered newer data
-        self._asset_tags, self._asset_marks = result
+    def _on_snapshot_details(self) -> None:
         self._update_sidebar_counts()
         self._reload_tag_suggestions()
         self.list_grid.viewport().update()
@@ -1026,43 +747,16 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Scanning {len(folders)} library folders...")
         self.btn_open_folder.setEnabled(False)
         self.btn_refresh.setEnabled(False)
+        self.library.start_scan(folders, get_file_extensions(), save_snapshot=save_snapshot)
 
-        if self.scan_thread and self.scan_thread.isRunning():
-            self.scan_thread.quit()
-            self.scan_thread.wait()
-
-        self.scan_thread = QThread(self)
-        self.scan_worker = ScanWorker(folders, get_file_extensions(), save_snapshot=save_snapshot)
-        self.scan_worker.moveToThread(self.scan_thread)
-
-        self.scan_thread.started.connect(self.scan_worker.run)
-        self.scan_worker.finished.connect(self._on_scan_finished)
-        self.scan_worker.failed.connect(self._on_scan_failed)
-        self.scan_worker.finished.connect(self.scan_thread.quit)
-        self.scan_worker.failed.connect(self.scan_thread.quit)
-
-        self.scan_thread.start()
-
-    def _on_scan_finished(self, assets: list[AssetItem], tag_info: dict) -> None:
-        """Handle scan results, update categories, and populate grid."""
+    def _on_scan_finished(self, report: ScanReport) -> None:
+        """Show a finished scan: sidebar counts, the status line, and the grid."""
         self.btn_open_folder.setEnabled(True)
         self.btn_refresh.setEnabled(True)
-        self._scan_done_once = True
-        before = {str(a.path): a.modified_timestamp for a in self.all_assets}
-        after = {str(a.path): a.modified_timestamp for a in assets}
-        same_files = before.keys() == after.keys()
-        unchanged = before == after
-        for path_str, mtime in after.items():
-            if before.get(path_str, mtime) != mtime:
-                self.thumbnail_manager.invalidate(path_str)  # edited since it was last drawn
-        self.all_assets = assets
-        self._asset_ids = tag_info["ids"]
-        self._asset_tags = tag_info["tags"]
-        self._asset_marks = tag_info["marks"]
-        self.watcher.watch(tag_info["dirs"])
         self._update_sidebar_counts()
         self._reload_tag_suggestions()
 
+        assets = report.assets
         models = sum(1 for a in assets if a.is_3d_model)
         textures = sum(1 for a in assets if a.is_texture)
         docs = sum(1 for a in assets if a.is_document)
@@ -1072,23 +766,28 @@ class MainWindow(QMainWindow):
         if other:
             summary += f", {other} other"
         self.status_label.setText(f"Loaded {len(assets)} assets ({summary})")
-        if tag_info["relinked"]:
-            moved = tag_info["relinked"]
+        if report.relinked:
+            moved = report.relinked
             self.status_label.setText(
                 f"Loaded {len(assets)} assets. Kept the tags of {moved} moved or renamed file{'s' if moved != 1 else ''}."
             )
-        if tag_info["error"]:
-            self.status_label.setText(f"Loaded {len(assets)} assets; tags unavailable: {tag_info['error']}")
+        if report.error:
+            self.status_label.setText(f"Loaded {len(assets)} assets; tags unavailable: {report.error}")
+            if is_damage_error(report.error):
+                # (once the window is up: a dialog from inside this signal would block the scan's hand-over)
+                QTimer.singleShot(0, lambda error=report.error: self.library_tools.offer_restore(error))
+        elif not self._daily_backup_started:
+            self._daily_backup_started = True
+            self.library_tools.back_up_daily()  # (after the first scan: it doesn't compete with startup)
         self.status_info.setText(f"{len(assets)} assets")
 
         if self.search_bar.has_tag_filters():
             self._run_tag_search()  # asset ids may have changed
-        elif unchanged and before:
+        elif report.unchanged and report.had_files:
             # Nothing changed since the snapshot (or the last scan): keep the grid as it is
             self.list_grid.viewport().update()
         else:
-            self._refresh_grid_display(keep_view=same_files or bool(before.keys() & after.keys()))
-        self._start_meta_indexing()
+            self._refresh_grid_display(keep_view=report.same_files or report.overlap)
 
     def _on_scan_failed(self, error_msg: str) -> None:
         """Handle scanning failure."""
@@ -1096,94 +795,50 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setEnabled(True)
         self.status_label.setText(f"Scan failed: {error_msg}")
 
-    # ------------------------------------------------------------------
-    # Live updates (LibraryWatcher)
-    # ------------------------------------------------------------------
-    def _on_folders_changed(self, folders: list[Path]) -> None:
-        """Rescan just the folders whose contents changed."""
-        if self.scan_thread is not None and self.scan_thread.isRunning():
-            return  # the full scan in progress picks the change up
-        if self._rescan_busy:
-            self._queued_folders.extend(folders)
-            return
-        self._rescan_busy = True
-        watched, extensions = self.watcher.watched_keys(), get_file_extensions()
-        run_in_background(
-            self.repo,
-            lambda repo: rescan_folders(folders, extensions, watched, repo),
-            self._on_folders_rescanned,
-            self._on_folders_rescan_failed,
-        )
+    def _on_files_edited(self, paths: list[str]) -> None:
+        for path_str in paths:
+            self.thumbnail_manager.invalidate(path_str)  # edited since it was last drawn
 
-    def _on_folders_rescanned(self, result: FolderRescan) -> None:
-        self._rescan_busy = False
-        for tree in result.removed_trees:
-            self.watcher.remove_tree(tree)
-        self.watcher.add_directories(result.new_dirs)
+    def _on_live_update(self, update: LiveUpdate) -> None:
+        """Files were added, removed or edited while the app is open."""
+        self._update_sidebar_counts()
+        self._reload_tag_suggestions()
+        if self.search_bar.has_tag_filters():
+            self._run_tag_search()
+        else:
+            self._refresh_grid_display(keep_view=True)
+        parts = [f"{update.added} added" if update.added else "", f"{update.removed} removed" if update.removed else ""]
+        summary = ", ".join(p for p in parts if p) or "files changed"
+        self.status_label.setText(f"Library updated: {summary}.")
+        self.status_info.setText(f"{len(self.library.assets)} assets")
 
-        before = {str(a.path): a.modified_timestamp for a in self.all_assets}
-        self.all_assets = result.merge_into(self.all_assets)
-        after = {str(a.path) for a in self.all_assets}
-        for asset in result.assets:
-            old_mtime = before.get(str(asset.path))
-            if old_mtime is not None and old_mtime != asset.modified_timestamp:
-                self.thumbnail_manager.invalidate(str(asset.path))  # edited: redraw its thumbnail
-        self._asset_ids.update(result.ids)
-        self._asset_tags.update(result.tags)
-        self._asset_marks.update(result.marks)
-
-        added, removed = len(after - before.keys()), len(before.keys() - after)
-        changed = added or removed or any(
-            before.get(str(a.path)) != a.modified_timestamp for a in result.assets
-        )
-        if changed:
-            self._update_sidebar_counts()
-            self._reload_tag_suggestions()
-            if self.search_bar.has_tag_filters():
-                self._run_tag_search()
-            else:
-                self._refresh_grid_display(keep_view=True)
-            parts = [f"{added} added" if added else "", f"{removed} removed" if removed else ""]
-            summary = ", ".join(p for p in parts if p) or "files changed"
-            self.status_label.setText(f"Library updated: {summary}.")
-            self.status_info.setText(f"{len(self.all_assets)} assets")
-            self._start_meta_indexing()
-
-        if self._queued_folders:
-            folders, self._queued_folders = self._queued_folders, []
-            self._on_folders_changed(folders)
-
-    def _on_folders_rescan_failed(self, error: str) -> None:
-        self._rescan_busy = False
-        self._queued_folders.clear()
+    def _on_live_update_failed(self, error: str) -> None:
         self.status_label.setText(f"Couldn't update the library: {error}. Click Refresh to rescan.")
 
     # ------------------------------------------------------------------
     # Filtering & Grid Rendering
     # ------------------------------------------------------------------
-    def _on_sidebar_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        """Filter assets when clicking a sidebar category or group."""
-        data = item.data(0, Qt.ItemDataRole.UserRole)
-        if data and data[0] == "collection":
-            # A saved search: show it across the whole library
-            self.filter_mode, self.filter_value = "all", None
-            self.search_bar.set_query_text(data[1].query)
-        elif data:
-            self.filter_mode, self.filter_value = data
-            self._refresh_grid_display()
-        if data:
-            self.sidebar.close_if_floating()
+    def _on_sidebar_row(self, mode: str, extensions: Optional[frozenset[str]]) -> None:
+        """A sidebar category or group was clicked: show its files."""
+        self.filter_mode, self.filter_value = mode, extensions
+        self._refresh_grid_display()
+        self.sidebar.close_if_floating()
+
+    def _on_collection_chosen(self, saved: SavedSearch) -> None:
+        """A saved search: show it across the whole library."""
+        self.filter_mode, self.filter_value = "all", None
+        self.search_bar.set_query_text(saved.query)
+        self.sidebar.close_if_floating()
 
     def _on_search_changed(self) -> None:
         """Filter the grid as the search text or tag chips change."""
         self._query = parse_query(self.search_bar.text())
-        self.search_filter = self._query.text.casefold()
         if self._query.errors:
             self.status_label.setText(
                 f"Didn't understand {', '.join(self._query.errors)}. Hover over the search box for examples."
             )
-        elif self._query.uses_meta and self._meta_todo:
-            self.status_label.setText(f"Still reading file details ({self._meta_todo} left); results will fill in.")
+        elif self._query.uses_meta and self.library.meta_todo:
+            self.status_label.setText(f"Still reading file details ({self.library.meta_todo} left); results will fill in.")
         if self.search_bar.has_tag_filters():
             self._run_tag_search()
         else:
@@ -1194,10 +849,10 @@ class MainWindow(QMainWindow):
         """Query the tag database off the UI thread; only the newest query's result is used."""
         self._tag_search_generation += 1
         generation = self._tag_search_generation
-        query, text = self.search_bar.tag_query(), self.search_filter
+        query = self.search_bar.tag_query()  # (file names are matched with the other filters)
         run_in_background(
             self.repo,
-            lambda repo: repo.find_assets(query.all_of, query.any_of, query.none_of, text=text),
+            lambda repo: repo.find_assets(query.all_of, query.any_of, query.none_of),
             partial(self._on_tag_search_done, generation),
             lambda error: self.status_label.setText(f"Tag search failed: {error}"),
         )
@@ -1209,88 +864,17 @@ class MainWindow(QMainWindow):
         self._refresh_grid_display()
 
     def _get_filtered_assets(self) -> list[AssetItem]:
-        """Compute filtered assets based on active category and search filter."""
-        filtered = self.all_assets
+        """The files to show: the sidebar row, tag matches (found in SQL by _run_tag_search), name words
+        and detail filters (core.asset_filter)."""
+        return filter_assets(
+            self.library.assets, mode=self.filter_mode, extensions=self.filter_value, categorized=self.sidebar_tree.categorized,
+            tag_matches=self._tag_match_ids, query=self._query,
+            ids=self.library.ids, marks=self.library.marks, meta=self.library.meta,
+        )
 
-        # Apply sidebar category filter
-        if self.filter_mode == "exts" and self.filter_value is not None:
-            filtered = [a for a in filtered if a.extension in self.filter_value]
-        elif self.filter_mode == "uncategorized":
-            filtered = [a for a in filtered if a.extension not in self._categorized_exts]
-        elif self.filter_mode == "favorites":
-            filtered = [a for a in filtered if self._marks_of(a).favorite]
-
-        # Apply tag filter (matched in SQL by _run_tag_search; all tags must match)
-        if self._tag_match_ids is not None:
-            matches, ids = self._tag_match_ids, self._asset_ids
-            filtered = [a for a in filtered if ids.get(str(a.path)) in matches]
-
-        # Apply search filter
-        if self.search_filter:
-            filtered = [a for a in filtered if self.search_filter in a.name.casefold()]
-
-        # Detail filters (is:fav, rating:>=3, res:>=2048, ...)
-        if self._query.filters:
-            filtered = [a for a in filtered if self._query.matches(a, self._marks_of(a), self._meta_of(a))]
-
-        return filtered
-
-    def _meta_of(self, asset: AssetItem) -> Optional[AssetMeta]:
-        return self._asset_meta.get(self._asset_ids.get(str(asset.path)))
-
-    # ------------------------------------------------------------------
-    # File details for searching (core.metadata), read in the background
-    # ------------------------------------------------------------------
-    def _start_meta_indexing(self) -> None:
-        self._meta_generation += 1
-        generation, ids = self._meta_generation, list(self._asset_ids.values())
-
-        def load(repo):
-            todo = repo.assets_needing_meta(ids)
-            todo = [row for row in todo if read_cost(row[2]) < 3]
-            todo.sort(key=lambda row: read_cost(row[2]))  # images first: they take milliseconds
-            return repo.meta_by_asset(ids), todo
-
-        run_in_background(self.repo, load, partial(self._on_meta_loaded, generation), self._ignore_result, slow=True)
-
-    def _on_meta_loaded(self, generation: int, result) -> None:
-        if generation != self._meta_generation:
-            return
-        self._asset_meta, todo = result
-        self._meta_todo = len(todo)
+    def _on_details_loaded(self) -> None:
         if self._query.uses_meta:
             self._refresh_grid_display(keep_view=True)
-        self._read_meta_batch(generation, todo)
-
-    def _read_meta_batch(self, generation: int, todo: list) -> None:
-        if not todo or generation != self._meta_generation:
-            self._meta_todo = 0
-            return
-
-        def read(repo):
-            details, deadline, done = {}, time.monotonic() + 0.5, 0
-            for asset_id, path, ext, key in todo:  # stop after ~0.5 s so a new scan can take over quickly
-                done += 1
-                meta = read_details(path, ext)
-                if meta is not None:
-                    details[asset_id] = (meta, key)
-                if time.monotonic() > deadline:
-                    break
-            if details:
-                repo.store_meta(details)
-            return details, todo[done:]
-
-        def finished(result) -> None:
-            details, rest = result
-            if generation != self._meta_generation:
-                return
-            self._asset_meta.update({asset_id: meta for asset_id, (meta, _key) in details.items()})
-            self._meta_todo = len(rest)
-            if self._query.uses_meta and details:
-                self._refresh_grid_display(keep_view=True)
-            self._read_meta_batch(generation, rest)
-
-        run_in_background(self.repo, read, finished, self._ignore_result, slow=True)
 
     def _refresh_grid_display(self, keep_view: bool = False) -> None:
         """Show the currently filtered assets in the grid.
@@ -1322,12 +906,12 @@ class MainWindow(QMainWindow):
         filtered = self._get_filtered_assets()
         self.grid_model.set_assets(filtered)
 
-        first_run = not self.all_assets and self.browse_folder is None and not get_scan_folders()
+        first_run = not self.library.assets and self.browse_folder is None and not get_scan_folders()
         self.welcome_panel.setVisible(first_run)
         if not filtered:
             self.list_grid.hide()
             self.lbl_empty_state.setVisible(not first_run)
-            if not self.all_assets:
+            if not self.library.assets:
                 self.lbl_empty_state.setText(
                     "No assets found.\nAdd library folders in Settings > Folders, or click 'Open Folder'."
                 )
@@ -1342,17 +926,17 @@ class MainWindow(QMainWindow):
 
         self.lbl_empty_state.hide()
         self.list_grid.show()
-        self.status_info.setText(f"{len(filtered)} of {len(self.all_assets)} assets shown")
+        self.status_info.setText(f"{len(filtered)} of {len(self.library.assets)} assets shown")
 
     def _marks_of(self, asset: AssetItem) -> Marks:
-        return self._asset_marks.get(self._asset_ids.get(str(asset.path)), NO_MARKS)
+        return self.library.marks_of(asset)
 
     def _marks_for_index(self, index) -> Marks:
         asset = index.data(ASSET_ROLE)
         return self._marks_of(asset) if asset is not None else NO_MARKS
 
     def _asset_tooltip(self, asset: AssetItem) -> str:
-        tags = self._asset_tags.get(self._asset_ids.get(str(asset.path)), [])
+        tags = self.library.tags.get(self.library.ids.get(str(asset.path)), [])
         tag_line = f"<br>Tags: {', '.join(t.name for t in tags)}" if tags else ""
         marks = self._marks_of(asset)
         if marks.favorite or marks.rating:
@@ -1370,6 +954,17 @@ class MainWindow(QMainWindow):
     def _on_async_thumbnail_loaded(self, path_str: str, pixmap: QPixmap) -> None:
         """Smoothly update thumbnail icon when background decoding completes."""
         self.grid_model.thumbnail_changed(path_str)
+
+    def _on_thumbnail_skipped(self, path_str: str) -> None:
+        """A thumbnail wasn't made because its card had scrolled away: if it's on screen after
+        all, repainting it asks again."""
+        self.grid_model.thumbnail_changed(path_str)
+
+    def _on_theme_changed(self) -> None:
+        """Thumbnails bake in the theme's card colours: make them again (quick: the pictures
+        are cached on disk without their card), keeping the grid's selection and scroll position."""
+        self.thumbnail_manager.clear_cache()
+        self.list_grid.viewport().update()
 
     # ------------------------------------------------------------------
     # User Interactions & Viewer Trigger
@@ -1405,8 +1000,8 @@ class MainWindow(QMainWindow):
             self._open_viewer(selected[0])
 
     def _viewer_target(self, asset: AssetItem, position: str = "") -> ViewerTarget:
-        asset_id = self._asset_ids.get(str(asset.path))
-        tags = self._asset_tags.get(asset_id, []) if asset_id is not None else None
+        asset_id = self.library.ids.get(str(asset.path))
+        tags = self.library.tags.get(asset_id, []) if asset_id is not None else None
         edit_tags = (lambda: self._open_tag_dialog([asset])) if asset_id is not None else None
         return ViewerTarget(asset, tags, edit_tags, position)
 
@@ -1431,7 +1026,7 @@ class MainWindow(QMainWindow):
         dialog = AssetViewerDialog(
             asset, self, tags=target.tags, edit_tags=target.edit_tags,
             navigate=navigate if row is not None and len(assets) > 1 else None, position=target.position,
-            artbook=self, model_viewed=self.thumbnail_manager.model_viewed,
+            artbook=self.artbook_sender, model_viewed=self.thumbnail_manager.model_viewed,
         )
         dialog.exec()
         # Free the viewer (GL context, decoded image, video player) instead of keeping it parented
@@ -1446,11 +1041,6 @@ class MainWindow(QMainWindow):
                 return
         super().keyPressEvent(event)
 
-    _RATING_SHORTCUTS = (
-        ("main.rate_0", 0), ("main.rate_1", 1), ("main.rate_2", 2),
-        ("main.rate_3", 3), ("main.rate_4", 4), ("main.rate_5", 5),
-    )
-
     SEARCH_WIDTH = (280, 150)  # normal, compact toolbar
 
     def _on_toolbar_compact(self, compact: bool) -> None:
@@ -1463,7 +1053,7 @@ class MainWindow(QMainWindow):
             if shortcuts.matches("main.favorite", event):
                 self._toggle_favorite()
                 return True
-            for shortcut_id, rating in self._RATING_SHORTCUTS:
+            for shortcut_id, rating in RATING_SHORTCUTS:
                 if shortcuts.matches(shortcut_id, event):
                     self._set_rating(rating)
                     return True
@@ -1475,17 +1065,17 @@ class MainWindow(QMainWindow):
         return [a for a in (self.grid_model.asset_at(r) for r in rows) if a is not None]
 
     def _selected_asset_ids(self) -> list[int]:
-        return [self._asset_ids[str(a.path)] for a in self._selected_assets() if str(a.path) in self._asset_ids]
+        return [self.library.ids[str(a.path)] for a in self._selected_assets() if str(a.path) in self.library.ids]
 
     def _toggle_favorite(self) -> None:
         ids = self._selected_asset_ids()
         if not ids:
             return
         # Like most apps: if any selected file isn't a favorite yet, star them all; else unstar
-        favorite = not all(self._asset_marks.get(i, NO_MARKS).favorite for i in ids)
+        favorite = not all(self.library.marks.get(i, NO_MARKS).favorite for i in ids)
         files = f"{len(ids)} file{'s' if len(ids) != 1 else ''}"
         self._change_marks(
-            {i: Marks(favorite, self._asset_marks.get(i, NO_MARKS).rating) for i in ids},
+            {i: Marks(favorite, self.library.marks.get(i, NO_MARKS).rating) for i in ids},
             f"{'Added' if favorite else 'Removed'} {files} {'to' if favorite else 'from'} Favorites.",
             "favorite" if favorite else "unfavorite",
         )
@@ -1496,13 +1086,13 @@ class MainWindow(QMainWindow):
             return
         files = f"{len(ids)} file{'s' if len(ids) != 1 else ''}"
         self._change_marks(
-            {i: Marks(self._asset_marks.get(i, NO_MARKS).favorite, rating) for i in ids},
+            {i: Marks(self.library.marks.get(i, NO_MARKS).favorite, rating) for i in ids},
             f"Rated {files} {rating_text(rating)}." if rating else f"Cleared the rating of {files}.",
             "rating",
         )
 
     def _change_marks(self, new: dict[int, Marks], message: str, what: str) -> None:
-        old = {i: self._asset_marks.get(i, NO_MARKS) for i in new}
+        old = {i: self.library.marks.get(i, NO_MARKS) for i in new}
         self._apply_marks(new, message)
         files = f"{len(new)} file{'s' if len(new) != 1 else ''}"
         self.undo_history.push(UndoStep(
@@ -1512,13 +1102,17 @@ class MainWindow(QMainWindow):
         ))
 
     def _apply_marks(self, marks: dict[int, Marks], message: str) -> None:
-        self.repo.restore_marks(marks)
-        for asset_id, m in marks.items():
-            if m == NO_MARKS:
-                self._asset_marks.pop(asset_id, None)
-            else:
-                self._asset_marks[asset_id] = m
+        self.library.set_marks(marks)
         self._after_marks_changed(message)
+
+    def _reload_marks(self) -> None:
+        """Read every file's favorite and rating from the database again (after an import)."""
+        self.library.reload_marks()
+        self._update_sidebar_counts()
+        if self.filter_mode == "favorites" or self._query.uses_marks:
+            self._refresh_grid_display(keep_view=True)
+        else:
+            self.list_grid.viewport().update()
 
     def _after_marks_changed(self, message: str) -> None:
         run_in_background(self.repo, lambda repo: repo.fill_missing_hashes(), self._ignore_result)  # relink if moved
@@ -1535,137 +1129,17 @@ class MainWindow(QMainWindow):
         asset: Optional[AssetItem] = index.data(ASSET_ROLE) if index.isValid() else None
         if not asset:
             return
-
-        menu = QMenu(self)
-
-        action_view = QAction("Preview in Asset Viewer", self)
-        font = action_view.font()
-        font.setBold(True)
-        action_view.setFont(font)
-        action_view.triggered.connect(lambda: self._open_viewer(asset))
-        menu.addAction(action_view)
-
-        menu.addSeparator()
-
-        action_open = QAction("Open with External App", self)
-        action_open.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(asset.path)))
+        actions = AssetMenuActions(
+            open_viewer=lambda: self._open_viewer(asset),
+            reveal=lambda: self._reveal_in_explorer(asset.path),
+            tag=lambda: self._open_tag_dialog(),
+            toggle_favorite=self._toggle_favorite,
+            set_rating=self._set_rating,
         )
-        menu.addAction(action_open)
-
-        action_reveal = QAction("Show in File Explorer", self)
-        action_reveal.triggered.connect(lambda: self._reveal_in_explorer(asset.path))
-        menu.addAction(action_reveal)
-
-        menu.addSeparator()
-
-        selected = len(self._selected_assets())
-        action_tag = QAction("Tag..." if selected <= 1 else f"Tag {selected} Files...", self)
-        action_tag.setShortcut(shortcuts.sequence("main.tag"))
-        action_tag.triggered.connect(lambda: self._open_tag_dialog())
-        menu.addAction(action_tag)
-
-        ids = self._selected_asset_ids()
-        all_favorite = bool(ids) and all(self._asset_marks.get(i, NO_MARKS).favorite for i in ids)
-        action_fav = QAction("Remove from Favorites" if all_favorite else "Add to Favorites", self)
-        action_fav.setShortcut(shortcuts.sequence("main.favorite"))
-        action_fav.triggered.connect(self._toggle_favorite)
-        menu.addAction(action_fav)
-
-        rating_menu = menu.addMenu("Rating")
-        current = {self._asset_marks.get(i, NO_MARKS).rating for i in ids}
-        for shortcut_id, rating in self._RATING_SHORTCUTS[1:] + self._RATING_SHORTCUTS[:1]:
-            action = QAction(rating_text(rating) if rating else "No Rating", self)
-            action.setShortcut(shortcuts.sequence(shortcut_id))
-            action.setCheckable(True)
-            action.setChecked(current == {rating})
-            action.triggered.connect(lambda _checked=False, r=rating: self._set_rating(r))
-            rating_menu.addAction(action)
-
-        menu.addSeparator()
-        self._add_send_to_artbook_menu(menu)
-
-        action_copy_path = QAction("Copy Full Path", self)
-        action_copy_path.triggered.connect(
-            lambda: QGuiApplication.clipboard().setText(str(asset.path))
-        )
-        menu.addAction(action_copy_path)
-
+        marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
+        menu = build_asset_menu(self, asset, self._selected_assets(), marks, actions, self.artbook_sender)
         menu.exec(self.list_grid.mapToGlobal(pos))
-
-    def _add_send_to_artbook_menu(self, menu: QMenu) -> None:
-        """Send to Artbook: a new page, or any page (in its folders). Image files only."""
-        paths = [a.path for a in self._selected_assets() if a.path.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
-        send = menu.addMenu("Send to Artbook" if paths else "Send to Artbook (images only)")
-        send.setEnabled(bool(paths))
-        if paths:
-            self.fill_artbook_menu(send, lambda page_id: self._send_to_artbook(paths, page_id))
-
-    def fill_artbook_menu(self, send: QMenu, on_pick: Callable[[Optional[str]], None]) -> None:
-        """Fill a "Send to Artbook" menu: New Page, then every page (in its folders). on_pick(page id,
-        or None for a new page). Also used by the PDF viewer (ui.pdf_viewer) for its pages."""
-        action_new = send.addAction("New Page")
-        set_icon(action_new, "new_page")
-        action_new.triggered.connect(lambda: on_pick(None))
-        send.addSeparator()
-        names = {p["id"]: p.get("name") or "Untitled" for p in artbook_store.list_pages()}
-        current = self.artbook_panel.current_page_id() or get_artbook_page()
-
-        def add(target: QMenu, folder: dict) -> None:
-            for sub in folder["folders"]:
-                submenu = target.addMenu(sub["name"])
-                set_icon(submenu.menuAction(), "folder")
-                add(submenu, sub)
-                submenu.setEnabled(not submenu.isEmpty())
-            for page_id in folder["pages"]:
-                action = target.addAction(names.get(page_id, "Untitled"))
-                set_icon(action, "page")
-                if page_id == current:
-                    font = action.font()
-                    font.setBold(True)  # the open page
-                    action.setFont(font)
-                action.triggered.connect(lambda _checked=False, pid=page_id: on_pick(pid))
-
-        add(send, artbook_store.page_tree())
-
-    def _open_artbook_page(self, page_id: Optional[str]) -> str:
-        """Open an Artbook page to send things to (None: a new one): "" or what went wrong."""
-        panel = self.artbook_panel
-        try:
-            if page_id is None:
-                page_id = panel.new_page()
-            else:
-                panel.open_page(page_id)
-        except (artbook_store.PageError, OSError) as exc:
-            return f"Couldn't open the Artbook page: {exc}"
-        if panel.current_page_id() != page_id:
-            return "That Artbook page couldn't be opened."
-        return ""
-
-    def _sent_message(self, count: int) -> str:
-        panel = self.artbook_panel
-        name = panel.page.get("name") or "Untitled"
-        hint = " Ctrl+2 shows the Artbook." if not panel.isVisible() else ""
-        return f'Sent {count} image{"s" if count != 1 else ""} to "{name}".{hint}'
-
-    def _send_to_artbook(self, paths: list[Path], page_id: Optional[str]) -> None:
-        """Add image files to an Artbook page (None: a new one), which becomes the open page."""
-        error = self._open_artbook_page(page_id)
-        if error:
-            self.status_label.setText(error)
-            return
-        count = self.artbook_panel.board.add_files(paths)
-        self.status_label.setText(self._sent_message(count))
-
-    def send_image_to_artbook(self, image: QImage, name: str, page_id: Optional[str]) -> str:
-        """Add a picture (a PDF page) to an Artbook page (None: a new one); says how it went."""
-        error = self._open_artbook_page(page_id)
-        if error:
-            return error
-        self.artbook_panel.board.add_image(image, name=name)
-        message = self._sent_message(1)
-        self.status_label.setText(message)
-        return message
+        menu.deleteLater()  # (its actions belong to it: nothing is left behind on the window)
 
     # ------------------------------------------------------------------
     # Tagging
@@ -1677,7 +1151,7 @@ class MainWindow(QMainWindow):
         """
         if assets is None:
             assets = self._selected_assets()
-        ids = [self._asset_ids[str(a.path)] for a in assets if str(a.path) in self._asset_ids]
+        ids = [self.library.ids[str(a.path)] for a in assets if str(a.path) in self.library.ids]
         if not ids:
             QMessageBox.information(self, "Tags Unavailable", "These files aren't in the tag database yet. Try Refresh.")
             return None
@@ -1689,7 +1163,7 @@ class MainWindow(QMainWindow):
         if dialog.last_change:
             self._push_tag_undo(dialog.last_change)
         self._after_tags_changed(ids)
-        return self._asset_tags.get(ids[0], [])
+        return self.library.tags.get(ids[0], [])
 
     def _after_tags_changed(self, asset_ids: Optional[list[int]] = None) -> None:
         """Refresh cached tags, tooltips, suggestions and tag search after tags were edited.
@@ -1698,20 +1172,22 @@ class MainWindow(QMainWindow):
         (which can affect every file; reloaded in the background).
         """
         self._reload_tag_suggestions()
+        if asset_ids is None:
+            self.sidebar_tree.reload_collections()  # (renaming a tag renames it in saved searches too)
         # Fingerprint newly tagged files right away, so their tags survive a move before the next scan
         run_in_background(self.repo, lambda repo: repo.fill_missing_hashes(), self._ignore_result)
         if asset_ids is not None:
             self._apply_tag_cache(self.repo.tags_by_asset(asset_ids))
         else:
-            run_in_background(self.repo, lambda repo: repo.tags_by_asset(list(self._asset_ids.values())),
-                              self._apply_tag_cache)
+            asset_ids = list(self.library.ids.values())  # (copied here: the job runs on another thread)
+            run_in_background(self.repo, lambda repo: repo.tags_by_asset(asset_ids), self._apply_tag_cache)
 
     @staticmethod
     def _ignore_result(_result) -> None:
         pass
 
     def _apply_tag_cache(self, tags_by_asset: dict[int, list[Tag]]) -> None:
-        self._asset_tags.update(tags_by_asset)  # tooltips are built on hover, so they pick this up
+        self.library.update_tags(tags_by_asset)  # tooltips are built on hover, so they pick this up
         if self.search_bar.has_tag_filters():
             self._run_tag_search()
 
@@ -1721,17 +1197,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pylint: disable=broad-except
             self.status_label.setText(f"Tags unavailable: {exc}")
 
-    @staticmethod
-    def _reveal_in_explorer(path: Path) -> None:
-        """Reveal file in Windows File Explorer."""
+    def _reveal_in_explorer(self, path: Path) -> None:
+        """Show the file selected in its folder in File Explorer."""
         try:
-            if sys.platform == "win32":
-                norm_path = os.path.normpath(str(path.resolve()))
-                subprocess.Popen(f'explorer /select,"{norm_path}"', shell=True)
-            else:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"Error revealing in file explorer: {exc}")
+            if not file_actions.reveal(path):
+                self.status_label.setText(f"'{path.name}' isn't there any more.")
+        except OSError as exc:
+            self.status_label.setText(f"Couldn't open File Explorer: {exc}")
 
     def show_crash_notice(self) -> None:
         box = QMessageBox(self)
@@ -1745,18 +1217,15 @@ class MainWindow(QMainWindow):
         btn_open = box.addButton("Open Crash Log", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Ok)
         box.exec()
+        box.deleteLater()
         if box.clickedButton() is btn_open:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(crash_log.crash_log_path())))
 
     def closeEvent(self, event) -> None:
         """Ensure background scan and thumbnail threads terminate cleanly on exit."""
-        if self.scan_thread and self.scan_thread.isRunning():
-            self.scan_thread.quit()
-            self.scan_thread.wait(1000)
         # Stop background work before Qt is torn down: a job still running then crashes the process
-        self._meta_generation += 1  # ends the file-details reading chain
+        self.library.shutdown()  # the scan, live updates and file-details reading
         self.view_modes.shutdown()  # the separate Artbook window closes with the app
-        self.watcher.clear()
         self.thumbnail_manager.shutdown()
         wait_for_background()
         self.artbook_panel.save_now()  # after background jobs, so an older autosave can't land on top
@@ -1764,126 +1233,8 @@ class MainWindow(QMainWindow):
 
 
 # ----------------------------------------------------------------------
-# Application Entry Point
+# Application Entry Point (the release build's --self-test is in self_test.py)
 # ----------------------------------------------------------------------
-def run_self_test(log_path: Optional[str]) -> int:
-    """Exercise the bundled libraries without showing a window (used by the release build).
-
-    Returns a process exit code; writes a short report to log_path if given, since the
-    windowed executable has no console.
-    """
-    import tempfile
-    import traceback
-
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    # Qt painting/fonts (used by thumbnails) need an application object first
-    app = QApplication.instance() or QApplication(sys.argv[:1])
-    lines: list[str] = []
-    ok = True
-
-    def step(name: str, fn) -> None:
-        nonlocal ok
-        try:
-            detail = fn()
-            lines.append(f"PASS  {name}" + (f": {detail}" if detail else ""))
-        except Exception:  # pylint: disable=broad-except
-            ok = False
-            lines.append(f"FAIL  {name}\n{traceback.format_exc()}")
-
-    def check_imports():
-        import fbxloader, fbxloader.utils, OpenGL.GL, scipy.spatial, trimesh  # noqa: E401,F401
-        import core.fbx_fast  # noqa: F401  (binary FBX: uses fbxloader's transforms)
-        return f"trimesh {trimesh.__version__}"
-
-    def check_models():
-        import trimesh
-        from core.model_loader import load_3d_model
-        with tempfile.TemporaryDirectory() as tmp:
-            results = []
-            for ext in (".obj", ".glb", ".stl"):
-                path = Path(tmp) / f"box{ext}"
-                trimesh.creation.box().export(path)
-                mesh = load_3d_model(path)
-                if mesh.face_count != 12:
-                    raise RuntimeError(f"{ext}: expected 12 faces, got {mesh.face_count}")
-                results.append(ext)
-            from core.thumbnail_manager import render_model_thumbnail
-            if render_model_thumbnail(mesh.vertices, mesh.faces, mesh.normals, "STL", 110) is None:
-                raise RuntimeError("rendering a model's thumbnail failed")
-            return ", ".join(results) + ", rendered thumbnail"
-
-    def check_images():
-        from PIL import Image
-        from core.thumbnail_manager import load_texture_thumbnail_image
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "tex.png"
-            Image.new("RGB", (64, 64), (200, 50, 50)).save(path)
-            if load_texture_thumbnail_image(path, "PNG", 110) is None:
-                raise RuntimeError("thumbnail generation failed")
-
-    def check_ui():
-        apply_theme(get_theme(), app)
-        # The Settings dialog's Tags page opens the library database: use a throwaway one,
-        # so a self-test never upgrades or changes the user's real library
-        import core.tag_repository as tag_repository
-        with tempfile.TemporaryDirectory() as tmp:
-            saved = tag_repository._repository
-            tag_repository._repository = tag_repository.TagRepository(Path(tmp) / "self-test.db")
-            try:
-                dialog = SettingsDialog()
-                dialog.close()
-                dialog.deleteLater()
-            finally:
-                tag_repository._repository.close_thread_connection()
-                tag_repository._repository = saved
-        from PySide6.QtPdf import QPdfDocument  # noqa: F401
-        if app_icon().isNull():
-            raise RuntimeError("application icon missing from the build")
-        return "settings dialog built"
-
-    def check_tags():
-        from core.tag_repository import TagRepository
-        from core.scanner import AssetScanner
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "a.png").write_bytes(b"x")
-            repo = TagRepository(Path(tmp) / "test.db")
-            ids = repo.sync_assets(AssetScanner().scan(Path(tmp)))
-            tag = repo.create_custom_tag("SelfTest")
-            repo.add_tags(list(ids.values()), [tag.id])
-            png = repo.find_tag("PNG")
-            if repo.find_assets_by_tags([tag.id, png.id]) != set(ids.values()):
-                raise RuntimeError("tag search returned the wrong files")
-            version = repo.schema_version()
-            repo.close_thread_connection()  # the temp folder can't be deleted while the DB is open
-            return f"schema v{version}"
-
-    def check_video():
-        from PySide6.QtMultimedia import QMediaFormat
-        from ui.video_player import VideoPlayer
-        formats = QMediaFormat().supportedFileFormats(QMediaFormat.ConversionMode.Decode)
-        if not formats:
-            raise RuntimeError("no multimedia backend: Qt can't decode any video format")
-        player = VideoPlayer()
-        player.stop()
-        player.close()
-        return f"{len(formats)} decodable container formats"
-
-    step("imports", check_imports)
-    step("3D model loading", check_models)
-    step("image thumbnails", check_images)
-    step("user interface", check_ui)
-    step("video playback", check_video)
-    step("tag database", check_tags)
-
-    lines.append("RESULT: " + ("PASS" if ok else "FAIL"))
-    report = "\n".join(lines)
-    if log_path:
-        Path(log_path).write_text(report, encoding="utf-8")
-    elif sys.stdout is not None:
-        print(report)
-    return 0 if ok else 1
-
-
 def main() -> None:
     """Initialize and run the PySide6 application."""
     if "--self-test" in sys.argv:
@@ -1938,6 +1289,7 @@ def main() -> None:
     set_frost(get_glass_frost())
     install_popup_animations(app)
     install_view_effects(app)
+    title_bar.install(app)  # title bars in the theme's colours, not Windows' light / dark
     main_thread_gc.install(app)  # a collection on a worker thread can free UI objects there, and crash
     scroll_bar_watch.install(app)  # logs which view had its scroll bar freed under it (a crash that follows)
 

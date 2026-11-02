@@ -23,11 +23,16 @@ def isolated_user_data(tmp_path, monkeypatch):
     monkeypatch.setattr(video_tools, "PROXY_DIR", data / "cache" / "proxies")
     monkeypatch.setattr(video_tools, "POSTER_DIR", data / "cache" / "posters")
     monkeypatch.setattr(video_tools, "THUMB_DIR", data / "cache" / "thumbnails")
+    # "Show in Explorer" would open real Explorer windows on the desktop (tests replace this to check it)
+    from ui import file_actions
+
+    monkeypatch.setattr(file_actions, "_select_in_explorer", lambda path: True)
+    from PySide6.QtWidgets import QApplication
+
+    windows_before = {id(w) for w in QApplication.topLevelWidgets()} if QApplication.instance() else set()
     yield data
     # A closed Artbook panel still has its autosave timer, and background jobs may still be
     # running: they'd write into the *next* test's folders (paths are read when they run)
-    from PySide6.QtWidgets import QApplication
-
     app = QApplication.instance()
     if isinstance(app, QApplication):
         from ui.artbook import ArtbookPanel
@@ -39,6 +44,27 @@ def isolated_user_data(tmp_path, monkeypatch):
         wait_for_background()
         app.processEvents()  # delivers the results, which can start one more save
         wait_for_background()
+        _free_windows(app, windows_before)
+
+
+def _free_windows(app, windows_before: set[int]) -> None:
+    """Free the windows a test left behind (closed is not freed). Every later theme change
+    restyled them all: with 32 main windows and 3,700 widgets alive by the end, the suite took
+    over 4 minutes, not 1.5. Done here, while this test's data paths are still redirected (a
+    window that closes now saves into this test's folders). Popups (menus, a search box's
+    suggestions) are left to whatever owns them: freeing one twice crashes the process."""
+    import shiboken6
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtWidgets import QApplication
+
+    leftovers = [w for w in QApplication.topLevelWidgets()
+                 if id(w) not in windows_before and w.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog)]
+    for window in leftovers:
+        if shiboken6.isValid(window):  # (one may have gone with another)
+            if window.isVisible():
+                window.close()
+            window.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 @pytest.fixture(scope="session")

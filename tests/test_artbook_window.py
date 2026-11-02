@@ -201,7 +201,7 @@ def main_window(qapp, tmp_path):
     win = main.MainWindow()
     win.resize(1600, 800)
     win.show()
-    assert pump(qapp, lambda: win._scan_done_once and not win.scan_thread.isRunning())
+    assert pump(qapp, lambda: win.library.scan_done_once and not win.library.is_scanning())
     yield win
     win.close()
     pump(qapp, seconds=0.2)
@@ -285,12 +285,12 @@ def test_send_to_artbook_lists_every_page_and_new_page(qapp, main_window):
     store.create_page("Loose")
     select(main_window, "red.png", "chair.fbx")
     menu = QMenu()
-    main_window._add_send_to_artbook_menu(menu)
+    main_window.artbook_sender.add_send_menu(menu, [a.path for a in main_window._selected_assets()])
     assert menu_titles(menu) == ["Send to Artbook/", "  New Page", "  Refs/", "    Inside", "  Loose"]
 
     select(main_window, "chair.fbx")  # no images: nothing to send
     menu = QMenu()
-    main_window._add_send_to_artbook_menu(menu)
+    main_window.artbook_sender.add_send_menu(menu, [a.path for a in main_window._selected_assets()])
     (send,) = menu.actions()
     assert not send.isEnabled() and "images only" in send.text()
 
@@ -299,13 +299,13 @@ def test_sending_adds_the_images_to_the_chosen_page(qapp, main_window):
     other = store.create_page("Loose")
     library = main_window.grid_model.assets()
     images = sorted(a.path for a in library if a.path.suffix == ".png")
-    main_window._send_to_artbook(images, other["id"])
+    main_window.artbook_sender.send_files(images, other["id"])
     panel = main_window.artbook_panel
     assert panel.current_page_id() == other["id"]
     assert pump(qapp, lambda: len(panel.board.items_list()) == 2)
     assert '"Loose"' in main_window.status_label.text() and "Ctrl+2" in main_window.status_label.text()
 
-    main_window._send_to_artbook(images[:1], None)  # a new page
+    main_window.artbook_sender.send_files(images[:1], None)  # a new page
     assert panel.page["name"] == "Page 1"  # the only other page is "Loose"
     assert panel.current_page_id() != other["id"]
     assert pump(qapp, lambda: len(panel.board.items_list()) == 1)

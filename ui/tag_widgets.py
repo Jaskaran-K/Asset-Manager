@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
+from core.search_query import TAG_NAME, TAG_TOKEN, quote_tag_name
 from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagChange, TagError, TagRepository
 from ui import shortcuts
 from ui.duotone import Tone, set_icon
@@ -50,9 +51,9 @@ from ui.icons import MAIN_CATEGORY_COLORS, SUB_CATEGORY_COLORS, color_swatch_ico
 # Colors handed out to new custom tags, in order
 TAG_COLORS = list(dict.fromkeys(MAIN_CATEGORY_COLORS + SUB_CATEGORY_COLORS))
 
-# Tag filter tokens:  tag:name   tag:"two words"   -tag:name (must not have)   tag:a|b|"c d" (any of)
-_NAME = r'(?:"[^"]+"|[^\s|"]+)'
-_TAG_TOKEN = re.compile(rf'(?<!\S)(-?)tag:({_NAME}(?:\|{_NAME})*)\|?(?!\S)', re.IGNORECASE)
+# Tag filter tokens (grammar in core.search_query):  tag:name  tag:"two words"  -tag:name  tag:a|b
+_NAME = TAG_NAME
+_TAG_TOKEN = TAG_TOKEN
 _UNFINISHED_TOKEN = re.compile(r'(?i)(?:^|\s)-?tag:(?:"[^"]*|\S*)$')
 
 
@@ -89,8 +90,7 @@ def next_tag_color(existing: Sequence[Tag]) -> str:
     return next((c for c in TAG_COLORS if c not in used), TAG_COLORS[len(existing) % len(TAG_COLORS)])
 
 
-def _quote(name: str) -> str:
-    return f'"{name}"' if re.search(r'[\s|]', name) else name
+_quote = quote_tag_name
 
 
 def tag_token(name: str) -> str:
@@ -223,6 +223,17 @@ def wait_for_background(timeout_ms: int = 5000) -> bool:
     Qt objects being torn down under a running job crash the process). True if all finished."""
     finished = True
     for pool in (_db_pool, _slow_pool, _job_pool):
+        if pool is not None:
+            pool.clear()
+            finished = pool.waitForDone(timeout_ms) and finished
+    return finished
+
+
+def wait_for_database_jobs(timeout_ms: int = 5000) -> bool:
+    """Drop queued database jobs and wait for running ones, so none has the database open (before
+    it's replaced by a backup). Other background work carries on. True if all finished."""
+    finished = True
+    for pool in (_db_pool, _slow_pool):
         if pool is not None:
             pool.clear()
             finished = pool.waitForDone(timeout_ms) and finished
@@ -467,6 +478,7 @@ class TagSearchBar(QFrame):
             "tag:name  has the tag (pick a suggestion, or type it and press Enter)\n"
             "-tag:name  doesn't have it      tag:a|b  has any of them\n"
             "is:fav, rating:>=3, res:>=2048, size:>10mb, dur:<30s, poly:<10k, ext:png\n"
+            "A minus excludes (-ext:png, -is:fav); several words match in any order.\n"
             "Click a tag chip to switch has / doesn't have. Esc clears."
         )
         self.edit.setMinimumWidth(160)

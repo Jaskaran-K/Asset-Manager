@@ -1471,7 +1471,7 @@ class PdfViewer(QWidget):
     """A PDF in the file viewer: toolbar, sidebar (Contents / Pages) and the pages."""
 
     def __init__(self, path: Path, parent: Optional[QWidget] = None, artbook=None):
-        """artbook: the main window (fill_artbook_menu, send_image_to_artbook), or None: pages can't be
+        """artbook: a ui.asset_menu.ArtbookSender (fill_artbook_menu, send_image_to_artbook), or None: pages can't be
         sent to the Artbook."""
         super().__init__(parent)
         self.setObjectName("pdfViewer")

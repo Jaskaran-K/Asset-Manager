@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -241,3 +242,36 @@ def test_tag_search_combined_with_text(repo, library):
     assert repo.find_assets_by_tags([jpeg.id], text="BARK") == {library["tree bark.jpg"]}
     assert repo.find_assets_by_tags([jpeg.id], text="nothing") == set()
     assert repo.find_assets_by_tags([], text="tree b") == {library["tree bark.jpg"]}
+
+
+def test_unchanged_files_are_not_rewritten(repo):
+    assets = [make_asset(rf"C:\lib\file{i}.png") for i in range(50)]
+    repo.sync_assets(assets)
+    conn = repo._conn()
+    before = conn.total_changes
+    repo.sync_assets(assets)
+    assert conn.total_changes == before
+    assets[3].size_bytes = 99  # edited
+    repo.sync_assets(assets)
+    assert conn.total_changes == before + 1
+
+
+def test_forget_unscanned_assets_keeps_what_matters(repo, tmp_path, monkeypatch):
+    lib, browsed = tmp_path / "lib", tmp_path / "browsed"
+    paths = {name: folder / name for folder in (lib, browsed) for name in (f"{folder.name}_a.png", f"{folder.name}_b.png")}
+    for path in paths.values():
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"x")
+    offline = make_asset(r"Q:\unplugged\far.png")
+    ids = repo.sync_assets([make_asset(str(p)) for p in paths.values()] + [offline])
+    ids = {Path(k).name: v for k, v in ids.items()}
+    tag = repo.create_custom_tag("Keep")
+    repo.add_tags([ids["browsed_a.png"]], [tag.id])
+    repo.set_rating([ids["browsed_b.png"]], 2)
+    monkeypatch.setattr("os.path.exists", lambda p, real=os.path.exists: False if str(p).upper().startswith("Q:") else real(p))
+
+    library = [make_asset(str(paths["lib_a.png"]))]  # lib_b.png isn't in the scan (deleted, say)
+    assert repo.forget_unscanned_assets(library) == 1
+    kept = {row[0] for row in repo._conn().execute("SELECT name FROM assets")}
+    assert kept == {"lib_a.png", "browsed_a.png", "browsed_b.png", "far.png"}  # tagged, rated, offline
+    assert repo.find_tag("PNG").file_count == 4

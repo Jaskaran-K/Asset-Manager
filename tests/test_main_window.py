@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
+import shiboken6
 from PIL import Image
 from PySide6.QtCore import QEvent, QItemSelectionModel, Qt
 from PySide6.QtGui import QKeyEvent
@@ -39,7 +40,7 @@ def open_window(qapp):
 
     window = main.MainWindow()
     window.show()
-    assert pump(qapp, lambda: window._scan_done_once and not window.scan_thread.isRunning())
+    assert pump(qapp, lambda: window.library.scan_done_once and not window.library.is_scanning())
     return window
 
 
@@ -89,9 +90,9 @@ def test_favorite_and_rating_keys_and_detail_search(library, qapp):
     select(window, "small_brick.png")
     press(window, Qt.Key.Key_F, "f")
     press(window, Qt.Key.Key_3, "3")
-    asset_id = window._asset_ids[str((library / "small_brick.png").resolve())]
-    assert window._asset_marks[asset_id].favorite and window._asset_marks[asset_id].rating == 3
-    assert window.item_favorites.text(0) == "Favorites (1)"
+    asset_id = window.library.ids[str((library / "small_brick.png").resolve())]
+    assert window.library.marks[asset_id].favorite and window.library.marks[asset_id].rating == 3
+    assert window.sidebar_tree.item_favorites.text(0) == "Favorites (1)"
 
     window.search_bar.edit.setText("rating:>=3")
     assert names_in_grid(window) == ["small_brick.png"]
@@ -169,8 +170,8 @@ def test_sidebar_toggles_and_the_floating_one_closes_after_a_pick(library, qapp)
         assert not window.sidebar.is_open() and not window.btn_sidebar.isChecked()
         window.btn_sidebar.click()
         window.sidebar.set_pinned(False)
-        png = next(row for row, _name, exts in window._sidebar_rows if exts == frozenset({".png"}))
-        window._on_sidebar_item_clicked(png, 0)
+        png = next(row for row, _name, exts in window.sidebar_tree.rows() if exts == frozenset({".png"}))
+        window.sidebar_tree._on_item_clicked(png)
         assert names_in_grid(window) == ["big_wall.png", "small_brick.png"]
         assert not window.sidebar.is_open()  # floating: slides away after picking
         window.close()
@@ -217,4 +218,249 @@ def test_the_window_is_ready_for_the_3d_viewer_from_the_start(library, qapp, mon
     select(window, "chair.fbx")
     window._open_viewer(window._selected_assets()[0])
     assert handed == [window.thumbnail_manager.model_viewed]
+    window.close()
+
+
+def test_a_new_scan_replaces_a_running_one_without_waiting(library, qapp, monkeypatch, tmp_path):
+    """Starting a scan while one runs (changing folders in Settings) used to wait for the old
+    one on the UI thread, freezing the window, and then applied its out-of-date results too."""
+    import main
+    from core.scanner import AssetScanner
+
+    window = open_window(qapp)
+    original = AssetScanner.scan
+    slow_root = library / "props"
+
+    def scan(self, folder, *args, should_stop=None, **kwargs):
+        if Path(folder) == slow_root:  # the old scan: slow, until it's told to stop
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (should_stop and should_stop()):
+                time.sleep(0.01)
+        return original(self, folder, *args, should_stop=should_stop, **kwargs)
+
+    monkeypatch.setattr(AssetScanner, "scan", scan)
+    applied = []
+    from ui.library_state import LibraryState
+
+    real_finished = LibraryState._on_scan_finished
+
+    def counting(self, assets, info):  # (a def, not a lambda: it's the receiver of a worker's signal)
+        applied.append(len(assets))
+        real_finished(self, assets, info)
+
+    monkeypatch.setattr(LibraryState, "_on_scan_finished", counting)
+    window._start_scan([slow_root])
+    old_thread = window.library.scan_thread
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "one.png").write_bytes(b"png")
+    started = time.monotonic()
+    window._start_scan([other])
+    assert time.monotonic() - started < 0.5  # (no waiting for the old scan)
+    assert pump(qapp, lambda: not window.library.is_scanning() and not window.library._stopping_scans)
+    qapp.processEvents()
+    assert applied == [1] and names_in_grid(window) == ["one.png"]  # (only the new scan's files)
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not shiboken6.isValid(old_thread)  # (the replaced scan's thread is freed)
+    window.close()
+
+
+def test_only_library_scans_forget_other_files(tmp_path):
+    from core.scanner import AssetScanner
+    from core.tag_repository import get_repository
+    from ui.library_state import ScanWorker
+
+    for folder in ("library", "browsed"):
+        (tmp_path / folder).mkdir()
+        Image.new("RGB", (4, 4)).save(tmp_path / folder / f"{folder}.png")
+    scanner = AssetScanner(supported_extensions=[".png"])
+    library, browsed = (scanner.scan(tmp_path / f) for f in ("library", "browsed"))
+    repo = get_repository()
+
+    def rows():
+        return sorted(r[0] for r in repo._conn().execute("SELECT name FROM assets"))
+
+    ScanWorker._sync_tags(library + browsed)
+    ScanWorker._sync_tags(browsed)  # an Open Folder scan keeps the library's rows
+    assert rows() == ["browsed.png", "library.png"]
+    ScanWorker._sync_tags(library, forget_others=True, should_stop=lambda: True)  # replaced meanwhile
+    assert rows() == ["browsed.png", "library.png"]
+    info = ScanWorker._sync_tags(library, forget_others=True)
+    assert rows() == ["library.png"] and info["error"] is None
+
+
+def test_renaming_a_tag_updates_the_collections(library, qapp):
+    window = open_window(qapp)
+    tag = window.repo.create_custom_tag("Hero")
+    window.repo.save_search("Heroes", "tag:Hero")
+    window.sidebar_tree.reload_collections()
+    window.repo.rename_custom_tag(tag.id, "Main Hero")  # (as Settings > Tags does)
+    window._after_tags_changed()
+    window.sidebar_tree._on_item_clicked(window.sidebar_tree.item_collections.child(0))
+    assert [t.name for f in window.search_bar.filters() for t in f.tags] == ["Main Hero"]
+    window.close()
+
+
+def test_imported_favorites_and_ratings_show_at_once(library, qapp, monkeypatch, tmp_path):
+    import json
+
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    window = open_window(qapp)
+    export = tmp_path / "tags.json"
+    brick = str((library / "small_brick.png").resolve())
+    export.write_text(json.dumps({
+        "format": "asset-manager-tags", "version": 1, "tags": [],
+        "files": [{"path": brick, "tags": [], "favorite": True, "rating": 4}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(export), "")))
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    window.library_tools.import_tags()
+    assert window.sidebar_tree.item_favorites.text(0) == "Favorites (1)"
+    assert window.library.marks[window.library.ids[brick]].rating == 4
+    window.close()
+
+
+def close_menu_when_open(qapp):
+    """Close the next popup menu as soon as it's shown (QMenu.exec waits for it otherwise)."""
+    from PySide6.QtCore import QTimer
+
+    def close():
+        popup = qapp.activePopupWidget()
+        if popup is not None:
+            popup.close()
+        else:
+            QTimer.singleShot(10, close)
+
+    QTimer.singleShot(10, close)
+
+
+def test_right_click_menus_are_freed(library, qapp):
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QMenu
+
+    window = open_window(qapp)
+    select(window, "small_brick.png")
+    pos = window.list_grid.visualRect(window.grid_model.index(0)).center()
+
+    def owned():
+        qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        return len(window.findChildren(QAction)), len(window.findChildren(QMenu))
+
+    before = owned()
+    for _ in range(3):
+        close_menu_when_open(qapp)
+        window._show_context_menu(pos)
+    assert owned() == before
+    window.close()
+
+
+def test_settings_is_freed_when_it_closes(library, qapp):
+    """Each Settings kept alive was restyled on every theme change (4 of them: 45 -> 721 ms)."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    window = open_window(qapp)
+
+    def cancel_when_open():
+        modal = QApplication.activeModalWidget()
+        if modal is None:
+            QTimer.singleShot(20, cancel_when_open)
+        else:
+            modal.reject()
+
+    def widgets():
+        qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        return len(window.findChildren(QDialog)), len(QApplication.allWidgets())
+
+    before = widgets()
+    for _ in range(2):
+        QTimer.singleShot(20, cancel_when_open)
+        window._open_settings()
+    assert widgets() == before
+    window.close()
+
+
+def test_a_good_scan_starts_the_daily_backup(library, qapp):
+    window = open_window(qapp)
+    assert pump(qapp, lambda: any(b.stem.endswith("_daily") for b in window.repo.list_backups()))
+    window.close()
+
+
+def test_a_damaged_database_offers_its_newest_good_backup(library, qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import crash_log, tag_repository
+
+    tag_repository.get_repository().create_custom_tag("Hero")  # (before the window: in its daily backup)
+    window = open_window(qapp)
+    assert pump(qapp, lambda: any(b.stem.endswith("_daily") for b in window.repo.list_backups()))
+    window.repo._conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    window.close()
+    window.repo.close_thread_connection()  # (as quitting does: the next launch opens it afresh)
+    path = Path(window.repo.db_path)
+    data = path.read_bytes()
+    path.write_bytes(data[:100] + b"\xa5" * (len(data) - 100))  # (all but the header: any query fails)
+    monkeypatch.setattr(tag_repository, "_repository", None)  # (fresh connections, as on the next launch)
+    monkeypatch.setattr(crash_log, "log_error", lambda *args: None)
+    asked, warned = [], []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: asked.append(args[2]) or QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warned.append(args[2]))  # (a failure, not a hang)
+
+    window = open_window(qapp)
+    assert pump(qapp, lambda: asked) and "damaged" in asked[0] and "Restore the backup" in asked[0]
+    assert not warned, warned  # (the restore happens as the offer is accepted)
+    assert "Hero" in [t.name for t in window.repo.list_tags()]  # (restored)
+    assert pump(qapp, lambda: not window.library.is_scanning())
+    assert "tags unavailable" not in window.status_label.text()
+    window.close()
+
+
+def test_a_theme_change_recolours_the_thumbnails_straight_away(library, qapp):
+    """Also while previewing themes in Settings (the cards bake in the theme's colours)."""
+    from ui.themes import apply_theme, current_theme_id
+
+    window = open_window(qapp)
+    before = current_theme_id()
+    assert pump(qapp, lambda: window.thumbnail_manager.memory_used() > 0)
+    try:
+        apply_theme("light" if before != "light" else "dark", qapp)
+        assert window.thumbnail_manager.memory_used() == 0  # (made again, in the new colours)
+        assert pump(qapp, lambda: window.thumbnail_manager.memory_used() > 0)
+    finally:
+        apply_theme(before, qapp)
+    window.close()
+
+
+def test_show_in_explorer_never_goes_through_the_command_prompt(library, qapp, monkeypatch):
+    import re
+
+    from ui import file_actions
+
+    window = open_window(qapp)
+    shown = []
+    monkeypatch.setattr(file_actions, "_select_in_explorer", lambda path: shown.append(path) or True)
+    window._reveal_in_explorer(library / "small_brick.png")
+    assert shown == [str((library / "small_brick.png").resolve())]
+    window._reveal_in_explorer(library / "gone.png")
+    assert "isn't there" in window.status_label.text()
+    window.close()
+    root = Path(__file__).resolve().parent.parent
+    sources = [root / "main.py", *(root / "ui").rglob("*.py"), *(root / "core").rglob("*.py")]
+    shell = [p.name for p in sources if re.search(r"shell\s*=\s*True", p.read_text(encoding="utf-8"))]
+    assert not shell  # (a name with %...% or & in it would be mangled or worse)
+
+
+def test_replacing_a_scan_that_has_only_just_started(library, qapp):
+    """A scan replaced before its thread had started running it: the old worker must stay alive
+    until its thread is done (it was freed under the thread: an access violation)."""
+    import gc
+
+    window = open_window(qapp)
+    for _ in range(40):
+        window._start_scan([library])
+        window._start_scan([library])  # (the first one's thread is usually still starting)
+        gc.collect()
+    assert pump(qapp, lambda: not window.library.is_scanning() and not window.library._stopping_scans)
+    assert names_in_grid(window) == ["big_wall.png", "chair.fbx", "small_brick.png"]
     window.close()

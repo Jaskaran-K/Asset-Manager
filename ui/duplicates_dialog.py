@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from typing import Optional, Sequence
 
 from PySide6.QtCore import QFile, Qt, QUrl
@@ -24,6 +21,7 @@ from PySide6.QtWidgets import (
 from core.duplicates import DuplicateGroup, find_duplicates
 from core.scanner import AssetItem
 from core.tag_repository import TagRepository
+from ui import file_actions
 from ui.tag_widgets import run_in_background
 
 _ASSET_ROLE = Qt.ItemDataRole.UserRole
@@ -163,10 +161,7 @@ class DuplicatesDialog(QDialog):
         asset = item.data(0, _ASSET_ROLE) if item else None
         if asset is None:
             return
-        if sys.platform == "win32":
-            subprocess.Popen(f'explorer /select,"{os.path.normpath(str(asset.path))}"', shell=True)
-        else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(asset.path.parent)))
+        file_actions.reveal(asset.path)
 
     # Recycle Bin -----------------------------------------------------------
     def _on_trash(self) -> None:

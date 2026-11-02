@@ -5,9 +5,11 @@ Each page is a folder in PAGES_DIR:
     <page id>/page.json      name, view, and every item (position, scale, rotation, flips...)
     <page id>/images/<sha256>.<ext>   image data, named by content so each is stored once
     <page id>/thumb.png      small picture of the board, for the Pages list
+    <page id>/page.json.bak  the page as it was before the latest save (opened if page.json is damaged)
 
 Saving rewrites page.json only (written to a temporary file, then swapped in, so a crash
-mid-save never leaves a broken page); images are written once, when they're added.
+mid-save never leaves a broken page); images are written once, when they're added. Image
+files no item uses any more are removed when the page is next opened.
 
 Images from files are *linked*: the item keeps the file's path, plus a downscaled fallback
 copy in images/ in case the file moves or disappears. Pasted / dropped image data has no
@@ -16,14 +18,14 @@ file, so it's stored in full.
 PAGES_DIR/index.json arranges the pages: folders (which can hold folders), the order of
 everything, and which folder each page is in. Pages stay self-contained folders, and the
 index repairs itself when read: a page folder it doesn't list shows up at the top level,
-and an entry whose page is gone is dropped. Page names live in page.json only.
+and an entry whose page is gone is dropped. Page names live in page.json only. It keeps a
+backup too (index.json.bak), so a damaged index doesn't lose the folders (core.json_files).
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import shutil
 import threading
@@ -37,6 +39,8 @@ from PIL import Image
 from PySide6.QtCore import QFile
 from PySide6.QtGui import QImage
 
+from core import json_files
+from core.hdr_image import image_size as hdr_image_size, is_hdr
 from core.thumbnail_manager import _safe_convert_pil_to_rgba, open_image
 
 DEFAULT_PAGES_DIR: Path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AssetManager" / "artbook"
@@ -47,6 +51,9 @@ INDEX_VERSION = 1
 MAX_DECODE_SIDE = 4096  # a new image is decoded this big (the board loads other sizes as needed)
 FALLBACK_SIDE = 1024  # size of the copy kept for linked files
 MAX_NAME = 120
+PAGE_FILE = "page.json"
+BACKUP_FILE = "page.json.bak"
+DAMAGED_FILE = "page.json.damaged"  # (a damaged page.json, set aside rather than overwritten)
 
 IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".tga",
@@ -76,7 +83,7 @@ def set_pages_dir(folder: Optional[Path]) -> None:
 def has_pages(folder: Path) -> bool:
     """Whether a folder already holds Artbook pages (an index, or a page's folder)."""
     try:
-        return (folder / "index.json").is_file() or any((child / "page.json").is_file() for child in folder.iterdir())
+        return (folder / "index.json").is_file() or any(_has_page_file(child) for child in folder.iterdir())
     except OSError:
         return False
 
@@ -118,7 +125,7 @@ def move_pages(target: Path) -> int:
             pass
         names = []
         if source.is_dir():
-            names = [c.name for c in source.iterdir() if c.is_dir() and (c / "page.json").is_file()]
+            names = [c.name for c in source.iterdir() if c.is_dir() and _has_page_file(c)]
         copied: list[Path] = []
         try:
             target.mkdir(parents=True, exist_ok=True)
@@ -166,6 +173,7 @@ def new_page(name: str) -> dict[str, Any]:
 _save_lock = threading.RLock()  # (move_pages switches the folder while holding it)
 _saved_at: dict[str, float] = {}  # page id -> "modified" of the version on disk
 _trashed: set[str] = set()  # deleted: a late save or image mustn't bring the folder back
+_written: dict[str, Optional[tuple[int, int]]] = {}  # page id -> (mtime, size) of the page.json this session saved
 
 
 def save_page(page: dict[str, Any]) -> None:
@@ -178,48 +186,84 @@ def save_page(page: dict[str, Any]) -> None:
             return  # an older snapshot finishing late
         folder = page_dir(page_id)
         folder.mkdir(parents=True, exist_ok=True)
-        _write_json(folder / "page.json", page)
+        target = folder / PAGE_FILE
+        temp = json_files.write_temp(target, page)
+        written = _written.get(page_id)  # (the page.json this session saved: if untouched since, it's good)
+        json_files.replace(temp, target, _is_page, trusted=written is not None and _stamp(target) == written)
+        _written[page_id] = _stamp(target)
         _saved_at[page_id] = modified
 
 
-def _write_json(target: Path, data: Any) -> None:
-    temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")  # unique: two saves never share a temp file
-    temp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(temp, target)
+def _stamp(path: Path) -> Optional[tuple[int, int]]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _is_page(data: Any) -> bool:
+    return isinstance(data, dict) and isinstance(data.get("items"), list)
+
+
+def _has_page_file(folder: Path) -> bool:
+    return (folder / PAGE_FILE).is_file() or (folder / BACKUP_FILE).is_file()
+
+
+_restored: set[str] = set()  # pages opened from their backup, not yet told (see take_restored)
+
+
+def _read_page(page_id: str) -> tuple[Optional[dict[str, Any]], bool]:
+    """(the page, whether it came from the backup); (None, False) if neither copy can be read."""
+    page, from_backup = json_files.read_with_backup(page_dir(page_id) / PAGE_FILE, _is_page)
+    if page is None:
+        return None, False
+    page["id"] = page_id  # the folder's name is the id (a backup copied with a duplicated page has the old one)
+    page.setdefault("view", None)
+    return page, from_backup
 
 
 def load_page(page_id: str) -> dict[str, Any]:
-    path = page_dir(page_id) / "page.json"
-    try:
-        page = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise PageError(f"Couldn't open the page: {exc}") from exc
-    if not isinstance(page, dict) or not isinstance(page.get("items"), list):
-        raise PageError("The page file is damaged.")
-    page.setdefault("view", None)
+    """A page from its folder: from page.json, or its backup if page.json is damaged (see
+    take_restored). PageError if neither can be read; the folder is left as it is."""
+    page, from_backup = _read_page(page_id)
+    if page is None:
+        raise PageError("This page couldn't be opened: its file is damaged and there's no good earlier copy. "
+                        "Its folder is kept as it was.")
+    if from_backup:
+        _restored.add(page_id)
     return page
 
 
-_summaries: dict[str, tuple[int, dict[str, Any]]] = {}  # page id -> (page.json mtime, summary)
+def take_restored(page_id: str) -> bool:
+    """Whether the page was last opened from its backup (page.json was damaged); asks once."""
+    if page_id in _restored:
+        _restored.discard(page_id)
+        return True
+    return False
+
+
+_summaries: dict[str, tuple[Any, dict[str, Any]]] = {}  # page id -> (page files' stamps, summary)
 
 
 def page_summary(page_id: str) -> Optional[dict[str, Any]]:
-    """A page's id, name and timestamps (items left out), or None if it can't be read."""
-    path = page_dir(page_id) / "page.json"
-    try:
-        mtime = path.stat().st_mtime_ns
-    except OSError:
+    """A page's id, name and timestamps (items left out), or None if it has no page file. A page
+    neither copy of which can be read is still listed ("damaged": True), so it keeps its place
+    in the index and can be deleted (opening it says what's wrong)."""
+    folder = page_dir(page_id)
+    stamps = (_stamp(folder / PAGE_FILE), _stamp(folder / BACKUP_FILE))
+    if stamps == (None, None):
         return None
     cached = _summaries.get(page_id)
-    if cached and cached[0] == mtime:
+    if cached and cached[0] == stamps:
         return dict(cached[1])
-    try:
-        page = load_page(page_id)
-    except PageError:
-        return None
-    summary = {k: page.get(k) for k in ("name", "created", "modified")}
+    page, _from_backup = _read_page(page_id)
+    if page is not None:
+        summary = {k: page.get(k) for k in ("name", "created", "modified")}
+    else:
+        summary = {"name": "Damaged page", "created": None, "modified": None, "damaged": True}
     summary["id"] = page_id  # the folder's name is the id the index uses
-    _summaries[page_id] = (mtime, summary)
+    _summaries[page_id] = (stamps, summary)
     return dict(summary)
 
 
@@ -229,11 +273,55 @@ def list_pages() -> list[dict[str, Any]]:
     folder = pages_dir()
     if folder.is_dir():
         for child in folder.iterdir():
-            if child.name not in _trashed and (child / "page.json").is_file():
+            if child.name not in _trashed and _has_page_file(child):
                 summary = page_summary(child.name)
                 if summary is not None:
                     pages.append(summary)
     return sorted(pages, key=lambda p: p.get("created") or 0)
+
+
+UNUSED_IMAGE_AGE = 3600.0  # seconds: an image file newer than this is never removed (it may be on its way in)
+
+
+def remove_unused_images(page: dict[str, Any]) -> int:
+    """Delete image files in the page's folder that neither the page nor its backup uses (left
+    by items deleted in earlier sessions). Call it as the page opens, before there's undo
+    history that could bring a deleted item back. Returns how many went."""
+    page_id = page["id"]
+    folder = images_dir(page_id)
+    try:
+        files = [f for f in folder.iterdir() if f.is_file() and not f.name.endswith(".tmp")]
+    except OSError:
+        return 0
+    if not files:
+        return 0
+    used = set(_strings(page))
+    backup = json_files.read(page_dir(page_id) / BACKUP_FILE, _is_page)
+    if backup is not None:
+        used.update(_strings(backup))
+    removed = 0
+    with _save_lock:  # (store_blob marks a file it reuses as new under the same lock)
+        cutoff = time.time() - UNUSED_IMAGE_AGE
+        for file in files:
+            try:
+                if file.name not in used and file.stat().st_mtime < cutoff:
+                    file.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _strings(data: Any) -> Iterator[str]:
+    """Every string in a page (wherever an item keeps an image's file name, it's found)."""
+    if isinstance(data, str):
+        yield data
+    elif isinstance(data, dict):
+        for value in data.values():
+            yield from _strings(value)
+    elif isinstance(data, list):
+        for value in data:
+            yield from _strings(value)
 
 
 def delete_page(page_id: str) -> None:
@@ -306,7 +394,7 @@ def duplicate_page(page_id: str) -> dict[str, Any]:
     copy.update(id=uuid.uuid4().hex, name=name[:MAX_NAME], created=now, modified=now)
     target = page_dir(copy["id"])
     try:
-        shutil.copytree(page_dir(page_id), target, ignore=shutil.ignore_patterns("*.tmp"))
+        shutil.copytree(page_dir(page_id), target, ignore=shutil.ignore_patterns("*.tmp", BACKUP_FILE, DAMAGED_FILE))
     except OSError as exc:
         shutil.rmtree(target, ignore_errors=True)
         raise PageError(f"Couldn't copy the page: {exc}") from exc
@@ -331,22 +419,31 @@ def _empty_index() -> dict[str, Any]:
     return {"version": INDEX_VERSION, "id": None, "folders": [], "pages": []}
 
 
+def _is_index(data: Any) -> bool:
+    return isinstance(data, dict)
+
+
 def _load_index() -> dict[str, Any]:
-    try:
-        index = json.loads(index_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return _empty_index()
-    return index if isinstance(index, dict) else _empty_index()
+    return _read_index()[0]
+
+
+def _read_index() -> tuple[dict[str, Any], bool]:
+    """(the index: its backup if index.json is damaged, so the folders aren't lost, or empty if
+    neither can be read; whether index.json needs saving again: it's damaged)."""
+    index, from_backup = json_files.read_with_backup(index_path(), _is_index)
+    damaged = from_backup or (index is None and index_path().exists())
+    return (index if index is not None else _empty_index()), damaged
 
 
 def _save_index(index: dict[str, Any]) -> None:
     index_path().parent.mkdir(parents=True, exist_ok=True)
-    _write_json(index_path(), index)
+    json_files.write(index_path(), index, _is_index)  # (keeps the one it replaces as index.json.bak)
 
 
 def page_tree() -> dict[str, Any]:
-    """The index, repaired against the page folders on disk (and saved if that changed it)."""
-    raw = _load_index()
+    """The index, repaired against the page folders on disk (and saved if that changed it, or
+    index.json was damaged)."""
+    raw, damaged = _read_index()
     on_disk = [p["id"] for p in list_pages()]  # oldest first
     known = set(on_disk)
     seen_pages: set[str] = set()
@@ -379,7 +476,7 @@ def page_tree() -> dict[str, Any]:
 
     index = clean(raw, True, 0)
     index["pages"] += [page_id for page_id in on_disk if page_id not in seen_pages]
-    if index != raw and (index["folders"] or index["pages"] or index_path().exists()):
+    if damaged or (index != raw and (index["folders"] or index["pages"] or index_path().exists())):
         _save_index(index)
     return index
 
@@ -553,6 +650,12 @@ def store_blob(page_id: str, data: bytes, ext: str) -> str:
         raise PageError("The page was deleted.")
     folder = images_dir(page_id)
     target = folder / name
+    with _save_lock:
+        try:
+            os.utime(target)  # (already stored: marked as new, so remove_unused_images keeps it)
+            return name
+        except OSError:
+            pass
     if not target.is_file():
         folder.mkdir(parents=True, exist_ok=True)
         temp = folder / f"{name}.{uuid.uuid4().hex}.tmp"
@@ -579,6 +682,8 @@ def _to_qimage(im: Image.Image, max_side: int) -> QImage:
 def image_size(path: Path) -> Optional[tuple[int, int]]:
     """Full size of an image file, read from its header only (fast)."""
     try:
+        if is_hdr(path):
+            return hdr_image_size(path)  # (reading the pixels just for this would be slow)
         with open_image(path, max_size=64) as im:
             return im.size
     except Exception:  # pylint: disable=broad-except
@@ -589,7 +694,7 @@ def decode_file(path: Path, max_side: int = MAX_DECODE_SIDE) -> tuple[QImage, tu
     """(image to show, full size) for any image file the library can preview. Safe off the UI thread."""
     try:
         with open_image(path, max_size=max_side) as im:
-            size = im.size
+            size = (hdr_image_size(path) or im.size) if is_hdr(path) else im.size  # (EXR / HDR come subsampled)
             return _to_qimage(im, max_side), size
     except Exception as exc:  # pylint: disable=broad-except
         raise PageError(f"Couldn't read {path.name}: {exc}") from exc

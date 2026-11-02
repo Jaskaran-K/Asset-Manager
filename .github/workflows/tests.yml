@@ -18,6 +18,7 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
+    timeout-minutes: 30 # a hung test stops here, not after GitHub's 6 hours
 
     steps:
       - name: Checkout code
@@ -28,12 +29,14 @@ jobs:
         with:
           python-version: '3.14'
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt -c requirements.lock # the exact versions tested locally
 
       - name: Run tests
         shell: pwsh

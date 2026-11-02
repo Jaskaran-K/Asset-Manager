@@ -59,6 +59,10 @@ def image_size(path: str) -> Optional[tuple[int, int]]:
             return _psd_size(path)
         if ext == ".hdr":
             return _hdr_size(path)
+        if ext == ".exr":
+            from .hdr_image import image_size as exr_size
+
+            return exr_size(path)
         from PIL import Image  # header only: Image.open doesn't decode pixels
 
         with Image.open(path) as im:

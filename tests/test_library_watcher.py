@@ -108,9 +108,56 @@ def test_watch_limit(monkeypatch, lib, qapp):
     assert len(watcher.watched_keys()) == 2 and not watcher.is_complete()
 
 
+def test_every_folder_stays_watched_after_rescans(tmp_path, qapp):
+    """Qt's Windows watcher refused folders removed in bulk and added straight back beyond the
+    first 63: after a rescan most of the library went unwatched (and still said complete)."""
+    folders = [tmp_path / f"folder{i}" for i in range(150)]
+    for folder in folders:
+        folder.mkdir()
+    watcher = LibraryWatcher()
+    for _scan in range(3):  # the first scan, then two Refreshes
+        watcher.watch(folders)
+        qapp.processEvents()
+        assert len(watcher.watched_keys()) == 150 and watcher.is_complete()
+    reports = []
+    watcher.folders_changed.connect(reports.append)
+    watcher._timer.setInterval(50)
+    (folders[-1] / "new.png").write_bytes(b"png")
+    deadline = time.monotonic() + 5
+    while not reports and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert reports and path_key(folders[-1]) in {path_key(p) for p in reports[0]}
+
+
+def test_folders_qt_refuses_make_the_watch_incomplete(tmp_path, qapp):
+    watcher = LibraryWatcher()
+    watcher.watch([tmp_path, tmp_path / "not-there"])
+    assert len(watcher.watched_keys()) == 1 and not watcher.is_complete()
+
+
 def test_library_inside_an_excluded_folder_name_is_still_scanned(tmp_path):
     root = tmp_path / "build" / "assets"  # "build" is normally skipped inside libraries
     (root / "dist").mkdir(parents=True)
     (root / "a.png").write_bytes(b"png")
     (root / "dist" / "skipped.png").write_bytes(b"png")
     assert names(AssetScanner(supported_extensions=EXTS).scan(root)) == ["a.png"]
+
+
+def test_same_named_files_come_in_the_same_order_every_time(tmp_path):
+    for folder in ("b", "a", "c"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "Albedo.png").write_bytes(b"png")
+    found = AssetScanner(supported_extensions=EXTS).scan(tmp_path)
+    assert [a.path.parent.name for a in found] == ["a", "b", "c"]  # (by name, then folder)
+
+
+def test_a_scan_stops_when_asked(lib):
+    asked = []
+
+    def stop():
+        asked.append(1)
+        return len(asked) > 1  # (after the first folder)
+
+    found = AssetScanner(supported_extensions=EXTS).scan(lib, should_stop=stop)
+    assert len(found) < 3 and len(asked) == 2

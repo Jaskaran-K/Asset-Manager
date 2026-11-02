@@ -10,7 +10,9 @@ Each release has two downloads:
 - **AssetManager.exe**: the portable single file. Put it anywhere and run it. It updates by swapping itself.
 
 Settings (`~\.3d_asset_manager_config.json`) and the library (`%LOCALAPPDATA%\AssetManager`) are shared by both
-and are never touched by installing, updating or uninstalling.
+and are never touched by installing, updating or uninstalling. Settings are saved so a crash can't leave the file
+half written, and the copy before the latest save is kept next to it (`.json.bak`): if the file is ever damaged,
+the app starts from that copy and notes it in the crash log.
 
 ## The library
 
@@ -21,6 +23,13 @@ and are never touched by installing, updating or uninstalling.
   scan runs in the background.
 - **Big libraries:** the grid only does work for the cards on screen, and thumbnails are cached on disk
   (`%LOCALAPPDATA%\AssetManager\thumbnails`, capped at 512 MB), so 50,000 files scroll as smoothly as 50.
+  After a fast scroll, the cards you land on are made first, and cards you scrolled past are skipped. Only the
+  most recently seen thumbnails stay in memory (150 MB); the rest reload from the disk cache. The cache keeps
+  pictures without their card, so changing the theme doesn't read every file again.
+- **HDR images:** `.exr` (with the OpenEXR package) and `.hdr` files get thumbnails and open in the viewer. HDRIs
+  are tone mapped so bright skies keep their detail, and one-channel height maps are stretched to their range.
+  Files that can't be shown say so on their card ("No preview", or "Too large to preview" for images over
+  about 180 megapixels).
 - **Drag files out** of the grid into Explorer, Blender, Photoshop, Unreal and so on. They're copied; the
   library keeps its files.
 - **Favorites and ratings:** select files and press **F** to star them, or **1** to **5** to rate them
@@ -29,13 +38,16 @@ and are never touched by installing, updating or uninstalling.
   the copies you tick to the Recycle Bin. One copy of every file is always kept.
 - **Undo:** **Ctrl+Z** / **Ctrl+Y** undo and redo tag, favorite and rating changes.
 - **Viewer:** **Page Up** / **Page Down** (or Alt+Left / Alt+Right, or the ‹ › buttons) step through the files
-  shown in the grid without closing the viewer.
+  shown in the grid without closing the viewer. Images load in the background, so the app never waits for a big
+  one; images over 8192 pixels are shown at 8192 (the details list their real size), and files over a
+  gigapixel, which would need many GB to open, say so instead.
 - **Sidebar:** the menu button (or **Ctrl+B**) slides it in and out, and dragging its right edge resizes it. With the pin button it stays
   docked beside the grid. Unpinned, it floats over the grid on frosted glass and slides away after you pick a
   category (or press Esc, or click beside it).
 - **Looks:** **Settings > Appearance** has the themes and a background texture (grain, dots, grid, lines,
   hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
-  their colors from the theme. Lists scroll smoothly, categories slide open, and when the window is resized
+  their colors from the theme, and so do the windows' title bars (on Windows 11, the theme's own colour).
+  Lists scroll smoothly, categories slide open, and when the window is resized
   the grid's cards glide into their new rows.
 - **Your own themes:** the **Theme Studio** (Start menu: Asset Manager Theme Studio, or
   `AssetManager.exe --theme-studio`) is a separate window for making themes and backgrounds. You edit every
@@ -130,7 +142,9 @@ making your first board. The list below is the full reference.
   the board's colour, as sharp as its images allow (up to 16384 pixels on the longest side).
 - **Saving:** pages save themselves a couple of seconds after each change, and when you switch page or quit.
   Library images are *linked* (the page keeps a small copy in case the file moves); pasted and web images are
-  stored in the page.
+  stored in the page. Images you've deleted from a page are cleared from its folder the next time it opens.
+  Each page keeps its previous save as `page.json.bak`. If its file is ever damaged (a disk error, a sync tool),
+  the page opens from that copy and says so. A page with no good copy stays in the list, in its folder, to delete.
 - **Where pages are kept:** one folder per page, in `%LOCALAPPDATA%\AssetManager\artbook` unless you choose
   another folder in Settings > General > **Artbook** (a synced OneDrive or Dropbox folder keeps them backed up).
   **Change...** moves your pages there: they're copied first and only then removed from the old folder. A folder
@@ -150,7 +164,9 @@ making your first board. The list below is the full reference.
 Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid to turn it round in 3D.
 
 - **Big models:** the viewer opens at once and the model loads in the background. A 300 MB, 14-million-triangle
-  sculpt takes a few seconds (binary FBX is read with a quick reader of its own, `core/fbx_fast.py`).
+  sculpt takes a few seconds: binary FBX and OBJ are read with quick readers of their own (`core/fbx_fast.py`,
+  `core/obj_fast.py`; a 270 MB OBJ in about 5 seconds, a 2 GB one in about a minute). OBJ files keep their own
+  normals, so hard edges stay sharp. Moving on to another file or closing the viewer stops a model still loading.
 - **Moving round:** drag to turn the model, right-drag (or middle-drag) to pan, scroll to zoom. **R** resets the
   view, **G** the ground grid, **W** cycles shaded / wireframe / both.
 - **Its look:** pick a **material** (Matte, Clay, Phong, Glossy, Metallic, Toon, or Normals to check the
@@ -231,19 +247,27 @@ Tags let you find groups of files without relying on file names. They're stored 
 - **Searching** (hover over the search box for a reminder):
   - `tag:name` (or `tag:"two words"`) then Enter or Space adds a tag chip; every chip must match
   - `-tag:name` files without the tag; `tag:a|b` files with any of them; click a chip to switch has / doesn't have
-  - `is:fav`, `rating:>=3`, `ext:png,jpg`, `size:>10mb`
+  - `is:fav`, `rating:>=3`, `ext:png,jpg`, `size:>10mb`. Sizes, lengths and face counts without `<` or `>` match
+    to the precision typed: `size:10mb` is 9.5-10.5 MB, `size:10.2mb` is 10.15-10.25 MB
+  - a minus excludes, as with tags: `-ext:png`, `-is:fav`
   - `res:>=2048` (image or video resolution, `res:4k` = 4096), `dur:<30s`, `poly:<10k` (3D model faces). These
     details are read in the background after a scan; files not read yet don't match.
-  - plus any file name text. Backspace removes the last chip; Esc or ✕ clears everything.
-- **Collections:** click the star in the search box to save the search in the sidebar. Right-click one to rename or delete it.
-- **Backups:** the database is backed up automatically before upgrades and app updates (the last 10 are kept).
-  **Tools** also has Back Up Library Now, Restore Library Backup..., and Export / Import Tags (a `.json` file with
-  your tags, favorites, ratings and collections, for moving to another PC).
+  - plus file name words, in any order (`rock wall` finds `Wall_Rock_02.png`; `"rock wall"` keeps them together).
+    Backspace removes the last chip; Esc or ✕ clears everything.
+- **Collections:** click the star in the search box to save the search in the sidebar. Right-click one to rename or
+  delete it. Renaming a tag updates the collections that use it.
+- **Backups:** the database is backed up automatically once a day (the last 7 are kept) and before upgrades and app
+  updates (the last 10). If it's ever damaged, the app offers to restore the newest good backup, keeping the
+  damaged file in the backups folder. **Tools** also has Back Up Library Now, Restore Library Backup..., and
+  Export / Import Tags (a `.json` file with your tags, favorites, ratings and collections, for moving to another PC).
+  Artbook pages, their folders and PDF notes each keep their previous save too (`.bak`), opened if a file is damaged.
 
 Known limitations:
 - A file that's moved *and* edited before the next scan, or that has an identical copy, can't be matched and starts
   untagged (rather than risk tagging the wrong file).
-- Database entries for deleted files are kept (they might be on a drive that's just offline).
+- After each library scan, the database forgets files the scan didn't find (deleted ones, or folders opened with
+  Open Folder) unless they have custom tags, a favorite or a rating; those are kept in case the file turns up again,
+  as are files on a drive that's offline.
 - 3D model face counts are read for files up to 60 MB; bigger ones don't match `poly:` searches.
 
 ## When something goes wrong
@@ -261,6 +285,7 @@ always show up on the page. **Settings > Appearance > Animations** turns animati
 
 ## Development
 
-`pip install -r requirements-dev.txt`, then `python -m pytest`. The project rules (shortcuts, threads, tooltips)
-are in `CLAUDE.md`. Release builds: `pyinstaller AssetManager.spec` makes both the portable exe and the folder
+`pip install -r requirements-dev.txt -c requirements.lock`, then `python -m pytest`. `requirements.lock` holds the
+exact versions the tests pass with; CI and release builds install those, so a release never ships an untested
+version (its header says how to update it). The project rules (shortcuts, threads, tooltips) are in `CLAUDE.md`. Release builds: `pyinstaller AssetManager.spec` makes both the portable exe and the folder
 build; `iscc /DAppVersion=x.y.z installer\AssetManager.iss` turns the folder build into the installer.

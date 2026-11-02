@@ -7,6 +7,8 @@ the toolbar's full width no longer holds the panel open.
 
 The panel's owner calls update() on resize. (A plain object, not an event filter: Qt would
 call a filter while the panel is being destroyed, after Python has freed the filter's state.)
+
+PathField: the main toolbar's folder path, shortened in the middle when it doesn't fit.
 """
 
 from __future__ import annotations
@@ -14,7 +16,36 @@ from __future__ import annotations
 from typing import Callable, Optional, Sequence
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QAbstractButton, QLayout, QSizePolicy, QToolButton, QWidget
+from PySide6.QtWidgets import QAbstractButton, QLayout, QLineEdit, QSizePolicy, QStyle, QStyleOptionFrame, QToolButton, QWidget
+
+
+class PathField(QLineEdit):
+    """The toolbar's read-only folder path. One too long for the field is shortened in the middle
+    ("D:\\Assets\\...\\Library"), keeping the drive and the folder's own name, instead of being
+    cut off mid-letter at the left. (The owner puts the whole path in the tooltip.)"""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self._full = ""
+
+    def set_path_text(self, text: str) -> None:
+        self._full = text
+        self._fit()
+
+    def path_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self) -> None:
+        option = QStyleOptionFrame()
+        self.initStyleOption(option)
+        room = self.style().subElementRect(QStyle.SubElement.SE_LineEditContents, option, self).width() - 4
+        self.setText(self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(0, room)))
+        self.setCursorPosition(0)
 
 
 class CompactToolbar:

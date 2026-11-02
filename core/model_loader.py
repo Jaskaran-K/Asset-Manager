@@ -11,10 +11,17 @@ import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
-import trimesh
+
+
+def _trimesh():
+    """trimesh, imported when a model is first read: it brings scipy with it, over half a
+    second of the app's start-up otherwise."""
+    import trimesh
+
+    return trimesh
 
 
 @dataclass
@@ -239,15 +246,33 @@ def parse_fbx_file(file_path: Path) -> Mesh3D:
     return mesh
 
 
-def parse_obj_file(file_path: Path) -> Mesh3D:
-    """Parse Wavefront OBJ file into normalized Mesh3D geometry."""
+def parse_obj_file(file_path: Path, should_stop: Optional[Callable[[], bool]] = None) -> Mesh3D:
+    """Parse Wavefront OBJ file into normalized Mesh3D geometry. should_stop() is asked between
+    blocks of a big file: True raises LoadCancelled (nobody wants the model any more)."""
     metadata: dict[str, str] = {
         "Format": "Wavefront OBJ",
         "File Size": f"{file_path.stat().st_size / (1024*1024):.2f} MB",
     }
 
-    # 1. High-speed load via trimesh
+    # 1. The quick reader (core.obj_fast), keeping the file's own normals
+    from core.obj_fast import LoadCancelled, ObjError, read_obj
+
     try:
+        verts, faces, normals = read_obj(file_path, should_stop)
+        return _normalize_geometry(
+            name=file_path.name, raw_verts=verts, raw_faces=faces, raw_normals=normals, format_type="OBJ",
+            metadata=metadata,
+        )
+    except (LoadCancelled, MemoryError):
+        raise
+    except ObjError as exc:
+        metadata["Quick Reader Note"] = str(exc)  # (what it couldn't follow: trimesh reads it instead)
+    except Exception as exc:  # pylint: disable=broad-except
+        metadata["Quick Reader Note"] = f"{type(exc).__name__}: {exc}"
+
+    # 2. trimesh
+    try:
+        trimesh = _trimesh()
         loaded = trimesh.load(str(file_path), force="mesh")
         if isinstance(loaded, trimesh.Scene):
             loaded = loaded.to_geometry() if hasattr(loaded, "to_geometry") else trimesh.util.concatenate(loaded.dump())
@@ -265,7 +290,7 @@ def parse_obj_file(file_path: Path) -> Mesh3D:
     except Exception as exc:
         metadata["Trimesh Load Note"] = str(exc)
 
-    # 2. Pure Python fallback parser
+    # 3. Pure Python fallback parser
     raw_verts: list[tuple[float, float, float]] = []
     raw_normals: list[tuple[float, float, float]] = []
     faces: list[list[int]] = []
@@ -332,6 +357,7 @@ def parse_gltf_file(file_path: Path) -> Mesh3D:
     }
 
     try:
+        trimesh = _trimesh()
         loaded = trimesh.load(str(file_path), force="mesh")
         if isinstance(loaded, trimesh.Scene):
             loaded = loaded.to_geometry() if hasattr(loaded, "to_geometry") else trimesh.util.concatenate(loaded.dump())
@@ -364,6 +390,7 @@ def parse_generic_mesh_file(file_path: Path, format_name: str) -> Mesh3D:
     }
 
     try:
+        trimesh = _trimesh()
         loaded = trimesh.load(str(file_path), force="mesh")
         if isinstance(loaded, trimesh.Scene):
             loaded = loaded.to_geometry() if hasattr(loaded, "to_geometry") else trimesh.util.concatenate(loaded.dump())
@@ -388,13 +415,14 @@ def parse_generic_mesh_file(file_path: Path, format_name: str) -> Mesh3D:
     return mesh
 
 
-def load_3d_model(file_path: Path) -> Mesh3D:
-    """Load and parse any 3D model by its extension with fallback."""
+def load_3d_model(file_path: Path, should_stop: Optional[Callable[[], bool]] = None) -> Mesh3D:
+    """Load and parse any 3D model by its extension with fallback. should_stop: asked while a big
+    OBJ is read; True stops it (core.obj_fast.LoadCancelled)."""
     ext = file_path.suffix.lower()
     if ext == ".fbx":
         return parse_fbx_file(file_path)
     if ext == ".obj":
-        return parse_obj_file(file_path)
+        return parse_obj_file(file_path, should_stop)
     if ext in {".gltf", ".glb"}:
         return parse_gltf_file(file_path)
     if ext in {".stl", ".ply", ".3ds", ".dae", ".off"}:

@@ -194,7 +194,9 @@ def test_turning_the_lights():
 def test_a_rendered_thumbnail(qapp):
     from core.model_thumbnail import render_model
 
-    sphere = model_loader.trimesh.creation.icosphere(subdivisions=3)
+    import trimesh
+
+    sphere = trimesh.creation.icosphere(subdivisions=3)
     mesh = model_loader._normalize_geometry("ball", np.asarray(sphere.vertices), np.asarray(sphere.faces), None, "OBJ", {})
     image = render_model(mesh.vertices, mesh.faces, mesh.normals, 80)
     assert (image.width(), image.height()) == (80, 80)

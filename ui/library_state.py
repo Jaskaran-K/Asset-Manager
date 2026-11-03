@@ -19,11 +19,12 @@ from typing import Callable, Optional
 import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from core import archives
 from core.library_snapshot import save_snapshot
 from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
 from core.metadata import read_cost, read_details
 from core.scanner import AssetItem, AssetScanner, asset_sort_key
-from core.settings import get_file_extensions
+from core.settings import get_archive_contents, get_file_extensions
 from core.tag_repository import NO_MARKS, AssetMeta, Marks, Tag, TagRepository, get_repository
 from ui.tag_widgets import run_in_background
 
@@ -35,11 +36,14 @@ class ScanWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, folders: list[Path], extensions: list[str], save_snapshot: bool = False):
+    def __init__(self, folders: list[Path], extensions: list[str], save_snapshot: bool = False, archive_contents: bool = False):
+        """folders: folders to scan with their subfolders, or an archive (its files are listed).
+        archive_contents: also list the files inside the archives found."""
         super().__init__()
         self.folders = folders
         self.extensions = extensions
         self.save_snapshot = save_snapshot  # library scans are remembered for an instant next launch
+        self.archive_contents = archive_contents
         self._stop = threading.Event()
 
     def cancel(self) -> None:
@@ -54,10 +58,17 @@ class ScanWorker(QObject):
             directories: set[Path] = set()  # every folder walked, for the library watcher
             # Overlapping folders (e.g. a parent and its subfolder) must not duplicate files
             for folder in self.folders:
-                for asset in scanner.scan(folder, recursive=True, directories=directories, should_stop=self._stop.is_set):
+                if archives.is_archive_path(folder):  # an opened archive: its files
+                    found = archives.entry_assets(Path(folder), self.extensions)
+                else:
+                    found = scanner.scan(folder, recursive=True, directories=directories, should_stop=self._stop.is_set)
+                for asset in found:
                     if asset.path not in seen:
                         seen.add(asset.path)
                         assets.append(asset)
+            if self.archive_contents:
+                # (each archive's listing is cached by its size and date: only new or changed ones are read)
+                assets.extend(archives.expand_archives(list(assets), self.extensions, should_stop=self._stop.is_set))
             if self._stop.is_set():
                 self.cancelled.emit()
                 return
@@ -66,7 +77,7 @@ class ScanWorker(QObject):
             info = self._sync_tags(assets, forget_others=self.save_snapshot, should_stop=self._stop.is_set)
             info["dirs"] = directories
             if self.save_snapshot and info["error"] is None:
-                save_snapshot(self.folders, self.extensions, assets, info["ids"])
+                save_snapshot(self.folders, self.extensions, assets, info["ids"], self.archive_contents)
             self.finished.emit(assets, info)
         except Exception as exc:  # pylint: disable=broad-except
             self.failed.emit(str(exc))
@@ -107,6 +118,17 @@ class ScanReport:
     had_files: bool  # anything was shown before (the snapshot, or an earlier scan)
     relinked: int  # moved / renamed files that kept their tags
     error: Optional[str]  # the tag database couldn't be used (browsing still works)
+
+
+@dataclass(frozen=True)
+class SavedView:
+    """The files shown and what's known about them (LibraryState.save_view)."""
+
+    assets: list[AssetItem]
+    ids: dict[str, int]
+    tags: dict[int, list[Tag]]
+    marks: dict[int, Marks]
+    meta: dict[int, AssetMeta]
 
 
 @dataclass(frozen=True)
@@ -213,11 +235,12 @@ class LibraryState(QObject):
     # Scanning
     # ------------------------------------------------------------------
     def start_scan(self, folders: list[Path], extensions: list[str], save_snapshot: bool = False) -> None:
-        """Scan folders on a background thread; replaces a scan still running (its results are dropped)."""
+        """Scan folders (or an archive) on a background thread; replaces a scan still running (its
+        results are dropped)."""
         self._retire_scan()
 
         self.scan_thread = QThread(self)
-        self.scan_worker = ScanWorker(folders, extensions, save_snapshot=save_snapshot)
+        self.scan_worker = ScanWorker(folders, extensions, save_snapshot=save_snapshot, archive_contents=get_archive_contents())
         self.scan_worker.moveToThread(self.scan_thread)
 
         self.scan_thread.started.connect(self.scan_worker.run)
@@ -284,6 +307,19 @@ class LibraryState(QObject):
         """No folders to show (none set up)."""
         self.assets = []
 
+    def save_view(self) -> "SavedView":
+        """What's shown now, to come back to (leaving an opened archive) without waiting for a scan."""
+        return SavedView(list(self.assets), dict(self.ids), dict(self.tags), dict(self.marks), dict(self.meta))
+
+    def restore_view(self, saved: "SavedView") -> None:
+        """Show a saved view again (a scan then brings it up to date)."""
+        self._retire_scan()
+        self._meta_generation += 1  # (the details being read belong to what was shown)
+        self.meta_todo = 0
+        self.assets, self.ids, self.tags, self.marks, self.meta = (
+            saved.assets, saved.ids, saved.tags, saved.marks, saved.meta,
+        )
+
     # ------------------------------------------------------------------
     # Live updates (LibraryWatcher)
     # ------------------------------------------------------------------
@@ -295,10 +331,10 @@ class LibraryState(QObject):
             self._queued_folders.extend(folders)
             return
         self._rescan_busy = True
-        watched, extensions = self.watcher.watched_keys(), get_file_extensions()
+        watched, extensions, archive_contents = self.watcher.watched_keys(), get_file_extensions(), get_archive_contents()
         run_in_background(
             self.repo,
-            lambda repo: rescan_folders(folders, extensions, watched, repo),
+            lambda repo: rescan_folders(folders, extensions, watched, repo, archive_contents=archive_contents),
             self._on_folders_rescanned,
             self._on_folders_rescan_failed,
         )

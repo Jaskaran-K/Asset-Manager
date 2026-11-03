@@ -23,6 +23,10 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - artbook_window:   {"on_top", "opacity", "click_through_tip"} of the separate Artbook window
                     (click-through itself is never remembered: the window would start out ignoring
                     the mouse; click_through_tip: show the heads-up when turning it on)
+- archive_contents: show the files inside archives (zip, RAR, 7z) among the library's files
+- seven_zip_path:   7-Zip's 7z.exe for RAR / 7z archives ("" = find it)
+- defaults_seen:    the newest set of default file types / categories added to this config's own
+                    lists (apply_new_defaults)
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .scanner import DOCUMENT_EXTENSIONS, MODEL_EXTENSIONS, TEXTURE_EXTENSIONS, VIDEO_EXTENSIONS
+from .scanner import ARCHIVE_EXTENSIONS, DOCUMENT_EXTENSIONS, MODEL_EXTENSIONS, TEXTURE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
 CONFIG_FILE_PATH: Path = Path.home() / ".3d_asset_manager_config.json"
@@ -56,6 +60,7 @@ DEFAULT_FILE_EXTENSIONS: list[str] = [
     ".psd", ".hdr", ".dds",
     ".pdf",
     ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+    ".zip", ".rar", ".7z",
 ]
 
 # Mirrors the original hard-coded sidebar layout
@@ -96,10 +101,28 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
         "extensions": [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"],
         "subcategories": [],
     },
+    {
+        "name": "Archives",
+        "color": "#a78bfa",
+        "extensions": [".zip", ".rar", ".7z"],
+        "subcategories": [],
+    },
 ]
 
+# File types and categories added to the defaults after the first release. A config that stores its
+# own lists (any edit in Settings saves them) never sees changed defaults, so apply_new_defaults()
+# adds each set once; what the user removes afterwards stays removed. Append only.
+NEW_DEFAULTS: tuple[dict[str, Any], ...] = (
+    {"version": 2, "extensions": [".zip"], "categories": ["Archives"]},
+    # (category_extensions: added to a category of that name the config has, if no category has them)
+    {"version": 3, "extensions": [".rar", ".7z"], "categories": [], "category_extensions": {"Archives": [".rar", ".7z"]}},
+)
+DEFAULTS_VERSION = NEW_DEFAULTS[-1]["version"]
+
 # Extensions the built-in viewer / thumbnailer knows how to preview
-PREVIEWABLE_EXTENSIONS: set[str] = MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS
+PREVIEWABLE_EXTENSIONS: set[str] = (
+    MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS | ARCHIVE_EXTENSIONS
+)
 
 _EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9_]+$")
 _COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -167,6 +190,49 @@ def _update_config(key: str, value: Any) -> None:
     config = _load_raw_config()
     config[key] = value
     _save_raw_config(config)
+
+
+def apply_new_defaults() -> bool:
+    """Add the file types and categories introduced since this config last looked (NEW_DEFAULTS)
+    to its own lists, once. Lists it doesn't store follow the defaults anyway. A category whose
+    name is taken already is left alone. Call at startup; True if anything was saved."""
+    config = _load_raw_config()
+    if not config and (CONFIG_FILE_PATH.exists() or _backup_path().exists()):
+        return False  # (unreadable: saving now would replace whatever is left of it)
+    seen = config.get("defaults_seen", 1 if config else DEFAULTS_VERSION)
+    if not config:
+        config["defaults_seen"] = seen  # a new install: it has the newest defaults
+        _save_raw_config(config)
+        return True
+    if not isinstance(seen, int) or seen >= DEFAULTS_VERSION:
+        return False
+    stored_exts = config.get("file_extensions")
+    categories = _sanitize_categories(config.get("categories"))
+    for change in NEW_DEFAULTS:
+        if change["version"] <= seen:
+            continue
+        if isinstance(stored_exts, list):
+            have = {str(e).lower() for e in stored_exts}
+            stored_exts += [e for e in change["extensions"] if e not in have]
+        if categories is not None:
+            names = {c["name"].casefold() for c in categories}
+            for name in change["categories"]:
+                default = next(c for c in DEFAULT_CATEGORIES if c["name"] == name)
+                if name.casefold() not in names:
+                    categories.append(copy.deepcopy(default))
+                    names.add(name.casefold())
+            for name, exts in change.get("category_extensions", {}).items():
+                taken = set().union(*(category_extensions(c) for c in categories)) if categories else set()
+                target = next((c for c in categories if c["name"].casefold() == name.casefold()), None)
+                if target is not None:
+                    target["extensions"] += [e for e in exts if e not in taken]
+    if isinstance(stored_exts, list):
+        config["file_extensions"] = stored_exts
+    if categories is not None:
+        config["categories"] = categories
+    config["defaults_seen"] = DEFAULTS_VERSION
+    _save_raw_config(config)
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -310,6 +376,25 @@ def get_categories() -> list[dict[str, Any]]:
 
 def set_categories(categories: list[dict[str, Any]]) -> None:
     _update_config("categories", categories)
+
+
+def get_seven_zip_path() -> str:
+    """7-Zip's 7z.exe (or its folder) for RAR / 7z archives; "" = find it (core.archives.find_seven_zip)."""
+    value = _load_raw_config().get("seven_zip_path", "")
+    return value if isinstance(value, str) else ""
+
+
+def set_seven_zip_path(path: str) -> None:
+    _update_config("seven_zip_path", path.strip())
+
+
+def get_archive_contents() -> bool:
+    """Show the files inside archives among the library's files (else only inside an opened one)."""
+    return _load_raw_config().get("archive_contents") is not False
+
+
+def set_archive_contents(show: bool) -> None:
+    _update_config("archive_contents", bool(show))
 
 
 def category_extensions(category: dict[str, Any]) -> set[str]:

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Iterable, Optional
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
+from .archives import expand_archives, location_key
 from .scanner import AssetItem, AssetScanner, asset_sort_key
 
 if TYPE_CHECKING:
@@ -53,7 +54,7 @@ class FolderRescan:
         trees = [path_key(t) for t in self.removed_trees + self.new_trees]
 
         def keep(asset: AssetItem) -> bool:
-            key = path_key(asset.path)
+            key = location_key(asset)  # (a file inside an archive goes and comes with its archive)
             if os.path.dirname(key) in replaced:
                 return False
             return not any(key.startswith(tree + os.sep) for tree in trees)
@@ -64,9 +65,11 @@ class FolderRescan:
 
 
 def rescan_folders(
-    folders: Iterable[Path], extensions: list[str], watched: set[str], repo: Optional["TagRepository"] = None
+    folders: Iterable[Path], extensions: list[str], watched: set[str], repo: Optional["TagRepository"] = None,
+    archive_contents: bool = False,
 ) -> FolderRescan:
-    """Rescan changed folders (runs on a worker thread). watched: path_key()s currently watched."""
+    """Rescan changed folders (runs on a worker thread). watched: path_key()s currently watched.
+    archive_contents: also list the files inside the archives found (a changed one is read again)."""
     scanner = AssetScanner(supported_extensions=extensions)
     result = FolderRescan()
     watched_children: dict[str, set[str]] = {}
@@ -97,6 +100,8 @@ def rescan_folders(
                 result.new_trees.append(child)
                 result.assets.extend(scanner.scan(child, recursive=True, directories=result.new_dirs))
 
+    if archive_contents:
+        result.assets.extend(expand_archives(list(result.assets), extensions))
     if repo is not None and result.assets:
         result.relinked = repo.relink_moved_assets(result.assets)
         result.ids = repo.sync_assets(result.assets)

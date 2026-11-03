@@ -38,12 +38,13 @@ def _group(items: Iterable[AssetItem], key: Callable[[AssetItem], Optional[str]]
 
 
 def find_duplicates(assets: Iterable[AssetItem], cancelled: Callable[[], bool] = lambda: False) -> list[DuplicateGroup]:
-    """Groups of identical files, biggest waste first. Empty files are ignored."""
+    """Groups of identical files, biggest waste first. Empty files are ignored, and so are files
+    inside archives (they can't be removed one by one)."""
     by_size: dict[int, list[AssetItem]] = {}
     seen: set[str] = set()
     for asset in assets:
         key = str(asset.path).lower()
-        if asset.size_bytes > 0 and key not in seen:
+        if asset.size_bytes > 0 and not asset.in_archive and key not in seen:
             seen.add(key)
             by_size.setdefault(asset.size_bytes, []).append(asset)
 

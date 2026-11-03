@@ -14,6 +14,7 @@ Solves:
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import os
 import threading
@@ -47,6 +48,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPdf import QPdfDocument
 
+from . import archives
 from .hdr_image import is_hdr, read_hdr_image
 from .psd_reader import read_psd_composite
 from .scanner import AssetItem
@@ -80,6 +82,9 @@ PALETTE_MAP = {
     "PDF": (QColor(239, 68, 68), QColor(185, 28, 28), QColor(127, 29, 29)),
     "MP4": (QColor(249, 115, 22), QColor(234, 88, 12), QColor(154, 52, 18)),
     "MOV": (QColor(244, 63, 94), QColor(225, 29, 72), QColor(136, 19, 55)),
+    "ZIP": (QColor(167, 139, 250), QColor(124, 58, 237), QColor(76, 29, 149)),
+    "RAR": (QColor(232, 121, 249), QColor(192, 38, 211), QColor(112, 26, 117)),
+    "7Z": (QColor(125, 211, 252), QColor(14, 165, 233), QColor(7, 89, 133)),
 }
 
 
@@ -165,11 +170,32 @@ def card_style() -> dict[str, QColor]:
     return {name: QColor(color) for name, color in _CARD_STYLE.items()}
 
 
+def _draw_archive_box(painter: QPainter, center_x: float, center_y: float, size: float, colors: tuple) -> None:
+    """A packed box with a zip down its front: the placeholder picture for archives."""
+    lid_col, body_col, zip_col = colors
+    w, h = size * 0.40, size * 0.30
+    left, top = center_x - w / 2, center_y - h / 2
+    painter.setPen(QPen(body_col.lighter(125), 1))
+    painter.setBrush(QBrush(body_col))
+    painter.drawRoundedRect(QRectF(left, top + h * 0.22, w, h * 0.78), 3, 3)
+    painter.setPen(QPen(lid_col.lighter(125), 1))
+    painter.setBrush(QBrush(lid_col))
+    painter.drawRoundedRect(QRectF(left - w * 0.05, top, w * 1.10, h * 0.30), 3, 3)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(zip_col.lighter(160)))
+    tooth = max(1.5, size * 0.022)
+    y = top + h * 0.36
+    while y < top + h - tooth:
+        painter.drawRect(QRectF(center_x - tooth * (1.2 if int((y - top) / tooth) % 4 else 0.2), y, tooth, tooth * 0.7))
+        y += tooth * 1.4
+
+
 def render_placeholder_image(
-    asset: AssetItem, size: int = 110, style: Optional[dict[str, QColor]] = None, note: str = ""
+    asset: AssetItem, size: int = 110, style: Optional[dict[str, QColor]] = None, note: str = "", label: str = ""
 ) -> QImage:
     """Render a fast procedural placeholder card (thread-safe QImage). note: a line such as
-    "No preview" under the picture, for files that can't be shown."""
+    "No preview" under the picture, for files that can't be shown. label: the badge's text
+    (default: the file type)."""
     style = style or _CARD_STYLE
     img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
@@ -194,6 +220,37 @@ def render_placeholder_image(
     cube_h = size * 0.12
     cube_depth = size * 0.18
 
+    if asset.is_archive:
+        _draw_archive_box(painter, center_x, center_y + size * 0.06, size, (top_col, left_col, right_col))
+    else:
+        _draw_cube(painter, center_x, center_y, cube_w, cube_h, cube_depth, (top_col, left_col, right_col))
+
+    if note:
+        note_color = QColor(style["badge_text"])
+        note_color.setAlpha(170)
+        painter.setPen(QPen(note_color))
+        painter.setFont(QFont("Segoe UI", max(5, int(size * 0.065))))
+        painter.drawText(QRectF(4, size * 0.60, size - 8, size * 0.13), Qt.AlignmentFlag.AlignCenter, note)
+
+    # Badge pill
+    badge_rect = QRectF(size * 0.15, size * 0.74, size * 0.70, size * 0.17)
+    painter.setBrush(QBrush(style["badge"]))
+    painter.setPen(QPen(top_col, 1.2))
+    painter.drawRoundedRect(badge_rect, 4, 4)
+
+    painter.setPen(QPen(style["badge_text"]))
+    font = QFont("Segoe UI", max(5, int(size * 0.08)), QFont.Weight.Bold)
+    painter.setFont(font)
+    painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label or asset.category_name)
+
+    painter.end()
+    return img
+
+
+def _draw_cube(painter: QPainter, center_x: float, center_y: float, cube_w: float, cube_h: float, cube_depth: float,
+               colors: tuple) -> None:
+    """The placeholder picture: an isometric cube in the file type's colours."""
+    top_col, left_col, right_col = colors
     # Isometric Cube / Swatch
     painter.setBrush(QBrush(top_col))
     painter.setPen(QPen(top_col.lighter(130), 1))
@@ -225,43 +282,65 @@ def render_placeholder_image(
     ])
     painter.drawPolygon(right_poly)
 
-    if note:
-        note_color = QColor(style["badge_text"])
-        note_color.setAlpha(170)
-        painter.setPen(QPen(note_color))
-        painter.setFont(QFont("Segoe UI", max(5, int(size * 0.065))))
-        painter.drawText(QRectF(4, size * 0.60, size - 8, size * 0.13), Qt.AlignmentFlag.AlignCenter, note)
-
-    # Badge pill
-    badge_rect = QRectF(size * 0.15, size * 0.74, size * 0.70, size * 0.17)
-    painter.setBrush(QBrush(style["badge"]))
-    painter.setPen(QPen(top_col, 1.2))
-    painter.drawRoundedRect(badge_rect, 4, 4)
-
-    painter.setPen(QPen(style["badge_text"]))
-    font = QFont("Segoe UI", max(5, int(size * 0.08)), QFont.Weight.Bold)
-    painter.setFont(font)
-    painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, asset.category_name)
-
-    painter.end()
-    return img
-
 
 def load_texture_picture(file_path: Path, size: int = 110) -> QImage:
     """The image scaled to fit a card of this size (raises if it can't be read).
 
     Pillow decodes it (no Qt 256 MB limit), with high-bit-depth modes converted first."""
     with open_image(file_path, max_size=size) as im:
-        # Convert high-bit-depth modes to RGBA *before* thumbnailing,
-        # because Pillow's BILINEAR resampling crashes on I;16 mode.
-        rgba_im = _safe_convert_pil_to_rgba(im)
+        return _fit_picture(im, size)
 
-        # Downscale preserving aspect ratio
-        rgba_im.thumbnail((size - 16, size - 32), Image.Resampling.BILINEAR)
-        rgba_im.load()
-        inner_w, inner_h = rgba_im.size
-        raw_bytes = rgba_im.tobytes()
+
+def _fit_picture(im: Image.Image, size: int) -> QImage:
+    """An opened image scaled to fit a card of this size."""
+    # Convert high-bit-depth modes to RGBA *before* thumbnailing,
+    # because Pillow's BILINEAR resampling crashes on I;16 mode.
+    rgba_im = _safe_convert_pil_to_rgba(im)
+
+    # Downscale preserving aspect ratio
+    rgba_im.thumbnail((size - 16, size - 32), Image.Resampling.BILINEAR)
+    rgba_im.load()
+    inner_w, inner_h = rgba_im.size
+    raw_bytes = rgba_im.tobytes()
     return QImage(raw_bytes, inner_w, inner_h, QImage.Format.Format_RGBA8888).copy()
+
+
+def load_member_image(member: "archives.ArchiveMember", size: int = 110) -> QImage:
+    """An image inside an archive scaled to fit a card (raises if it can't be read): decoded from
+    memory, or (EXR, HDR, 16-bit PSD: their readers want a file) from a temporary copy."""
+    if not is_hdr(member.base_name):
+        data = archives.read_bytes(member)
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                return _fit_picture(im, size)
+        except Image.DecompressionBombError:
+            raise
+        except Exception:  # pylint: disable=broad-except
+            if not member.base_name.lower().endswith((".psd", ".psb")):
+                raise
+    with archives.local_file(member) as path:
+        return load_texture_picture(path, size)
+
+
+def load_archive_picture(asset: AssetItem, size: int = 110) -> tuple[Optional[QImage], str]:
+    """An archive's card picture: the best image inside (core.archives.card_picture_candidates),
+    or None and a note: what's inside ("MP4, SRT"), or why it can't be read."""
+    result = archives.listing(asset.path, asset.size_bytes, asset.modified_timestamp)
+    if result.error:
+        return None, result.error if len(result.error) <= 32 else "Can't be read"
+    for member in archives.card_picture_candidates(result)[:3]:
+        try:
+            return load_member_image(member, size), ""
+        except Exception:  # pylint: disable=broad-except
+            continue  # (the next best, if any)
+    summary = archives.summarize(result)
+    return None, ", ".join(kind for kind, _count in summary.by_type[:3]) or "Empty"
+
+
+def archive_label(asset: AssetItem) -> str:
+    """An archive card's badge: its type and how many files it holds ("ZIP · 124"). Blocks (call
+    off the UI thread)."""
+    return archives.summarize(archives.listing(asset.path, asset.size_bytes, asset.modified_timestamp)).badge(asset.category_name)
 
 
 def load_texture_thumbnail_image(file_path: Path, category_name: str, size: int = 110) -> Optional[QImage]:
@@ -273,9 +352,10 @@ def load_texture_thumbnail_image(file_path: Path, category_name: str, size: int 
 
 
 def compose_card(
-    inner_qimg: QImage, category_name: str, size: int, style: Optional[dict[str, QColor]] = None
+    inner_qimg: QImage, category_name: str, size: int, style: Optional[dict[str, QColor]] = None, label: str = ""
 ) -> QImage:
-    """A picture centred in a styled card, with the file type's badge (fits (size - 16) x (size - 32))."""
+    """A picture centred in a styled card, with the file type's badge (fits (size - 16) x (size - 32)).
+    label: the badge's text (default: the file type)."""
     style = style or _CARD_STYLE
     inner_w, inner_h = inner_qimg.width(), inner_qimg.height()
     card_img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
@@ -303,7 +383,7 @@ def compose_card(
 
     p.setPen(QPen(Qt.GlobalColor.white))
     p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-    p.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, category_name)
+    p.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label or category_name)
 
     p.end()
     return card_img
@@ -447,11 +527,16 @@ def disk_cache_path(asset: AssetItem, size: int) -> Optional[Path]:
     thumbnail size), so a changed file simply gets a new entry. For 3D models it's their
     rendered picture (a companion image isn't cached: it can change).
     """
-    if not (asset.is_texture or asset.is_video or asset.is_3d_model or (asset.is_document and asset.extension == ".pdf")):
+    if not (
+        asset.is_texture or asset.is_video or asset.is_3d_model or (asset.is_document and asset.extension == ".pdf")
+        or asset.is_archive
+    ):
         return None
     from . import video_tools  # CACHE_ROOT can be redirected (tests)
 
     key = f"{os.path.normcase(str(asset.path))}|{asset.size_bytes}|{asset.modified_timestamp!r}|{size}|{_CACHE_VERSION}"
+    if asset.archive is not None:
+        key += f"|{asset.archive.crc}|{asset.archive.archive_size}"  # (its archive replaced by another)
     return video_tools.THUMB_DIR / f"{_CACHE_PREFIX}{hashlib.sha1(key.encode('utf-8')).hexdigest()}.png"
 
 
@@ -504,6 +589,7 @@ class _ThumbnailRunnable(QRunnable):
         self.cache_file = cache_file
         self.style = style  # the card colors when it was asked for (taken on the UI thread)
         self.render_model = render_model  # a 3D model without a companion picture: render one
+        self.label = ""  # the badge's text, if not the file type ("ZIP · 124")
         self.signals = _WorkerSignals()
 
     def run(self) -> None:
@@ -513,6 +599,8 @@ class _ThumbnailRunnable(QRunnable):
         if not request.keep and time.monotonic() - request.last_asked > STALE_SECONDS:
             self.signals.skipped.emit(request)
             return
+        if self.asset.is_archive and not self.asset.in_archive:
+            self.label = archive_label(self.asset)
         picture, note = self._from_disk(), ""
         if picture is None:
             picture, note = self._render()
@@ -522,10 +610,10 @@ class _ThumbnailRunnable(QRunnable):
 
     def _card(self, picture: Optional[QImage], note: str) -> QImage:
         if picture is None or picture.isNull():
-            return render_placeholder_image(self.asset, self.size, self.style, note or "No preview")
+            return render_placeholder_image(self.asset, self.size, self.style, note or "No preview", self.label)
         if self.asset.is_document:
             return picture  # (a PDF page comes as a whole card)
-        card = compose_card(picture, self.asset.category_name, self.size, self.style)
+        card = compose_card(picture, self.asset.category_name, self.size, self.style, self.label)
         return add_play_badge(card, self.size) if self.asset.is_video else card
 
     def _from_disk(self) -> Optional[QImage]:
@@ -555,25 +643,60 @@ class _ThumbnailRunnable(QRunnable):
         """(the picture, or None and why it can't be shown)."""
         asset, size = self.asset, self.size
         try:
-            if asset.is_texture:
-                return load_texture_picture(asset.path, size), ""
-            if asset.is_document and asset.extension == ".pdf":
-                return load_pdf_thumbnail_image(asset.path, size), ""
-            if asset.is_video:
-                return load_video_picture(asset.path, size), ""
-            if asset.is_3d_model and self.render_model:
-                return load_model_picture(asset.path, size), ""
-            if asset.is_3d_model:
+            if asset.in_archive:
+                return self._render_member()
+            if asset.is_archive:
+                return load_archive_picture(asset, size)
+            if asset.is_3d_model and not self.render_model:
                 # Companion preview images (model.png, etc.)
                 for preview_ext in _COMPANION_EXTENSIONS:
                     companion = asset.path.with_suffix(preview_ext)
                     if companion.exists():
                         return load_texture_picture(companion, size), ""
+                return None, ""
+            return self._render_file(asset.path), ""
         except Image.DecompressionBombError:
             return None, "Too large to preview"
+        except archives.ArchiveError as exc:
+            return None, "Password-protected" if "password" in str(exc) else "Damaged in archive"
         except Exception:  # pylint: disable=broad-except
             pass
         return None, ""
+
+    def _render_file(self, path: Path) -> Optional[QImage]:
+        """The picture of the file at path (the asset's own, or an unpacked copy of it)."""
+        asset, size = self.asset, self.size
+        if asset.is_texture:
+            return load_texture_picture(path, size)
+        if asset.is_document and asset.extension == ".pdf":
+            return load_pdf_thumbnail_image(path, size)
+        if asset.is_video:
+            return load_video_picture(path, size)
+        if asset.is_3d_model and self.render_model:
+            return load_model_picture(path, size)
+        return None
+
+    def _render_member(self) -> tuple[Optional[QImage], str]:
+        """A file inside an archive: from its unpacked copy if it was opened before, else read from
+        the archive, up to archives.MAX_PREVIEW_BYTES (bigger ones and videos: once opened)."""
+        asset, member = self.asset, self.asset.archive
+        copy = archives.cached_copy(member)
+        if copy is not None:
+            return self._render_file(copy), ""
+        if member.encrypted:
+            return None, "Password-protected"
+        if asset.is_video:
+            return None, "Play to preview"
+        if asset.is_archive:
+            return None, "Archive inside"
+        if member.size > archives.MAX_PREVIEW_BYTES:
+            return None, "Open to preview"
+        if asset.is_texture:
+            return load_member_image(member, self.size), ""
+        if asset.is_3d_model and not self.render_model:
+            return None, ""
+        with archives.local_file(member) as path:
+            return self._render_file(path), ""
 
 
 class _ModelPictureRunnable(_ThumbnailRunnable):
@@ -640,6 +763,8 @@ class ThumbnailManager(QObject):
 
     def _has_companion_picture(self, asset: AssetItem) -> bool:
         key = str(asset.path)
+        if asset.in_archive:
+            return False
         if key not in self._has_companion:
             self._has_companion[key] = any(asset.path.with_suffix(ext).exists() for ext in _COMPANION_EXTENSIONS)
         return self._has_companion[key]
@@ -658,7 +783,7 @@ class ThumbnailManager(QObject):
         return self._rendered_on_disk[key]
 
     def _needs_async(self, asset: AssetItem, size: int = 110) -> bool:
-        if asset.is_texture or asset.is_document or asset.is_video:
+        if asset.is_texture or asset.is_document or asset.is_video or asset.is_archive:
             return True
         return self._has_companion_picture(asset) or self._renders(asset, size)
 

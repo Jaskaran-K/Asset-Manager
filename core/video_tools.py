@@ -63,16 +63,16 @@ def find_ffmpeg(configured: Optional[str] = None) -> Optional[str]:
         path = Path(configured)
         if path.is_dir():
             path = path / "ffmpeg.exe"
-        return _resolve_shim(str(path)) if path.is_file() else None
+        return resolve_shim(str(path)) if path.is_file() else None
     found = shutil.which("ffmpeg")
-    return _resolve_shim(found) if found else None
+    return resolve_shim(found) if found else None
 
 
-def _resolve_shim(exe: str) -> str:
-    """Follow a Scoop shim to the real ffmpeg.exe.
+def resolve_shim(exe: str) -> str:
+    """Follow a Scoop shim to the real program (ffmpeg.exe, 7z.exe).
 
-    A shim runs ffmpeg as a child process, so killing the shim (cancelling a
-    proxy) would leave ffmpeg running and still writing the file.
+    A shim runs the program as a child process, so killing the shim (cancelling a
+    proxy, or an unpack) would leave the program running and still writing.
     """
     shim = Path(exe).with_suffix(".shim")
     try:

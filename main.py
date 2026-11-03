@@ -14,8 +14,10 @@ The main window puts the parts together and runs what the user asks for. The par
 
 from __future__ import annotations
 
+import html
 import sys
 import threading
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Optional
@@ -53,22 +55,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import crash_log
+from core import archives, crash_log
 from core.asset_filter import filter_assets
 from core.library_snapshot import load_snapshot
 from core.scanner import AssetItem
 from core import artbook_store
 from core.settings import (
+    apply_new_defaults,
+    get_archive_contents,
     get_pages_dir,
     get_background_texture,
     get_file_extensions,
     get_glass_frost,
     get_motion,
     get_scan_folders,
+    get_seven_zip_path,
     get_theme,
     get_model_view,
     get_thumbnail_size,
     is_scan_folder,
+    set_archive_contents,
     set_scan_folders,
 )
 from core.search_query import ParsedQuery, parse_query
@@ -78,6 +84,7 @@ from core.updater import cleanup_after_update
 from core.video_tools import apply_media_backend
 from core.version import APP_NAME, APP_VERSION
 from ui.animations import install_popup_animations, set_motion_mode
+from ui.archive_jobs import unpack_in_background
 from ui.artbook import ArtbookPanel
 from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, GridView, rating_text
 from ui.asset_menu import RATING_SHORTCUTS, ArtbookSender, AssetMenuActions, build_asset_menu
@@ -87,7 +94,7 @@ from ui.glass import set_frost
 from ui.icons import app_icon
 from ui.library_sidebar import LibrarySidebar
 from ui.library_tools import LibraryTools
-from ui.library_state import LibraryState, LiveUpdate, ScanReport
+from ui.library_state import LibraryState, LiveUpdate, SavedView, ScanReport
 from ui import main_thread_gc, scroll_bar_watch
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
@@ -102,6 +109,16 @@ from ui.viewer import AssetViewerDialog, ViewerTarget
 from ui.views import install_view_effects
 from self_test import run_self_test
 
+@dataclass(frozen=True)
+class ArchiveReturn:
+    """Where to go back to when leaving an opened archive (Back / Backspace)."""
+
+    archive: Path
+    browse_folder: Optional[Path]  # None: the library
+    view: SavedView  # what the grid showed: back without waiting for a scan
+    search: str
+
+
 # ----------------------------------------------------------------------
 # Main Application Window
 # ----------------------------------------------------------------------
@@ -114,8 +131,11 @@ class MainWindow(QMainWindow):
         self.resize(1220, 780)
         self.setMinimumSize(900, 560)
 
-        # None = library mode (all scan folders); otherwise a single folder opened via "Open Folder"
+        # None = library mode (all scan folders); otherwise a single folder opened via "Open Folder",
+        # or an archive opened like a folder (archive_return says where it was opened from)
         self.browse_folder: Optional[Path] = None
+        self.archive_return: Optional[ArchiveReturn] = None
+        self._opening_archive = False  # its files are being read (the grid says so meanwhile)
 
         # Sidebar filter: ("all", None), ("exts", frozenset of extensions), ("uncategorized", None)
         self.filter_mode: str = "all"
@@ -218,7 +238,8 @@ class MainWindow(QMainWindow):
         self.asset_toolbar = CompactToolbar(
             self.asset_panel, self.control_bar,
             [
-                (self.btn_open_folder, "Open Folder"), (self.btn_library, "Library"), (self.btn_refresh, "Refresh"),
+                (self.btn_open_folder, "Open Folder"), (self.btn_library, "Library"), (self.btn_back, "Back"),
+                (self.btn_refresh, "Refresh"),
                 (self.btn_view_asset, "Preview"), (self.btn_tag, "Tag"), (self.btn_tools, "Tools"),
             ],
             on_change=self._on_toolbar_compact,
@@ -317,8 +338,27 @@ class MainWindow(QMainWindow):
         self.action_library_toggle = library_menu.addAction("Add to Library")
         set_icon(self.action_library_toggle, "star")
         self.action_library_toggle.triggered.connect(self._on_toggle_library_folder)
+        library_menu.addSeparator()
+        self.action_archive_contents = library_menu.addAction("Include Files Inside Archives")
+        self.action_archive_contents.setCheckable(True)
+        self.action_archive_contents.setChecked(get_archive_contents())
+        self.action_archive_contents.setToolTip(
+            "Show the files inside archives (ZIP, RAR, 7z) among your other files, marked with a small box.\n"
+            "Off: they're only shown when you open an archive (double-click it)."
+        )
+        set_icon(self.action_archive_contents, "archive")
+        self.action_archive_contents.toggled.connect(self._on_archive_contents_toggled)
         self.btn_library.setMenu(library_menu)
         layout.addWidget(self.btn_library)
+
+        # "Back": leaves an opened archive (shown only then)
+        self.btn_back = QPushButton("Back")
+        set_icon(self.btn_back, "back")
+        self.btn_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_back.setToolTip("Leave this archive: back to where you were (Backspace)")
+        self.btn_back.clicked.connect(self._leave_archive)
+        self.btn_back.hide()
+        layout.addWidget(self.btn_back)
 
         # "Refresh" button
         self.btn_refresh = QPushButton("Refresh")
@@ -480,6 +520,7 @@ class MainWindow(QMainWindow):
             lambda asset: self.thumbnail_manager.get_thumbnail(asset, size=self.thumbnail_size),
             self._asset_tooltip,
             self,
+            file_for=self._drag_file,
         )
         self.list_grid = GridView()  # (cards glide into place when the window is resized)
         self.list_grid.setObjectName("assetGrid")
@@ -605,12 +646,13 @@ class MainWindow(QMainWindow):
     def _load_library(self) -> None:
         """Switch to library mode and scan every configured library folder."""
         self.browse_folder = None
+        self.archive_return = None
         self._update_library_controls()
         folders = [f for f in get_scan_folders() if f.is_dir()]
         if folders:
             if not self.library.assets:
                 # First load: show last session's library right away while the real scan runs
-                snapshot = load_snapshot(folders, get_file_extensions())
+                snapshot = load_snapshot(folders, get_file_extensions(), get_archive_contents())
                 if snapshot is not None:
                     self._show_snapshot(*snapshot)
             self._start_scan(folders, save_snapshot=True)
@@ -624,7 +666,19 @@ class MainWindow(QMainWindow):
         """Update the path field and library buttons for the current mode."""
         in_library_mode = self.browse_folder is None
         toggle = self.action_library_toggle
-        if in_library_mode:
+        if self.btn_back.isVisibleTo(self) != (self.archive_return is not None):
+            self.btn_back.setVisible(self.archive_return is not None)
+            self.asset_toolbar.update()  # (the toolbar's contents changed)
+        if self.archive_return is not None:
+            archive = self.archive_return.archive
+            self.txt_path.set_path_text(str(archive))
+            self.txt_path.setToolTip(f"Inside {archive}\nBack or Backspace returns to where you were.")
+            toggle.setText("Add to Library")
+            toggle.setToolTip("An archive can't be a library folder; its files are part of the library's folder")
+            toggle.setEnabled(False)
+            set_icon(toggle, "star")
+            self.btn_library.setToolTip("Back to your library (every folder in Settings > Folders)")
+        elif in_library_mode:
             folders = get_scan_folders()
             self.txt_path.set_path_text("; ".join(str(f) for f in folders))
             self.txt_path.setToolTip("\n".join(str(f) for f in folders))
@@ -700,12 +754,18 @@ class MainWindow(QMainWindow):
             self._rebuild_sidebar()
             self._refresh_grid_display()
 
-        if dialog.folders_changed or dialog.extensions_changed:
+        if dialog.archives_changed:
+            self.action_archive_contents.blockSignals(True)  # (saved already: only the tick follows)
+            self.action_archive_contents.setChecked(get_archive_contents())
+            self.action_archive_contents.blockSignals(False)
+            self.thumbnail_manager.clear_cache()  # (cards that said "Install 7-Zip")
+
+        if dialog.folders_changed or dialog.extensions_changed or dialog.archives_changed:
             if self.browse_folder is None:
                 self._load_library()
             else:
                 self._update_library_controls()
-                if dialog.extensions_changed:
+                if dialog.extensions_changed or dialog.archives_changed:
                     self._start_scan([self.browse_folder])
 
     # ------------------------------------------------------------------
@@ -713,12 +773,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_choose_folder(self) -> None:
         """Prompt user with directory picker dialog and scan that single folder."""
-        start = self.browse_folder or next(iter(get_scan_folders()), Path.home())
+        start = (self.browse_folder.parent if self.archive_return else self.browse_folder) or next(iter(get_scan_folders()), Path.home())
         chosen_dir = QFileDialog.getExistingDirectory(
             self, "Select Folder Containing 3D Assets & Textures", str(start)
         )
         if chosen_dir:
             self.browse_folder = Path(chosen_dir)
+            self.archive_return = None
             self._update_library_controls()
             self._start_scan([self.browse_folder])
 
@@ -741,7 +802,9 @@ class MainWindow(QMainWindow):
 
     def _start_scan(self, folders: list[Path], save_snapshot: bool = False) -> None:
         """Scan directories in a background thread to keep UI snappy."""
-        if len(folders) == 1:
+        if self.archive_return is not None and folders == [self.browse_folder]:
+            self.status_label.setText(f"Opening {folders[0].name}...")
+        elif len(folders) == 1:
             self.status_label.setText(f"Scanning '{folders[0]}'...")
         else:
             self.status_label.setText(f"Scanning {len(folders)} library folders...")
@@ -751,6 +814,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_finished(self, report: ScanReport) -> None:
         """Show a finished scan: sidebar counts, the status line, and the grid."""
+        self._opening_archive = False
         self.btn_open_folder.setEnabled(True)
         self.btn_refresh.setEnabled(True)
         self._update_sidebar_counts()
@@ -761,8 +825,14 @@ class MainWindow(QMainWindow):
         textures = sum(1 for a in assets if a.is_texture)
         docs = sum(1 for a in assets if a.is_document)
         videos = sum(1 for a in assets if a.is_video)
-        other = len(assets) - models - textures - docs - videos
+        zips = sum(1 for a in assets if a.is_archive)
+        other = len(assets) - models - textures - docs - videos - zips
         summary = f"{models} 3D models, {textures} textures, {docs} documents, {videos} videos"
+        if zips:
+            summary += f", {zips} archives"
+        inside = sum(1 for a in assets if a.in_archive)
+        if inside and self.archive_return is None:
+            summary += f" ({inside} of them inside archives)"
         if other:
             summary += f", {other} other"
         self.status_label.setText(f"Loaded {len(assets)} assets ({summary})")
@@ -791,6 +861,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_failed(self, error_msg: str) -> None:
         """Handle scanning failure."""
+        self._opening_archive = False
         self.btn_open_folder.setEnabled(True)
         self.btn_refresh.setEnabled(True)
         self.status_label.setText(f"Scan failed: {error_msg}")
@@ -911,7 +982,19 @@ class MainWindow(QMainWindow):
         if not filtered:
             self.list_grid.hide()
             self.lbl_empty_state.setVisible(not first_run)
-            if not self.library.assets:
+            if self.archive_return is not None and not self.library.assets:
+                name = self.archive_return.archive.name
+                known = archives.known_listing(self.archive_return.archive)
+                if self._opening_archive:
+                    text = f"Opening {name}..."
+                elif not self.archive_return.archive.is_file():
+                    text = f"{name} isn't there any more.\nBack (Backspace) returns."
+                elif known is not None and known.error:
+                    text = f"Couldn't look inside {name}.\n{known.error}\nBack (Backspace) returns."
+                else:
+                    text = f"Nothing to show inside {name}: none of its files are of the types you scan.\nBack (Backspace) returns."
+                self.lbl_empty_state.setText(text)
+            elif not self.library.assets:
                 self.lbl_empty_state.setText(
                     "No assets found.\nAdd library folders in Settings > Folders, or click 'Open Folder'."
                 )
@@ -942,12 +1025,33 @@ class MainWindow(QMainWindow):
         if marks.favorite or marks.rating:
             parts = (["★ Favorite"] if marks.favorite else []) + ([f"Rating: {rating_text(marks.rating)}"] if marks.rating else [])  # glyph-ok: tooltip text
             tag_line += "<br>" + " • ".join(parts)
+        member = asset.archive
+        if member is not None:
+            where = (
+                f"Inside: {html.escape(member.archive.name)}"
+                + (f" &gt; {html.escape(member.folder)}" if member.folder else "")
+                + f"<br>Archive: {html.escape(str(member.archive))}"
+            )
+        else:
+            where = f"Path: {html.escape(str(asset.path))}"
+        contents = ""
+        if asset.is_archive and member is None:
+            # (only what's known already: hovering never reads the archive)
+            known = archives.known_listing(asset.path)
+            if known is not None and known.error:
+                contents = f"<br>{html.escape(known.error)}"
+            elif known is not None:
+                summary = archives.summarize(known)
+                kinds = ", ".join(f"{count} {kind}" for kind, count in summary.by_type[:6])
+                more = " ..." if len(summary.by_type) > 6 else ""
+                contents = f"<br>{summary.files} files: {kinds}{more}<br>Double-click to look inside"
         return (
-            f"<b>{asset.name}</b><br>"
+            f"<b>{html.escape(asset.name)}</b><br>"
             f"Type: {asset.asset_group} ({asset.category_name})<br>"
             f"Size: {asset.formatted_size}<br>"
             f"Modified: {asset.formatted_modified_time}<br>"
-            f"Path: {asset.path}"
+            f"{where}"
+            f"{contents}"
             f"{tag_line}"
         )
 
@@ -1006,7 +1110,15 @@ class MainWindow(QMainWindow):
         return ViewerTarget(asset, tags, edit_tags, position)
 
     def _open_viewer(self, asset: AssetItem) -> None:
-        """Open the interactive AssetViewerDialog modal for the given asset."""
+        """Open the interactive AssetViewerDialog modal for the given asset (an archive: look inside it)."""
+        if asset.is_archive:
+            if asset.in_archive:
+                self.status_label.setText(
+                    f"{asset.name} is an archive inside an archive. Extract it (right-click > Extract...) to look inside."
+                )
+            else:
+                self._open_archive(asset)
+            return
         # Previous / next walk through the grid as it's shown now (filters included)
         assets = self.grid_model.assets()
         row = self.grid_model.row_of(str(asset.path))
@@ -1029,8 +1141,182 @@ class MainWindow(QMainWindow):
             artbook=self.artbook_sender, model_viewed=self.thumbnail_manager.model_viewed,
         )
         dialog.exec()
+        # Files inside archives unpacked to be shown: their thumbnails can be made now (videos, big files)
+        for path_str in dialog.unpacked:
+            self.thumbnail_manager.invalidate(path_str)
+            self.grid_model.thumbnail_changed(path_str)
         # Free the viewer (GL context, decoded image, video player) instead of keeping it parented
         dialog.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Archives: looked inside like folders; their files unpacked when needed (core.archives)
+    # ------------------------------------------------------------------
+    def _open_archive(self, asset: AssetItem) -> None:
+        """Show the files inside an archive (Back or Backspace returns to what was shown). Archives
+        inside archives aren't opened, so there's only ever one level to go back from."""
+        self.archive_return = ArchiveReturn(asset.path, self.browse_folder, self.library.save_view(), self.search_bar.text())
+        self.browse_folder = asset.path
+        self.filter_mode, self.filter_value = "all", None  # (a sidebar row such as Archives would hide its files)
+        self.sidebar_tree.setCurrentItem(self.sidebar_tree.item_all)
+        self.library.clear()  # (not the library's files while the archive's are read)
+        self._opening_archive = True
+        self.search_bar.set_query_text("")
+        self._update_library_controls()
+        self._refresh_grid_display()
+        self._start_scan([asset.path])
+        self.list_grid.setFocus()
+
+    def _leave_archive(self) -> None:
+        """Back to what was shown before the archive was opened, with the archive selected."""
+        back = self.archive_return
+        if back is None:
+            return
+        self.archive_return = None
+        self._opening_archive = False
+        self.browse_folder = back.browse_folder
+        self.library.restore_view(back.view)
+        self._update_library_controls()
+        self.btn_open_folder.setEnabled(True)
+        self.btn_refresh.setEnabled(True)
+        self.search_bar.set_query_text(back.search)
+        self._update_sidebar_counts()
+        self._refresh_grid_display()
+        row = self.grid_model.row_of(str(back.archive))
+        if row is not None:
+            index = self.grid_model.index(row)
+            self.list_grid.setCurrentIndex(index)
+            self.list_grid.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.list_grid.setFocus()
+        # Brought up to date in the background (and watched for changes again)
+        if self.browse_folder is None:
+            folders = [f for f in get_scan_folders() if f.is_dir()]
+            if folders:
+                self._start_scan(folders, save_snapshot=True)
+        else:
+            self._start_scan([self.browse_folder])
+
+    def _on_archive_contents_toggled(self, show: bool) -> None:
+        set_archive_contents(show)
+        self._rescan_current_folder()
+
+    def _unpack_now(self, assets: list[AssetItem], what: str) -> list[Path]:
+        """Real files for assets, for another app: a file inside an archive is unpacked first, if it's
+        small enough to wait for (archives.MAX_DRAG_BYTES); bigger ones are left out, with a word why."""
+        files, too_big = [], []
+        for asset in assets:
+            if not asset.in_archive:
+                files.append(asset.path)
+                continue
+            member = asset.archive
+            copy = archives.cached_copy(member)
+            if copy is None and member.size > archives.MAX_DRAG_BYTES:
+                too_big.append(asset.name)
+                continue
+            if copy is None:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    copy = archives.materialize(member)
+                except archives.ArchiveError as exc:
+                    self.status_label.setText(str(exc))
+                    continue
+                finally:
+                    QApplication.restoreOverrideCursor()
+            files.append(copy)
+        if too_big:
+            names = ", ".join(too_big[:3]) + (" ..." if len(too_big) > 3 else "")
+            self.status_label.setText(
+                f"Too big to {what} straight from the archive: {names}. Right-click > Extract... saves a copy first."
+            )
+        return files
+
+    def _drag_file(self, asset: AssetItem) -> Optional[Path]:
+        if not asset.in_archive:
+            return asset.path
+        files = self._unpack_now([asset], "drag")
+        return files[0] if files else None
+
+    def _send_files(self, paths: list[Path]) -> list[Path]:
+        """Send to Artbook: the real files for the paths chosen (files inside archives unpacked)."""
+        assets = [self.grid_model.asset_at(row) for row in (self.grid_model.row_of(str(p)) for p in paths) if row is not None]
+        return self._unpack_now([a for a in assets if a is not None], "send")
+
+    def _open_external(self, asset: AssetItem) -> None:
+        """Open with the app Windows uses for the file (inside an archive: unpacked first, with progress)."""
+        if not asset.in_archive:
+            if not file_actions.open_file(asset.path):
+                self.status_label.setText(f"'{asset.name}' isn't there any more.")
+            return
+
+        def opened(path: Path) -> None:
+            file_actions.open_file(path)
+            self.status_label.setText(f"Opened {asset.name} (unpacked from {asset.archive.archive.name}).")
+
+        self._unpack_with_progress(
+            f"Unpacking {asset.name}", lambda progress, stop: archives.materialize(asset.archive, progress, stop), opened,
+        )
+
+    def _extract(self, asset: AssetItem) -> None:
+        """Extract To... (an archive: every file, into a folder named after it) or Extract... (one file)."""
+        if asset.in_archive:
+            target, _filter = QFileDialog.getSaveFileName(
+                self, f"Extract {asset.name}", str(asset.archive.archive.parent / asset.name),
+            )
+            if not target:
+                return  # (the dialog itself asks before replacing a file)
+            self._unpack_with_progress(
+                f"Extracting {asset.name}",
+                lambda progress, stop: archives.extract_one(asset.archive, Path(target), progress, stop),
+                lambda path: self.status_label.setText(f"Extracted {asset.name} to {path.parent}."),
+            )
+            return
+        chosen = QFileDialog.getExistingDirectory(self, f"Extract {asset.name} To", str(asset.path.parent))
+        if not chosen:
+            return
+        result = archives.listing(asset.path, asset.size_bytes, asset.modified_timestamp)
+        if result.error:
+            self.status_label.setText(f"Couldn't extract {asset.name}: {result.error}")
+            return
+        folder = Path(chosen) / asset.path.stem
+        plan = archives.plan_extract(result.members, folder)
+        replace = False
+        if plan.existing:
+            count = len(plan.existing)
+            box = QMessageBox(QMessageBox.Icon.Question, "Files Already There",
+                              f"{count} file{'s' if count != 1 else ''} from {asset.name} already exist{'s' if count == 1 else ''} in {folder}.",
+                              parent=self)
+            replace_button = box.addButton("Replace Them", QMessageBox.ButtonRole.AcceptRole)
+            skip_button = box.addButton("Skip Them", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(skip_button)
+            box.exec()
+            clicked = box.clickedButton()
+            box.deleteLater()
+            if clicked not in (replace_button, skip_button):
+                return
+            replace = clicked is replace_button
+
+        def finished(outcome: archives.ExtractResult) -> None:
+            parts = [f"Extracted {outcome.written} file{'s' if outcome.written != 1 else ''} to {folder}"]
+            if outcome.skipped:
+                parts.append(f"skipped {outcome.skipped}")
+            if outcome.failed:
+                parts.append(f"{len(outcome.failed)} failed ({outcome.failed[0]})")
+            self.status_label.setText(", ".join(parts) + ".")
+
+        self._unpack_with_progress(
+            f"Extracting {asset.name}", lambda progress, stop: archives.extract(plan, replace, progress, stop), finished,
+        )
+
+    def _unpack_with_progress(self, what: str, work, on_done) -> None:
+        """Run work(progress, should_stop) in the background, with its progress in the status line."""
+        self.status_label.setText(f"{what}...")
+
+        def progress(done: int, total: int) -> None:
+            self.status_label.setText(f"{what}... {int(100 * done / total) if total else 100}%")
+
+        unpack_in_background(
+            work, on_done, lambda message: self.status_label.setText(f"{what} failed: {message}"), progress,
+        )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Handle keyboard shortcuts (e.g. Spacebar to quick-preview)."""
@@ -1050,6 +1336,9 @@ class MainWindow(QMainWindow):
         if obj is self.asset_panel and event.type() == event.Type.Resize:
             self.asset_toolbar.update()
         if obj is self.list_grid and event.type() == event.Type.KeyPress:
+            if self.archive_return is not None and shortcuts.matches("main.leave_archive", event):
+                self._leave_archive()
+                return True
             if shortcuts.matches("main.favorite", event):
                 self._toggle_favorite()
                 return True
@@ -1131,10 +1420,13 @@ class MainWindow(QMainWindow):
             return
         actions = AssetMenuActions(
             open_viewer=lambda: self._open_viewer(asset),
-            reveal=lambda: self._reveal_in_explorer(asset.path),
+            reveal=lambda: self._reveal_in_explorer(asset.archive.archive if asset.in_archive else asset.path),
             tag=lambda: self._open_tag_dialog(),
             toggle_favorite=self._toggle_favorite,
             set_rating=self._set_rating,
+            open_external=lambda: self._open_external(asset),
+            extract=lambda: self._extract(asset),
+            send_files=self._send_files,
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
         menu = build_asset_menu(self, asset, self._selected_assets(), marks, actions, self.artbook_sender)
@@ -1269,6 +1561,8 @@ def main() -> None:
     QSurfaceFormat.setDefaultFormat(gl_format)
 
     cleanup_after_update()
+    apply_new_defaults()  # new file types (zip, rar, 7z) reach the user's own lists once
+    archives.configure_seven_zip(get_seven_zip_path())
     previous_session_crashed = crash_log.start_session(APP_NAME, APP_VERSION)
     qInstallMessageHandler(_qt_message_handler)
     QImageReader.setAllocationLimit(2048)
@@ -1301,6 +1595,7 @@ def main() -> None:
 
     # Keep the thumbnail disk cache under its size limit (off the UI thread; it's only file deletes)
     threading.Thread(target=prune_disk_cache, name="prune-thumbnails", daemon=True).start()
+    threading.Thread(target=archives.prune_extracted, name="prune-unpacked", daemon=True).start()
 
     window = MainWindow()
     window.show()

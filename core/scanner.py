@@ -5,15 +5,20 @@ Scans local directories for:
 - Textures & Images: .png, .jpg, .jpeg, .tiff, .tif, .tga, .bmp, .webp, .exr, .psd, .hdr, .dds
 - Documents: .pdf
 - Videos: .mp4, .mov, .mkv, .avi, .webm, .m4v
+- Archives: .zip (their files are listed by core.archives)
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
+
+if TYPE_CHECKING:
+    from .archives import ArchiveMember
 
 
 # Supported file formats organized by type
@@ -58,8 +63,44 @@ VIDEO_EXTENSIONS: set[str] = {
     ".m4v",
 }
 
+# Browsed like folders: their files are listed, searched and shown (core.archives; RAR and 7z
+# through the user's 7-Zip)
+ARCHIVE_EXTENSIONS: frozenset[str] = frozenset({".zip", ".rar", ".7z"})
+
+_VOLUME = re.compile(r"^(.*)\.part(\d+)\.rar$", re.IGNORECASE)  # name.part1.rar, name.part2.rar, ...
+
+
+def volume_number(name: str) -> int:
+    """A multi-part RAR's part number (name.part2.rar: 2), or 0 for any other file."""
+    match = _VOLUME.match(name)
+    return int(match.group(2)) if match else 0
+
+
+def archive_parts(path: Path | str) -> list[Path]:
+    """The files an archive is made of: a multi-part RAR's parts (from its first), else just itself."""
+    path = Path(path)
+    match = _VOLUME.match(path.name)
+    if not match:
+        return [path]
+    stem = match.group(1).lower()
+    try:
+        with os.scandir(path.parent) as listing:
+            parts = [
+                Path(e.path) for e in listing
+                if (m := _VOLUME.match(e.name)) and m.group(1).lower() == stem and e.is_file()
+            ]
+    except OSError:
+        return [path]
+    return sorted(parts, key=lambda p: volume_number(p.name)) or [path]
+
+
+def archive_stamp(path: Path | str) -> tuple[int, float]:
+    """(size, modified time) of an archive, all its parts together (raises OSError)."""
+    infos = [os.stat(part) for part in archive_parts(path)]
+    return sum(i.st_size for i in infos), max(i.st_mtime for i in infos)
+
 ALL_SUPPORTED_EXTENSIONS: set[str] = (
-    MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS
+    MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS | ARCHIVE_EXTENSIONS
 )
 
 DEFAULT_EXCLUDED_DIRS: set[str] = {
@@ -87,8 +128,10 @@ class AssetItem:
     extension: str
     size_bytes: int
     modified_timestamp: float
-    asset_group: str  # "3D Models", "Textures", "Documents", "Videos"
+    asset_group: str  # "3D Models", "Textures", "Documents", "Videos", "Archives"
     category_name: str  # e.g. "FBX", "OBJ", "PNG", "TIFF", "PDF"
+    # A file inside an archive: path is then virtual (core.archives), not a file on disk
+    archive: Optional["ArchiveMember"] = None
 
     @property
     def formatted_size(self) -> str:
@@ -125,6 +168,16 @@ class AssetItem:
         """Check if asset is a video file."""
         return self.asset_group == "Videos"
 
+    @property
+    def is_archive(self) -> bool:
+        """A zip (browsed like a folder)."""
+        return self.asset_group == "Archives"
+
+    @property
+    def in_archive(self) -> bool:
+        """Inside an archive: read through core.archives, never by its path."""
+        return self.archive is not None
+
 
 def asset_sort_key(asset: AssetItem) -> tuple[str, str]:
     """By name, then by folder: the same order every time for same-named files."""
@@ -142,6 +195,8 @@ def determine_asset_group(extension: str) -> str:
         return "Documents"
     if ext in VIDEO_EXTENSIONS:
         return "Videos"
+    if ext in ARCHIVE_EXTENSIONS:
+        return "Archives"
     return "Other"
 
 
@@ -177,6 +232,9 @@ def determine_category_name(extension: str) -> str:
         ".avi": "AVI",
         ".webm": "WebM",
         ".m4v": "M4V",
+        ".zip": "ZIP",
+        ".rar": "RAR",
+        ".7z": "7Z",
     }
     return mapping.get(ext, ext.lstrip(".").upper())
 
@@ -265,13 +323,19 @@ class AssetScanner:
                     ext = os.path.splitext(lower_name)[1]
                     if ext not in self.supported_extensions or not entry.is_file():
                         continue
-                    stat = entry.stat()
+                    info = entry.stat()
+                    size, mtime = info.st_size, info.st_mtime
+                    part = volume_number(entry.name) if ext == ".rar" else 0
+                    if part > 1:
+                        continue  # (a multi-part RAR is one card: its first part, with all their size)
+                    if part == 1:
+                        size, mtime = archive_stamp(entry.path)
                     assets.append(AssetItem(
                         path=Path(entry.path),
                         name=entry.name,
                         extension=ext,
-                        size_bytes=stat.st_size,
-                        modified_timestamp=stat.st_mtime,
+                        size_bytes=size,
+                        modified_timestamp=mtime,
                         asset_group=determine_asset_group(ext),
                         category_name=determine_category_name(ext),
                     ))

@@ -6,6 +6,7 @@ Pages:
 - General > Categories:  sidebar main categories / subcategories and their file types
 - General > Appearance:  theme, grid size, category colors & icons
 - General > Video:       ffmpeg location, playback backend, preview cache
+- General > Archives:    files inside archives in the library, 7-Zip's location, unpacked copies
 - General > Artbook:     where the Artbook's pages are kept (changed right away, not on Save)
 - General > Tags:        custom tags (create, rename, recolor, delete)
 - General > Shortcuts:   every keyboard shortcut / mouse control (from ui.shortcuts)
@@ -56,7 +57,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import artbook_store, crash_log
+from core import archives, artbook_store, crash_log
 from core.scanner import AssetItem
 from core.settings import (
     DEFAULT_CATEGORIES,
@@ -66,6 +67,7 @@ from core.settings import (
     PREVIEWABLE_EXTENSIONS,
     THUMBNAIL_SIZE_RANGE,
     category_extensions,
+    get_archive_contents,
     get_background_texture,
     get_categories,
     get_glass_frost,
@@ -74,12 +76,14 @@ from core.settings import (
     get_media_backend,
     get_motion,
     get_scan_folders,
+    get_seven_zip_path,
     get_theme,
     get_model_view,
     get_thumbnail_size,
     import_category_icon,
     parse_extension_list,
     remove_unused_category_icons,
+    set_archive_contents,
     set_background_texture,
     set_categories,
     set_glass_frost,
@@ -89,6 +93,7 @@ from core.settings import (
     set_pages_dir,
     set_motion,
     set_scan_folders,
+    set_seven_zip_path,
     set_theme,
     set_model_view,
     set_thumbnail_size,
@@ -1147,7 +1152,9 @@ class VideoPage(QWidget):
         btn_open_cache.setToolTip("Open the folder with cached video previews and thumbnails")
         btn_open_cache.clicked.connect(self._on_open_cache)
         btn_clear_cache = QPushButton("Clear Cache")
-        btn_clear_cache.setToolTip("Delete cached previews and thumbnails; they're made again when needed")
+        btn_clear_cache.setToolTip(
+            "Delete cached previews, thumbnails and files unpacked from archives; they're made again when needed"
+        )
         btn_clear_cache.clicked.connect(self._on_clear_cache)
         cache_row.addWidget(btn_open_cache)
         cache_row.addWidget(btn_clear_cache)
@@ -1193,7 +1200,12 @@ class VideoPage(QWidget):
 
     def _update_cache_label(self) -> None:
         size_mb = cache_size_bytes() / (1024 * 1024)
-        self.lbl_cache.setText(f"{size_mb:.1f} MB of preview copies and thumbnails in {CACHE_ROOT}")
+        unpacked_gb = archives.extracted_bytes() / (1024 ** 3)
+        limit_gb = archives.EXTRACT_CACHE_BYTES // (1024 ** 3)
+        self.lbl_cache.setText(
+            f"{size_mb:.1f} MB of preview copies and thumbnails, and {unpacked_gb:.1f} GB of files unpacked from "
+            f"archives to be opened (up to {limit_gb} GB; the oldest go first), in {CACHE_ROOT}"
+        )
 
     def _on_open_cache(self) -> None:
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1201,7 +1213,104 @@ class VideoPage(QWidget):
 
     def _on_clear_cache(self) -> None:
         clear_video_cache()
+        archives.clear_extracted()
         self._update_cache_label()
+
+
+# ----------------------------------------------------------------------
+# General > Archives
+# ----------------------------------------------------------------------
+class ArchivesPage(QWidget):
+    """Files inside archives in the library, where 7-Zip is (RAR, 7z), and the unpacked copies."""
+
+    def __init__(self, seven_zip_path: str, archive_contents: bool, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        layout.addWidget(_page_header(
+            "Archives",
+            "ZIP, RAR and 7z archives are looked inside like folders (double-click one). ZIPs are read by "
+            "the app itself; RAR and 7z need 7-Zip, a free program (7-zip.org).",
+        ))
+
+        layout.addWidget(VideoPage._section_label("In the library"))
+        self.chk_contents = QCheckBox("Show the files inside archives among your other files", self)
+        self.chk_contents.setChecked(archive_contents)
+        self.chk_contents.setToolTip(
+            "On: search finds them, marked with a small box. Off: they're only shown inside an opened archive."
+        )
+        layout.addWidget(self.chk_contents)
+
+        layout.addSpacing(10)
+        layout.addWidget(VideoPage._section_label("7-Zip location"))
+        row = QHBoxLayout()
+        self.txt_seven_zip = QLineEdit(seven_zip_path)
+        self.txt_seven_zip.setPlaceholderText("Leave blank to find 7-Zip automatically")
+        self.txt_seven_zip.textChanged.connect(self._update_status)
+        btn_browse = QPushButton("Browse...")
+        btn_browse.setToolTip("Pick 7z.exe")
+        btn_browse.clicked.connect(self._on_browse)
+        row.addWidget(self.txt_seven_zip, 1)
+        row.addWidget(btn_browse)
+        layout.addLayout(row)
+        self.lbl_status = IconLabel(text_name="pageHint")
+        self.lbl_status.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.lbl_status)
+
+        layout.addSpacing(10)
+        layout.addWidget(VideoPage._section_label("Unpacked files"))
+        self.lbl_unpacked = QLabel()
+        self.lbl_unpacked.setObjectName("pageHint")
+        self.lbl_unpacked.setWordWrap(True)
+        layout.addWidget(self.lbl_unpacked)
+        btn_clear = QPushButton("Clear Unpacked Files")
+        btn_clear.setToolTip("Delete the copies unpacked to be opened; they're unpacked again when needed")
+        btn_clear.clicked.connect(self._on_clear)
+        layout.addWidget(btn_clear, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+
+        self._update_status()
+        self._update_unpacked()
+
+    def seven_zip_path(self) -> str:
+        return self.txt_seven_zip.text().strip()
+
+    def archive_contents(self) -> bool:
+        return self.chk_contents.isChecked()
+
+    def _on_browse(self) -> None:
+        start = self.seven_zip_path() or str(Path.home())
+        chosen, _ = QFileDialog.getOpenFileName(self, "Locate 7z.exe", start, "7-Zip (7z.exe);;Programs (*.exe)")
+        if chosen:
+            self.txt_seven_zip.setText(str(Path(chosen)))
+
+    def _update_status(self) -> None:
+        found = archives.find_seven_zip(self.seven_zip_path())
+        if found:
+            self.lbl_status.set_icon("check", "success")
+            self.lbl_status.setText(f"Using {found}")
+        elif self.seven_zip_path():
+            self.lbl_status.set_icon("close", "danger")
+            self.lbl_status.setText("No 7z.exe at that location.")
+        else:
+            self.lbl_status.set_icon("close", "danger")
+            self.lbl_status.setText(
+                "7-Zip wasn't found. Install it (for example: winget install 7zip.7zip) or browse to 7z.exe. "
+                "ZIPs work without it; RAR and 7z cards say \"Install 7-Zip to look inside\"."
+            )
+
+    def _update_unpacked(self) -> None:
+        used = archives.extracted_bytes() / (1024 ** 3)
+        limit = archives.EXTRACT_CACHE_BYTES // (1024 ** 3)
+        self.lbl_unpacked.setText(
+            f"Models, PDFs, videos and big files inside archives are unpacked to be opened, and the copies kept "
+            f"so they open instantly next time: {used:.1f} GB now, up to {limit} GB (the oldest go first)."
+        )
+
+    def _on_clear(self) -> None:
+        archives.clear_extracted()
+        self._update_unpacked()
 
 
 # ----------------------------------------------------------------------
@@ -1886,6 +1995,8 @@ class SettingsDialog(QDialog):
         self._orig_thumbnail_size = get_thumbnail_size()
         self._orig_ffmpeg_path = get_ffmpeg_path()
         self._orig_media_backend = get_media_backend()
+        self._orig_seven_zip_path = get_seven_zip_path()
+        self._orig_archive_contents = get_archive_contents()
 
         # Set after Save so the main window knows what to refresh
         self.folders_changed = False
@@ -1894,6 +2005,7 @@ class SettingsDialog(QDialog):
         self.theme_changed = False
         self.thumbnail_size_changed = False
         self.model_thumbnails_changed = False
+        self.archives_changed = False  # 7-Zip's location, or whether files inside archives are shown
 
         self.page_folders = FoldersPage(self._orig_folders)
         self.page_files = FilesPage(self._orig_extensions)
@@ -1904,6 +2016,7 @@ class SettingsDialog(QDialog):
         self.page_appearance.theme_selected.connect(self._on_theme_selected)
         self.page_appearance.texture_selected.connect(self._on_texture_selected)
         self.page_video = VideoPage(self._orig_ffmpeg_path, self._orig_media_backend)
+        self.page_archives = ArchivesPage(self._orig_seven_zip_path, self._orig_archive_contents)
         self.page_artbook = ArtbookPage(artbook)
         self.page_tags = TagsPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
@@ -1937,6 +2050,7 @@ class SettingsDialog(QDialog):
             ("Categories", self.page_categories),
             ("Appearance", self.page_appearance),
             ("Video", self.page_video),
+            ("Archives", self.page_archives),
             ("Artbook", self.page_artbook),
             ("Tags", self.page_tags),
             ("Shortcuts", self.page_shortcuts),
@@ -2089,6 +2203,13 @@ class SettingsDialog(QDialog):
             set_motion_mode(motion)  # takes effect right away
         if self.page_video.ffmpeg_path() != self._orig_ffmpeg_path:
             set_ffmpeg_path(self.page_video.ffmpeg_path())
+        if self.page_archives.seven_zip_path() != self._orig_seven_zip_path:
+            set_seven_zip_path(self.page_archives.seven_zip_path())
+            archives.configure_seven_zip(self.page_archives.seven_zip_path())
+            self.archives_changed = True
+        if self.page_archives.archive_contents() != self._orig_archive_contents:
+            set_archive_contents(self.page_archives.archive_contents())
+            self.archives_changed = True
         if self.page_video.media_backend() != self._orig_media_backend:
             set_media_backend(self.page_video.media_backend())
             QMessageBox.information(

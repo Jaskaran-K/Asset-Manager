@@ -32,6 +32,30 @@ the app starts from that copy and notes it in the crash log.
   about 180 megapixels).
 - **Drag files out** of the grid into Explorer, Blender, Photoshop, Unreal and so on. They're copied; the
   library keeps its files.
+- **Archives (ZIP, RAR, 7z)** are browsed without unpacking them:
+  - Each archive is a card showing the best picture inside (one named like *preview*, *cover* or *thumb*
+    first), or an archive box with what's inside ("MP4, SRT"). Its badge says how many files it holds
+    ("ZIP · 124"), and its tooltip lists them by type.
+  - **Double-click** an archive (or press Space) to look inside it like a folder. **Back** or **Backspace**
+    returns to where you were, with the archive selected. Search and the sidebar work inside it.
+  - **RAR and 7z need 7-Zip** (free, [7-zip.org](https://www.7-zip.org), or `winget install 7zip.7zip`). It's
+    found by itself (Program Files, PATH, Scoop), or set its place in **Settings > Archives**. Without it,
+    their cards say "Install 7-Zip to look inside". ZIPs never need it.
+  - A multi-part RAR (`name.part1.rar`, `name.part2.rar`, ...) is one card, with the size of all its parts.
+  - The files inside also show among the rest of your library, marked with a small box, so search finds
+    them. **Include Files Inside Archives**, in the Library button's menu (its arrow) or in
+    **Settings > Archives**, turns that off; they're then only shown inside an opened archive.
+  - Images inside get real thumbnails, read straight from the zip, and their resolution is searchable
+    (`res:`). Tags, favourites and ratings work on them like on any file.
+  - Opening a model, PDF, video or anything over 100 MB unpacks it first, with progress and a Cancel button.
+    Unpacked copies are kept (`%LOCALAPPDATA%\AssetManager\archive-files`, up to 20 GB, the oldest go first),
+    so opening it again is instant and its thumbnail can be made. A course video plays like any other once
+    unpacked.
+  - **Right-click > Extract To...** unpacks a whole archive into a folder named after it. **Extract...** saves
+    one file. Nothing is replaced without asking, and names that could escape the folder are skipped.
+  - Dragging a file out of an archive unpacks it first (up to 50 MB; bigger ones go through Extract).
+  - Zips packed with Deflate64, which many zip tools can't read, are read too. Password-protected files say
+    so. Archives inside archives are listed, but must be extracted to be opened.
 - **Favorites and ratings:** select files and press **F** to star them, or **1** to **5** to rate them
   (**0** clears). The sidebar has a Favorites row.
 - **Find duplicates** (**Tools > Find Duplicates...**) compares file contents, groups identical files, and moves

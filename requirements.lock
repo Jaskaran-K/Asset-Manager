@@ -11,6 +11,7 @@ charset-normalizer==3.5.2
 colorama==0.4.6
 fbxloader==0.0.2
 idna==3.20
+inflate64==1.0.4
 iniconfig==2.3.1
 numpy==2.5.4
 OpenEXR==3.5.3

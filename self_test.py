@@ -120,6 +120,36 @@ def run_self_test(log_path: Optional[str]) -> int:
             repo.close_thread_connection()  # the temp folder can't be deleted while the DB is open
             return f"schema v{version}"
 
+    def check_archives():
+        # A zip with a Deflate64 image (method 9: Python's zipfile can't read those; the inflate64
+        # package does), written by hand: listed, read back and checked
+        import struct
+        import zlib
+        import inflate64
+        from PIL import Image
+        from core import archives
+        import io
+        picture = io.BytesIO()
+        Image.new("RGB", (32, 32), (40, 160, 90)).save(picture, "PNG")
+        data = picture.getvalue()
+        deflater = inflate64.Deflater()
+        packed = deflater.deflate(data) + deflater.flush()
+        name, crc = b"preview.png", zlib.crc32(data)
+        local = struct.pack("<4s5H3L2H", b"PK\x03\x04", 21, 0, 9, 0, 0x21, crc, len(packed), len(data), len(name), 0)
+        central = struct.pack(
+            "<4s6H3L5H2L", b"PK\x01\x02", 21, 21, 0, 9, 0, 0x21, crc, len(packed), len(data), len(name), 0, 0, 0, 0, 0, 0,
+        )
+        body = local + name + packed
+        end = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 1, 1, len(central) + len(name), len(body), 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pack.zip"
+            path.write_bytes(body + central + name + end)
+            members = archives.read_listing(path).members
+            if len(members) != 1 or archives.read_bytes(members[0]) != data:
+                raise RuntimeError("reading a Deflate64 zip failed")
+        # (RAR / 7z use the user's own 7-Zip: not part of the app, so only reported)
+        return f"Deflate64 zip read; 7-Zip for RAR / 7z: {archives.find_seven_zip() or 'not installed'}"
+
     def check_video():
         from PySide6.QtMultimedia import QMediaFormat
         from ui.video_player import VideoPlayer
@@ -134,6 +164,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("imports", check_imports)
     step("3D model loading", check_models)
     step("image thumbnails", check_images)
+    step("zip archives", check_archives)
     step("user interface", check_ui)
     step("video playback", check_video)
     step("tag database", check_tags)

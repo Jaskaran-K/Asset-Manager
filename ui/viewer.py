@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -66,6 +67,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import archives
 from core.full_image import LoadedImage, load_full_image
 from core.model_loader import Mesh3D, load_3d_model
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions
@@ -73,6 +75,7 @@ from core.settings import get_model_view, set_model_view
 from core.scanner import AssetItem
 from core.tag_repository import Tag
 from ui import file_actions, shortcuts
+from ui.archive_jobs import UnpackJob, unpack_in_background
 from ui.duotone import set_icon
 from ui.pdf_viewer import PdfViewer
 from ui.tag_widgets import run_job, tag_chip_cloud
@@ -994,6 +997,8 @@ class AssetViewerDialog(QDialog):
         self._model_viewed = model_viewed
         self.video_player: Optional[VideoPlayer] = None  # at most one, owned by this dialog
         self.pdf_viewer: Optional[PdfViewer] = None  # (saves where you were before it goes)
+        self._file: Optional[Path] = None  # a file inside an archive: its unpacked copy, once unpacked
+        self.unpacked: set[str] = set()  # str(asset.path) of the files inside archives unpacked meanwhile
         # Window state to return to when leaving fullscreen
         self._state_before_fullscreen = Qt.WindowState.WindowNoState
         self._was_fullscreen_for_video = False  # viewer was already full screen when the video went full screen
@@ -1019,6 +1024,7 @@ class AssetViewerDialog(QDialog):
             self.pdf_viewer.save_state()
             self.pdf_viewer = None
         self.asset, self.tags, self._edit_tags, self._position = target.asset, target.tags, target.edit_tags, target.position
+        self._file = None
         self._init_ui()
         self.setFocus()
 
@@ -1138,9 +1144,29 @@ class AssetViewerDialog(QDialog):
             "Modified": self.asset.formatted_modified_time,
             "Location": str(self.asset.path.parent),
         }
+        member = self.asset.archive
+        if member is not None:
+            metadata["Location"] = f"Inside {member.archive.name}" + (f" > {member.folder}" if member.folder else "")
+            metadata["Archive"] = str(member.archive)
+            if self._file is None:
+                self._file = archives.cached_copy(member)  # (unpacked before: no waiting)
+        path = self._file_path()
+
+        if member is not None and self.asset.is_archive:
+            lbl = QLabel("An archive inside this archive. Extract it (right-click it in the grid) to look inside.")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl, 1)
+        elif self.asset.is_archive:
+            lbl = QLabel(f"{self.asset.name} is an archive. Double-click it in the grid to look inside.")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl, 1)
+        elif path is None:
+            layout.addWidget(self._build_unpack_panel(), 1)
 
         # Case A: 3D Model Viewer (loaded on a worker thread: a big sculpt takes seconds)
-        if self.asset.is_3d_model:
+        elif self.asset.is_3d_model:
             viewport = Model3DViewportWidget()
             viewport.set_status(f"Loading {self.asset.name}...")
             self.viewport = viewport
@@ -1150,7 +1176,7 @@ class AssetViewerDialog(QDialog):
 
         # Case B: Texture / Image Viewer (decoded on a worker thread: a big one takes seconds)
         elif self.asset.is_texture:
-            tex_viewer = TextureViewerWidget(self.asset.path)
+            tex_viewer = TextureViewerWidget(path)
             self.tex_viewer = tex_viewer
             self._load_image(tex_viewer)
 
@@ -1189,7 +1215,7 @@ class AssetViewerDialog(QDialog):
 
         # Case C: Document (PDF) Viewer
         elif self.asset.is_document:
-            self.pdf_viewer = PdfViewer(self.asset.path, artbook=self._artbook)
+            self.pdf_viewer = PdfViewer(path, artbook=self._artbook)
             metadata["Pages"] = str(self.pdf_viewer.doc.pageCount())
             layout.addWidget(self.pdf_viewer, 1)
 
@@ -1198,7 +1224,7 @@ class AssetViewerDialog(QDialog):
             self.video_player = VideoPlayer()
             self.video_player.fullscreen_changed.connect(self._on_video_fullscreen)
             layout.addWidget(self.video_player, 1)
-            self.video_player.load(self.asset.path, autoplay=True)
+            self.video_player.load(path, autoplay=True)
             self.video_player.setFocus()
 
         # Fallback
@@ -1228,7 +1254,7 @@ class AssetViewerDialog(QDialog):
     def _load_image(self, tex_viewer: TextureViewerWidget) -> None:
         """Decode the image on a worker thread; show it (and its size) when it's ready."""
         token, _stop = self._next_load()
-        path = self.asset.path
+        path = self._file_path()
 
         def done(loaded: Optional[LoadedImage]) -> None:
             if loaded is None or token != self._load_token or not shiboken6.isValid(tex_viewer):
@@ -1256,7 +1282,7 @@ class AssetViewerDialog(QDialog):
     def _load_model(self, viewport: Model3DViewportWidget) -> None:
         """Read the model on a worker thread; show it (and its details) when it's ready."""
         token, stop = self._next_load()
-        path = self.asset.path
+        path = self._file_path()
 
         def done(mesh: Mesh3D) -> None:
             if token != self._load_token or not shiboken6.isValid(viewport):
@@ -1544,13 +1570,81 @@ class AssetViewerDialog(QDialog):
         super().done(result)
 
     def _open_external(self) -> None:
-        """Open asset in system default application."""
+        """Open asset in system default application (a file inside an archive: its unpacked copy)."""
         if self.video_player is not None:
             self.video_player.player.pause()
-        if self.asset.path.exists():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.asset.path)))
+        path = self._file_path()
+        if path is not None and path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _reveal_in_explorer(self) -> None:
-        """Reveal file in Windows File Explorer."""
-        file_actions.reveal(self.asset.path)
+        """Reveal file in Windows File Explorer (a file inside an archive: the archive)."""
+        file_actions.reveal(self.asset.archive.archive if self.asset.in_archive else self.asset.path)
+
+    # ------------------------------------------------------------------
+    # Files inside archives
+    # ------------------------------------------------------------------
+    def _file_path(self) -> Optional[Path]:
+        """The file to show: the asset's own, or for a file inside an archive its unpacked copy
+        (None until it's unpacked)."""
+        return self._file if self.asset.in_archive else self.asset.path
+
+    def _build_unpack_panel(self) -> QWidget:
+        """Shown while a file inside an archive is unpacked; the file is shown when it's done."""
+        member = self.asset.archive
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.addStretch(1)
+        label = QLabel(f"Unpacking {member.base_name} from {member.archive.name}...")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        bar = QProgressBar()
+        bar.setRange(0, 1000)
+        bar.setTextVisible(False)
+        bar.setMaximumWidth(420)
+        layout.addWidget(bar, 0, Qt.AlignmentFlag.AlignHCenter)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setToolTip("Stop unpacking (the next file can still be shown)")
+        btn_cancel.setMaximumWidth(120)
+        layout.addWidget(btn_cancel, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(2)
+
+        token, stop = self._next_load()
+        job = UnpackJob()
+        stop_check = stop.is_set
+
+        def work(progress, should_stop):
+            return archives.materialize(member, progress, lambda: should_stop() or stop_check())
+
+        def progress(done: int, total: int) -> None:
+            if token == self._load_token and shiboken6.isValid(bar):
+                bar.setValue(int(1000 * done / total) if total else 1000)
+                label.setText(
+                    f"Unpacking {member.base_name} from {member.archive.name}... {int(100 * done / total) if total else 100}%"
+                )
+
+        def done(path: Path) -> None:
+            if token != self._load_token or not shiboken6.isValid(panel):
+                return  # (another file is shown now, or the viewer was closed)
+            self._file = path
+            self.unpacked.add(str(self.asset.path))
+            self._init_ui()
+
+        def failed(message: str) -> None:
+            if token == self._load_token and shiboken6.isValid(label):
+                label.setText(f"{member.base_name} couldn't be unpacked.\n{message}")
+                bar.hide()
+                btn_cancel.hide()
+
+        def cancel() -> None:
+            job.cancel()
+            stop.set()
+            label.setText(f"Stopped unpacking {member.base_name}.")
+            bar.hide()
+            btn_cancel.hide()
+
+        btn_cancel.clicked.connect(cancel)
+        unpack_in_background(work, done, failed, progress, job)
+        return panel
 

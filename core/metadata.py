@@ -71,11 +71,43 @@ def image_size(path: str) -> Optional[tuple[int, int]]:
         return None
 
 
+_HEAD_BYTES = 1024 * 1024  # enough of an image inside an archive for its header
+
+
+def _member_image_size(path: str) -> Optional[tuple[int, int]]:
+    """An image inside an archive: its size from the start of it (only that much is unpacked)."""
+    import io
+
+    from .archives import ArchiveError, iter_chunks, member_for_path
+
+    member = member_for_path(path)
+    if member is None:
+        return None
+    head = bytearray()
+    try:
+        for piece in iter_chunks(member):
+            head += piece
+            if len(head) >= _HEAD_BYTES:
+                break
+    except ArchiveError:
+        return None
+    if head[:4] == b"8BPS":
+        height, width = struct.unpack(">II", bytes(head[14:22]))
+        return width, height
+    from PIL import Image
+
+    with Image.open(io.BytesIO(bytes(head))) as im:
+        return im.size
+
+
 def read_details(path: str, extension: str) -> Optional[AssetMeta]:
     """The file's details (EMPTY if there's nothing to read), or None to try again later
-    (a video while ffmpeg isn't installed)."""
+    (a video while ffmpeg isn't installed). Inside an archive, only images have theirs read."""
     ext = extension.lower()
     try:
+        if "|" in path:  # (core.archives.SEPARATOR: a file inside an archive)
+            size = _member_image_size(path) if ext in TEXTURE_EXTENSIONS else None
+            return AssetMeta(width=size[0], height=size[1]) if size else EMPTY
         if ext in TEXTURE_EXTENSIONS:
             size = image_size(path)
             return AssetMeta(width=size[0], height=size[1]) if size else EMPTY

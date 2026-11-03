@@ -17,7 +17,15 @@ _FULL_CHUNK = 1024 * 1024
 
 
 def quick_hash(path: Path | str) -> Optional[str]:
-    """sha1 of the file size plus its first and last 64 KB, or None if it can't be read."""
+    """sha1 of the file size plus its first and last 64 KB, or None if it can't be read. A file
+    inside an archive: of its size and checksum (from the archive's listing; nothing is unpacked)."""
+    if "|" in str(path):  # (core.archives.SEPARATOR)
+        from .archives import member_for_path
+
+        member = member_for_path(path)
+        if member is None:
+            return None
+        return hashlib.sha1(f"archive member|{member.size}|{member.crc}".encode()).hexdigest()
     try:
         size = os.path.getsize(path)
         digest = hashlib.sha1(str(size).encode())

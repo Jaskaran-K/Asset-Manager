@@ -10,6 +10,7 @@ to show as a 50 file one.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from PySide6.QtCore import (
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import QListView, QStyle, QStyledItemDelegate, QStyleOpti
 from core.scanner import AssetItem
 from core.tag_repository import Marks
 from ui import animations
+from ui.duotone import draw_icon
 
 ASSET_ROLE = Qt.ItemDataRole.UserRole
 GLIDE_MS = 220  # cards gliding to their new places when the rows change
@@ -33,10 +35,14 @@ class AssetListModel(QAbstractListModel):
         thumbnail_for: Callable[[AssetItem], object],
         tooltip_for: Callable[[AssetItem], str],
         parent=None,
+        file_for: Optional[Callable[[AssetItem], Optional[Path]]] = None,
     ):
+        """file_for(asset): the real file to drag out for an asset (files inside archives are
+        unpacked first), or None to leave it out; by default the asset's own path."""
         super().__init__(parent)
         self._thumbnail_for = thumbnail_for
         self._tooltip_for = tooltip_for
+        self._file_for = file_for or (lambda asset: asset.path)
         self._assets: list[AssetItem] = []
         self._rows: dict[str, int] = {}
 
@@ -100,7 +106,8 @@ class AssetListModel(QAbstractListModel):
         rows = sorted({i.row() for i in indexes if i.isValid()})
         mime = QMimeData()
         # File URLs: Windows hands these to other apps as an ordinary file drop (CF_HDROP)
-        mime.setUrls([QUrl.fromLocalFile(str(self._assets[r].path)) for r in rows])
+        files = [self._file_for(self._assets[r]) for r in rows]
+        mime.setUrls([QUrl.fromLocalFile(str(f)) for f in files if f is not None])
         return mime
 
     def supportedDragActions(self) -> Qt.DropAction:
@@ -143,7 +150,9 @@ class AssetCardDelegate(QStyledItemDelegate):
     def _paint_card(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         super().paint(painter, option, index)
         marks = self._marks_for(index)
-        if not (marks.favorite or marks.rating):
+        asset = index.data(ASSET_ROLE)
+        inside = asset is not None and asset.in_archive
+        if not (marks.favorite or marks.rating or inside):
             return
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -172,6 +181,14 @@ class AssetCardDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(pill, 7, 7)
             painter.setPen(STAR_COLOR)
             painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+        if inside:
+            # Inside an archive: a small archive box at the bottom left of the picture
+            side = max(12.0, min(16.0, icon.width() * 0.12))
+            pill = QRectF(icon.left() + 5, icon.bottom() - side - 26, side + 6, side + 4)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 150))
+            painter.drawRoundedRect(pill, 5, 5)
+            draw_icon(painter, QRectF(pill.left() + 3, pill.top() + 2, side, side), "archive", ("#ffffff", "#c4b5fd"))
         painter.restore()
 
 

@@ -35,13 +35,16 @@ class ArtbookSender:
         self.panel = panel  # ui.artbook.ArtbookPanel
         self._status = status  # shows a message in the status line
 
-    def add_send_menu(self, menu: QMenu, paths: Sequence[Path]) -> None:
-        """Send to Artbook: a new page, or any page (in its folders). Image files only."""
+    def add_send_menu(
+        self, menu: QMenu, paths: Sequence[Path], resolve: Optional[Callable[[list[Path]], list[Path]]] = None
+    ) -> None:
+        """Send to Artbook: a new page, or any page (in its folders). Image files only.
+        resolve(paths): the real files to send, when picked (files inside archives unpacked)."""
         paths = [p for p in paths if p.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
         send = menu.addMenu("Send to Artbook" if paths else "Send to Artbook (images only)")
         send.setEnabled(bool(paths))
         if paths:
-            self.fill_artbook_menu(send, lambda page_id: self.send_files(paths, page_id))
+            self.fill_artbook_menu(send, lambda page_id: self.send_files(resolve(paths) if resolve else paths, page_id))
 
     def fill_artbook_menu(self, send: QMenu, on_pick: Callable[[Optional[str]], None]) -> None:
         """Fill a "Send to Artbook" menu: New Page, then every page (in its folders). on_pick(page id,
@@ -118,6 +121,9 @@ class AssetMenuActions:
     tag: Callable[[], None]
     toggle_favorite: Callable[[], None]
     set_rating: Callable[[int], None]
+    open_external: Optional[Callable[[], None]] = None  # (default: the file's own app, by its path)
+    extract: Optional[Callable[[], None]] = None  # an archive, or a file inside one: save a copy
+    send_files: Optional[Callable[[list[Path]], list[Path]]] = None  # the real files to send to the Artbook
 
 
 def build_asset_menu(
@@ -131,20 +137,34 @@ def build_asset_menu(
     """The right-click menu for a card (asset: the one clicked; selection: the selected files,
     marks: theirs). The caller shows it, then frees it (deleteLater): its actions belong to it."""
     menu = QMenu(parent)
+    menu.setToolTipsVisible(True)
+    archive = asset.is_archive and not asset.in_archive
 
-    action_view = menu.addAction("Preview in Asset Viewer")
+    action_view = menu.addAction("Look Inside" if archive else "Preview in Asset Viewer")
     font = action_view.font()
     font.setBold(True)
     action_view.setFont(font)
+    if archive:
+        set_icon(action_view, "archive")
     action_view.triggered.connect(actions.open_viewer)
 
     menu.addSeparator()
 
     action_open = menu.addAction("Open with External App")
-    action_open.triggered.connect(lambda: file_actions.open_file(asset.path))
+    if asset.in_archive:
+        action_open.setToolTip("Unpacks it first, then opens it in the program Windows uses for it")
+    action_open.triggered.connect(actions.open_external or (lambda: file_actions.open_file(asset.path)))
 
-    action_reveal = menu.addAction("Show in File Explorer")
+    action_reveal = menu.addAction("Show Archive in File Explorer" if asset.in_archive else "Show in File Explorer")
     action_reveal.triggered.connect(actions.reveal)
+
+    if actions.extract is not None and (archive or asset.in_archive):
+        action_extract = menu.addAction("Extract To..." if archive else "Extract...")
+        set_icon(action_extract, "extract")
+        action_extract.setToolTip(
+            "Unpack every file into a folder you choose" if archive else "Save a copy of this file where you choose"
+        )
+        action_extract.triggered.connect(actions.extract)
 
     menu.addSeparator()
 
@@ -168,7 +188,7 @@ def build_asset_menu(
         action.triggered.connect(lambda _checked=False, r=rating: actions.set_rating(r))
 
     menu.addSeparator()
-    sender.add_send_menu(menu, [a.path for a in selection])
+    sender.add_send_menu(menu, [a.path for a in selection], actions.send_files)
 
     action_copy_path = menu.addAction("Copy Full Path")
     action_copy_path.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(asset.path)))

@@ -73,6 +73,8 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("main.rate_5", MAIN, "5", "Rate ★★★★★", "5"),  # glyph-ok
     Shortcut("main.rate_0", MAIN, "0", "Clear the rating", "0"),
     Shortcut("main.multi_select", MAIN, "Ctrl+Click / Shift+Click", "Select several files"),
+    Shortcut("main.open_archive", MAIN, "Double-click an archive", "Look inside a ZIP, RAR or 7z like a folder (Space too)"),
+    Shortcut("main.leave_archive", MAIN, "Backspace", "Leave the open archive: back to where you were", "Backspace"),
     Shortcut("main.context_menu", MAIN, "Right-click", "File actions (preview, tag, open, copy path...)"),
     Shortcut("main.send_to_artbook", MAIN, "Right-click > Send to Artbook", "Add the selected images to any Artbook page, or a new one"),
     Shortcut("main.drag_out", MAIN, "Drag files out of the grid", "Copy them into Explorer, Blender, Photoshop, Unreal..."),

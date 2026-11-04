@@ -27,6 +27,19 @@ def isolated_user_data(tmp_path, monkeypatch):
     from ui import file_actions
 
     monkeypatch.setattr(file_actions, "_select_in_explorer", lambda path: True)
+    # The apps on this computer play no part (a test that wants some sets them up)
+    from core import app_icons, apps
+
+    monkeypatch.setattr(apps, "_registered_programs", lambda: ())
+    monkeypatch.setattr(apps, "_usual_programs", lambda: ())
+    monkeypatch.setattr(apps, "_shortcut_folders", lambda: [])
+    monkeypatch.setattr(apps, "_associated_program", lambda extension: None)
+    apps.configure({}, {})
+    app_icons.forget()
+    # Helpers are never added to the real Maya or Blender
+    monkeypatch.setenv("MAYA_APP_DIR", str(data / "maya"))
+    monkeypatch.setenv("APPDATA", str(data / "appdata"))
+    monkeypatch.delenv("BLENDER_USER_SCRIPTS", raising=False)
     from PySide6.QtWidgets import QApplication
 
     windows_before = {id(w) for w in QApplication.topLevelWidgets()} if QApplication.instance() else set()

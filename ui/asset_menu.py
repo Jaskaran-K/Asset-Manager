@@ -13,7 +13,7 @@ from typing import Callable, Optional, Sequence
 from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import QMenu, QWidget
 
-from core import artbook_store
+from core import app_helpers, apps, artbook_store
 from core.scanner import AssetItem
 from core.settings import get_artbook_page
 from core.tag_repository import Marks
@@ -124,6 +124,8 @@ class AssetMenuActions:
     open_external: Optional[Callable[[], None]] = None  # (default: the file's own app, by its path)
     extract: Optional[Callable[[], None]] = None  # an archive, or a file inside one: save a copy
     send_files: Optional[Callable[[list[Path]], list[Path]]] = None  # the real files to send to the Artbook
+    open_in: Optional[Callable[[apps.App], None]] = None  # open it in one of the apps (Open In)
+    import_board: Optional[Callable[[], None]] = None  # a PureRef board: make a new Artbook page from it
 
 
 def build_asset_menu(
@@ -140,15 +142,35 @@ def build_asset_menu(
     menu.setToolTipsVisible(True)
     archive = asset.is_archive and not asset.in_archive
 
-    action_view = menu.addAction("Look Inside" if archive else "Preview in Asset Viewer")
+    board = asset.extension.lower() == ".pur"
+
+    action_view = menu.addAction("Look Inside" if archive else "Open in Artbook" if board else "Preview in Asset Viewer")
     font = action_view.font()
     font.setBold(True)
     action_view.setFont(font)
     if archive:
         set_icon(action_view, "archive")
     action_view.triggered.connect(actions.open_viewer)
+    if board and actions.import_board is not None:
+        action_again = menu.addAction("Import Again")
+        set_icon(action_again, "import")
+        action_again.setToolTip("Make a new Artbook page from the board as it is now. The page it has already stays as it is")
+        action_again.triggered.connect(actions.import_board)
 
     menu.addSeparator()
+
+    fitting = apps.apps_for(asset.extension) if actions.open_in is not None else []
+    if fitting:
+        open_in = menu.addMenu("Open In")
+        open_in.setToolTipsVisible(True)
+        set_icon(open_in.menuAction(), "open_in")
+        for app in fitting:
+            action = open_in.addAction(app.name)
+            if app_helpers.goes_to_open_window(app.id, asset.path):
+                action.setToolTip(f"Imports it into the {app.name} that's open")
+            elif asset.in_archive:
+                action.setToolTip(f"Unpacks it first, then opens it in {app.name}")
+            action.triggered.connect(lambda _checked=False, a=app: actions.open_in(a))
 
     action_open = menu.addAction("Open with External App")
     if asset.in_archive:

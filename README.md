@@ -40,6 +40,34 @@ the app starts from that copy and notes it in the crash log.
     **Height** slider, **Invert** (**I**) for alphas made the other way round, and **512 px** / **1024 px**
     detail.
   - **Tile** (or **T**) shows any image repeated **2×2** or **3×3**, edge to edge, to check its seams.
+- **ZBrush and other app files** are in the library too: ZBrush brushes, tools, projects and materials
+  (`.zbp`, `.ztl`, `.zpr`, `.zmt`), Substance files (`.spp`, `.sbsar`, `.spsm`), Maya scenes (`.ma`, `.mb`),
+  3ds Max (`.max`) and Toolbag scenes (`.tbscene`), under **ZBrush** and **App Files** in the sidebar.
+  - Their cards show a picture when there's a sure one: a `.blend`'s own render, or a picture beside the file
+    named after it (`Carve_alpha.psd`, `Carve_ico.png`) or like a preview (`Preview.jpg`, `cover.png`). Otherwise
+    they show **the icon of the app they open in**, read from the app on your computer. An app file whose app
+    isn't installed shows a plain sheet.
+  - **Double-click** shows the file's picture and details, with a button (or **O**) that opens it in its app.
+- **Open In** (right-click) opens a file in ZBrush, Blender, Maya, Photoshop, Substance 3D Painter or Marmoset
+  Toolbag, whichever fit its type. OBJ and FBX are imported into Blender and Maya, and an OBJ loads into a ZBrush
+  that's already open. A file inside an archive is unpacked first; that's a temporary copy, so save it somewhere
+  else to keep changes. **Open with External App** still uses the program Windows has for the file.
+  - **Settings > Apps** lists the apps. They're found by themselves, wherever they're installed, and the
+    newest version is used unless you pick another there or browse to one. **File Types...** changes which
+    types Open In offers an app for.
+  - **Add App...** adds any other program, such as Krita: pick it, name it and give it its file types. It's
+    started with the file, so it has to accept one when it starts. A type the library doesn't list yet (`.kra`)
+    is added to it, and those files show the app's icon.
+  - **Into the window you have open:** Maya and Blender start a new window each time unless you press **Install
+    Helper** in Settings > Apps. It adds a small script to the app's own scripts folder (Maya: `userSetup.py`
+    gets a few marked lines, with whatever else is there left alone; Blender: its `scripts/startup` folder, for
+    each version), and from the next time you start the app, OBJ and FBX go into the window that's open. Scenes
+    (`.ma`, `.mb`, `.blend`) still open in a new window, so nothing replaces your work. The helper only reads
+    requests from the app's own folder and only ever imports model files. **Remove Helper** takes it all out.
+- **PureRef boards** (`.pur`) show the picture they hold of themselves. **Double-click** opens a board as an
+  Artbook page, the same page every time: one already named like it is used, or it's imported. A board changed
+  since says so; right-click > **Import Again** makes a new page. Pages you've edited are never overwritten, and
+  boards are only ever read.
 - **Drag files out** of the grid into Explorer, Blender, Photoshop, Unreal and so on. They're copied; the
   library keeps its files.
 - **Archives (ZIP, RAR, 7z)** are browsed without unpacking them:

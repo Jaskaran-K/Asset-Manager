@@ -23,6 +23,10 @@ freezes or crashes the app. Methods defined with `def` on a QObject are queued t
   For callbacks, use `ui.tag_widgets.run_in_background`, which relays results to the UI thread.
 - Name objects that emit from other threads `worker` / `*_worker`, or put a QRunnable's signals
   on `.signals`. `tests/test_thread_safety.py` relies on these names to catch violations.
+- Never let a Python QObject be freed on a worker thread (`thread.finished` -> `deleteLater` on an
+  object still living there). Qt holds its signal lock while PySide wants the GIL, and the UI thread
+  holds the GIL while any connect wants that lock: a permanent freeze. Move it back to the UI thread
+  first (`ScanWorker.run`).
 
 ## Tooltips
 Every button gets a hover tooltip (`setToolTip`) saying what it does, plus its shortcut if it

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import shiboken6
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
 
 from core import archives
 from core.library_snapshot import save_snapshot
@@ -81,6 +81,11 @@ class ScanWorker(QObject):
             self.finished.emit(assets, info)
         except Exception as exc:  # pylint: disable=broad-except
             self.failed.emit(str(exc))
+        finally:
+            # Back to the UI thread, to be freed there. Freed on its own thread, Qt holds its signal lock
+            # while PySide wants Python's lock; the UI thread holds Python's and wants the signal lock for
+            # any connect (creating a menu is enough), and the app freezes for good if they meet.
+            self.moveToThread(QCoreApplication.instance().thread())
 
     @staticmethod
     def _sync_tags(
@@ -248,7 +253,7 @@ class LibraryState(QObject):
         self.scan_worker.failed.connect(self._on_scan_failed)
         for done in (self.scan_worker.finished, self.scan_worker.failed, self.scan_worker.cancelled):
             done.connect(self.scan_thread.quit)
-        self.scan_thread.finished.connect(self.scan_worker.deleteLater)  # (freed with its thread)
+        self.scan_thread.finished.connect(self.scan_worker.deleteLater)  # (with its thread; on the UI thread: run)
 
         self.scan_thread.start()
 

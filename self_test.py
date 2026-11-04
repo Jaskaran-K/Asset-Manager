@@ -150,6 +150,19 @@ def run_self_test(log_path: Optional[str]) -> int:
         # (RAR / 7z use the user's own 7-Zip: not part of the app, so only reported)
         return f"Deflate64 zip read; 7-Zip for RAR / 7z: {archives.find_seven_zip() or 'not installed'}"
 
+    def check_app_files():
+        # Blender saves its files with Zstandard (a module loaded only when one turns up), and the
+        # icons on cards come through Windows' own API
+        import struct
+        from compression import zstd
+        from core import app_icons, file_pictures
+        block = b"TEST" + struct.pack("<i", 8 + 4) + bytes(16) + struct.pack("<ii", 1, 1) + bytes(4)
+        packed = zstd.compress(b"BLENDER-v400" + block)
+        if file_pictures.blend_picture(packed) is None:
+            raise RuntimeError("reading a compressed .blend's picture failed")
+        icon = app_icons.read_icon(sys.executable) if sys.platform == "win32" else None
+        return f"compressed .blend read; this program's icon: {f'{icon.width()} px' if icon is not None else 'none'}"
+
     def check_video():
         from PySide6.QtMultimedia import QMediaFormat
         from ui.video_player import VideoPlayer
@@ -165,6 +178,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("3D model loading", check_models)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
+    step("app files", check_app_files)
     step("user interface", check_ui)
     step("video playback", check_video)
     step("tag database", check_tags)

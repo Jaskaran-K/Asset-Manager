@@ -228,6 +228,13 @@ def test_a_new_scan_replaces_a_running_one_without_waiting(library, qapp, monkey
     from core.scanner import AssetScanner
 
     window = open_window(qapp)
+    first_worker = window.library.scan_worker
+
+    def first_scan_is_gone() -> bool:  # (it's connected to the method replaced below)
+        qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        return not shiboken6.isValid(first_worker)
+
+    assert pump(qapp, first_scan_is_gone)
     original = AssetScanner.scan
     slow_root = library / "props"
 

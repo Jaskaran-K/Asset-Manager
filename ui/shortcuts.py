@@ -75,6 +75,8 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("main.multi_select", MAIN, "Ctrl+Click / Shift+Click", "Select several files"),
     Shortcut("main.open_archive", MAIN, "Double-click an archive", "Look inside a ZIP, RAR or 7z like a folder (Space too)"),
     Shortcut("main.leave_archive", MAIN, "Backspace", "Leave the open archive: back to where you were", "Backspace"),
+    Shortcut("main.open_board", MAIN, "Double-click a PureRef board", "Open it as an Artbook page, the same page each time (Space too)"),
+    Shortcut("main.open_in", MAIN, "Right-click > Open In", "Open the file in ZBrush, Blender, Maya, Photoshop, Painter, Toolbag or an app you added (Settings > Apps)"),
     Shortcut("main.context_menu", MAIN, "Right-click", "File actions (preview, tag, open, copy path...)"),
     Shortcut("main.send_to_artbook", MAIN, "Right-click > Send to Artbook", "Add the selected images to any Artbook page, or a new one"),
     Shortcut("main.drag_out", MAIN, "Drag files out of the grid", "Copy them into Explorer, Blender, Photoshop, Unreal..."),
@@ -168,6 +170,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("viewer.next", VIEWER, "Page Down", "Next file in the grid", "PgDown"),
     Shortcut("viewer.previous_alt", VIEWER, "Alt+Left", "Previous file in the grid", "Alt+Left"),
     Shortcut("viewer.next_alt", VIEWER, "Alt+Right", "Next file in the grid", "Alt+Right"),
+    Shortcut("viewer.open_app", VIEWER, "O", "A file only its app can show: open it there (a PureRef board: in the Artbook)", "O"),
 
     # PDF viewer (ui.pdf_viewer)
     Shortcut("pdf.previous_page", PDF, "Left", "Previous page", "Left"),

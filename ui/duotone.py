@@ -564,6 +564,14 @@ def _extract(p, primary, secondary):
     _line(p, primary, 2.1, (8, 7.5), (12, 3.5), (16, 7.5))
 
 
+def _open_in(p, primary, secondary):
+    """An arrow going into a program's window: open a file in another app."""
+    _body(p, _rounded(7, 4, 14.5, 16, 2.2), secondary)  # the window
+    _line(p, primary, 2.0, (9, 8), (19, 8))  # its title bar
+    _line(p, primary, 2.1, (2.5, 15), (12.5, 15))  # an arrow going in
+    _line(p, primary, 2.1, (9, 11.5), (12.5, 15), (9, 18.5))
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -604,6 +612,7 @@ ICONS: dict[str, IconPainter] = {
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
+    "open_in": _open_in,
 }
 
 

@@ -25,6 +25,11 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
                     the mouse; click_through_tip: show the heads-up when turning it on)
 - archive_contents: show the files inside archives (zip, RAR, 7z) among the library's files
 - seven_zip_path:   7-Zip's 7z.exe for RAR / 7z archives ("" = find it)
+- found_apps:       {app id: [programs found on this computer, newest first]} (core.apps.detect)
+- app_choices:      {app id: program}: the one picked in Settings > Apps, if not the newest found
+- custom_apps:      [{"id", "name", "program", "types"}]: apps added by hand in Settings > Apps
+- app_types:        {app id: [file types]}: Open In's types for an app, if set by hand
+- board_pages:      {PureRef board: {"page", "modified"}}: the Artbook page it opens as
 - defaults_seen:    the newest set of default file types / categories added to this config's own
                     lists (apply_new_defaults)
 """
@@ -40,7 +45,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .scanner import ARCHIVE_EXTENSIONS, DOCUMENT_EXTENSIONS, MODEL_EXTENSIONS, TEXTURE_EXTENSIONS, VIDEO_EXTENSIONS
+from .scanner import (
+    APP_FILE_EXTENSIONS,
+    ARCHIVE_EXTENSIONS,
+    DOCUMENT_EXTENSIONS,
+    MODEL_EXTENSIONS,
+    TEXTURE_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+)
 
 
 CONFIG_FILE_PATH: Path = Path.home() / ".3d_asset_manager_config.json"
@@ -57,10 +69,12 @@ DEFAULT_THUMBNAIL_SIZE = 110
 DEFAULT_FILE_EXTENSIONS: list[str] = [
     ".fbx", ".obj", ".gltf", ".glb", ".stl", ".dae", ".blend", ".3ds", ".ply",
     ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".tga", ".bmp", ".webp", ".exr",
-    ".psd", ".hdr", ".dds",
+    ".psd", ".psb", ".hdr", ".dds",
     ".pdf",
     ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
     ".zip", ".rar", ".7z",
+    ".zbp", ".ztl", ".zpr", ".zmt",
+    ".spp", ".sbsar", ".spsm", ".ma", ".mb", ".max", ".tbscene", ".pur",
 ]
 
 # Mirrors the original hard-coded sidebar layout
@@ -84,7 +98,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             {"name": "PNG", "color": "#34d399", "extensions": [".png"]},
             {"name": "JPEG", "color": "#fbbf24", "extensions": [".jpg", ".jpeg"]},
             {"name": "TIFF", "color": "#60a5fa", "extensions": [".tiff", ".tif"]},
-            {"name": "Other Textures", "color": "#c084fc", "extensions": [".tga", ".bmp", ".webp", ".exr", ".psd", ".hdr", ".dds"]},
+            {"name": "Other Textures", "color": "#c084fc", "extensions": [".tga", ".bmp", ".webp", ".exr", ".psd", ".psb", ".hdr", ".dds"]},
         ],
     },
     {
@@ -107,6 +121,28 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
         "extensions": [".zip", ".rar", ".7z"],
         "subcategories": [],
     },
+    {
+        "name": "ZBrush",
+        "color": "#f97316",
+        "extensions": [".zmt"],
+        "subcategories": [
+            {"name": "Brushes", "color": "#fb923c", "extensions": [".zbp"]},
+            {"name": "Tools", "color": "#fdba74", "extensions": [".ztl"]},
+            {"name": "Projects", "color": "#ea580c", "extensions": [".zpr"]},
+        ],
+    },
+    {
+        "name": "App Files",
+        "color": "#14b8a6",
+        "extensions": [],
+        "subcategories": [
+            {"name": "Substance", "color": "#84cc16", "extensions": [".spp", ".sbsar", ".spsm"]},
+            {"name": "Maya", "color": "#2dd4bf", "extensions": [".ma", ".mb"]},
+            {"name": "3ds Max", "color": "#38bdf8", "extensions": [".max"]},
+            {"name": "Toolbag", "color": "#fb7185", "extensions": [".tbscene"]},
+            {"name": "PureRef", "color": "#94a3b8", "extensions": [".pur"]},
+        ],
+    },
 ]
 
 # File types and categories added to the defaults after the first release. A config that stores its
@@ -116,12 +152,22 @@ NEW_DEFAULTS: tuple[dict[str, Any], ...] = (
     {"version": 2, "extensions": [".zip"], "categories": ["Archives"]},
     # (category_extensions: added to a category of that name the config has, if no category has them)
     {"version": 3, "extensions": [".rar", ".7z"], "categories": [], "category_extensions": {"Archives": [".rar", ".7z"]}},
+    # (beside: added to whichever category or subcategory the config keeps that file type in)
+    {
+        "version": 4,
+        "extensions": [
+            ".psb", ".zbp", ".ztl", ".zpr", ".zmt", ".spp", ".sbsar", ".spsm", ".ma", ".mb", ".max", ".tbscene", ".pur",
+        ],
+        "categories": ["ZBrush", "App Files"],
+        "beside": {".psd": [".psb"]},
+    },
 )
 DEFAULTS_VERSION = NEW_DEFAULTS[-1]["version"]
 
 # Extensions the built-in viewer / thumbnailer knows how to preview
 PREVIEWABLE_EXTENSIONS: set[str] = (
     MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS | ARCHIVE_EXTENSIONS
+    | APP_FILE_EXTENSIONS
 )
 
 _EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9_]+$")
@@ -219,8 +265,14 @@ def apply_new_defaults() -> bool:
             for name in change["categories"]:
                 default = next(c for c in DEFAULT_CATEGORIES if c["name"] == name)
                 if name.casefold() not in names:
-                    categories.append(copy.deepcopy(default))
+                    categories.append(_without_taken_types(copy.deepcopy(default), categories))
                     names.add(name.casefold())
+            for beside, exts in change.get("beside", {}).items():
+                taken = set().union(*(category_extensions(c) for c in categories)) if categories else set()
+                entries = [entry for c in categories for entry in (c, *c.get("subcategories", []))]
+                target = next((entry for entry in entries if beside in entry.get("extensions", [])), None)
+                if target is not None:
+                    target["extensions"] += [e for e in exts if e not in taken]
             for name, exts in change.get("category_extensions", {}).items():
                 taken = set().union(*(category_extensions(c) for c in categories)) if categories else set()
                 target = next((c for c in categories if c["name"].casefold() == name.casefold()), None)
@@ -233,6 +285,14 @@ def apply_new_defaults() -> bool:
     config["defaults_seen"] = DEFAULTS_VERSION
     _save_raw_config(config)
     return True
+
+
+def _without_taken_types(category: dict[str, Any], categories: list[dict[str, Any]]) -> dict[str, Any]:
+    """A new category, minus the file types another category has already (the user's own stay there)."""
+    taken = set().union(*(category_extensions(c) for c in categories)) if categories else set()
+    for entry in (category, *category.get("subcategories", [])):
+        entry["extensions"] = [e for e in entry.get("extensions", []) if e not in taken]
+    return category
 
 
 # ----------------------------------------------------------------------
@@ -395,6 +455,74 @@ def get_archive_contents() -> bool:
 
 def set_archive_contents(show: bool) -> None:
     _update_config("archive_contents", bool(show))
+
+
+def get_found_apps() -> dict[str, list[str]]:
+    """The apps found on this computer when last looked (core.apps.detect): {app id: programs, newest first}."""
+    value = _load_raw_config().get("found_apps")
+    if not isinstance(value, dict):
+        return {}
+    return {k: [p for p in v if isinstance(p, str)] for k, v in value.items() if isinstance(k, str) and isinstance(v, list)}
+
+
+def set_found_apps(found: dict[str, list[str]]) -> None:
+    _update_config("found_apps", found)
+
+
+def get_app_choices() -> dict[str, str]:
+    """The program picked in Settings > Apps for each app whose newest found one isn't wanted."""
+    value = _load_raw_config().get("app_choices")
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def set_app_choices(choices: dict[str, str]) -> None:
+    _update_config("app_choices", choices)
+
+
+def get_custom_apps() -> list[dict[str, Any]]:
+    """The apps added by hand in Settings > Apps: {"id", "name", "program", "types"}."""
+    value = _load_raw_config().get("custom_apps")
+    if not isinstance(value, list):
+        return []
+    return [
+        {"id": c["id"], "name": c["name"], "program": c["program"], "types": [t for t in c["types"] if isinstance(t, str)]}
+        for c in value
+        if isinstance(c, dict) and all(isinstance(c.get(k), str) for k in ("id", "name", "program")) and isinstance(c.get("types"), list)
+    ]
+
+
+def set_custom_apps(custom: list[dict[str, Any]]) -> None:
+    _update_config("custom_apps", custom)
+
+
+def get_app_types() -> dict[str, list[str]]:
+    """The file types Open In offers an app for, where they've been set by hand."""
+    value = _load_raw_config().get("app_types")
+    if not isinstance(value, dict):
+        return {}
+    return {k: [t for t in v if isinstance(t, str)] for k, v in value.items() if isinstance(k, str) and isinstance(v, list)}
+
+
+def set_app_types(types: dict[str, list[str]]) -> None:
+    _update_config("app_types", types)
+
+
+def get_board_link(board: str) -> dict[str, Any] | None:
+    """The Artbook page a PureRef board opens as: {"page", "modified"} (None: it hasn't opened as one)."""
+    links = _load_raw_config().get("board_pages")
+    link = links.get(board) if isinstance(links, dict) else None
+    return link if isinstance(link, dict) and isinstance(link.get("page"), str) else None
+
+
+def set_board_link(board: str, page_id: str, modified: float) -> None:
+    config = _load_raw_config()
+    links = config.get("board_pages")
+    links = links if isinstance(links, dict) else {}
+    links[board] = {"page": page_id, "modified": modified}
+    config["board_pages"] = links
+    _save_raw_config(config)
 
 
 def category_extensions(category: dict[str, Any]) -> set[str]:

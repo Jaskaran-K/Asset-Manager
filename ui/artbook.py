@@ -21,7 +21,14 @@ from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QVB
 
 from core import artbook_share, pur_import
 from core import artbook_store as store
-from core.settings import get_artbook_page, get_last_export_dir, set_artbook_page, set_last_export_dir
+from core.settings import (
+    get_artbook_page,
+    get_board_link,
+    get_last_export_dir,
+    set_artbook_page,
+    set_board_link,
+    set_last_export_dir,
+)
 from ui import shortcuts
 from ui.artbook_board import BoardView, export_pictures
 from ui.artbook_pages import PagesPanel
@@ -67,6 +74,7 @@ class ArtbookPanel(QWidget):
         self._dirty = False  # changed since the last thumbnail
         self._imports: list[tuple[Path, Optional[str]]] = []  # boards waiting to be imported (file, folder)
         self._importing: Optional[tuple[Path, Optional[str]]] = None
+        self._board_links: dict[str, tuple[str, float]] = {}  # file being imported -> the board to link its page to
         self._imported: list[str] = []  # this round's new pages
         self._import_skipped: Counter = Counter()
         self._import_errors: list[str] = []
@@ -281,6 +289,30 @@ class ArtbookPanel(QWidget):
         if self._importing is None:
             self._import_next()
 
+    def open_board(self, file: Path, board: str, modified: float, again: bool = False) -> None:
+        """Show the page a board in the library opens as: the one it's linked to, or a page named like
+        it (imported earlier by hand: linked from now on), or else a new one imported from file. board:
+        what it's known by in the settings; again: a new page even if it has one. Edits on a page are
+        never overwritten: a board that changed since says so, and Import Again makes a new page."""
+        pages = {p["id"]: p.get("name") or "" for p in store.list_pages()}
+        link = None if again else get_board_link(board)
+        if link is not None and link["page"] in pages:
+            self.open_page(link["page"])
+            if link.get("modified") != modified:
+                self.board.show_message(
+                    f"{file.stem} has changed since it became this page. Right-click it in the grid > Import Again makes a new page."
+                )
+            return
+        if not again:
+            stem = " ".join(file.stem.split()).casefold()
+            named = next((page_id for page_id, name in pages.items() if name.casefold() == stem), None)
+            if named is not None:
+                set_board_link(board, named, modified)
+                self.open_page(named)
+                return
+        self._board_links[str(file)] = (board, modified)
+        self.import_boards([file])
+
     def _on_boards_dropped(self, paths: list) -> None:
         self.import_boards([Path(p) for p in paths])
 
@@ -301,6 +333,9 @@ class ArtbookPanel(QWidget):
     def _on_board_imported(self, result: tuple[dict[str, Any], Counter]) -> None:
         page, skipped = result
         folder_id = self._importing[1] if self._importing else None
+        link = self._board_links.pop(str(self._importing[0]), None) if self._importing else None
+        if link is not None:
+            set_board_link(link[0], page["id"], link[1])
         try:
             store.page_tree()  # (files the new page in the index, at the top level)
             if folder_id is not None:

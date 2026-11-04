@@ -25,9 +25,10 @@ OLD_CATEGORIES = [
 def test_new_types_and_categories_are_added_once():
     write_config({"file_extensions": [".png", ".fbx"], "categories": OLD_CATEGORIES, "theme": "light"})
     assert settings.apply_new_defaults()
-    assert settings.get_file_extensions() == [".png", ".fbx", ".zip", ".rar", ".7z"]
+    assert settings.get_file_extensions()[:5] == [".png", ".fbx", ".zip", ".rar", ".7z"]
+    assert {".ztl", ".spp", ".pur", ".psb"} <= set(settings.get_file_extensions())
     names = [c["name"] for c in settings.get_categories()]
-    assert names == ["3D Models", "Videos", "Archives"]
+    assert names == ["3D Models", "Videos", "Archives", "ZBrush", "App Files"]
     assert settings.get_categories()[2]["extensions"] == [".zip", ".rar", ".7z"]
     assert read_config()["theme"] == "light" and read_config()["defaults_seen"] == settings.DEFAULTS_VERSION
 
@@ -39,18 +40,42 @@ def test_new_types_and_categories_are_added_once():
     assert [c["name"] for c in settings.get_categories()] == ["3D Models", "Videos"]
 
 
+def test_app_files_reach_a_config_that_had_archives():
+    """(the user's config: version 3, with its own PSD subcategory and everything else as it was)"""
+    psd = {"name": "PSD", "extensions": [".psd"], "subcategories": []}
+    textures = {"name": "Textures & Images", "extensions": [], "subcategories": [psd]}
+    mine = {"name": "Painter", "extensions": [".spp"], "subcategories": []}  # (a category of their own has .spp)
+    write_config({"file_extensions": [".png", ".psd", ".spp"], "categories": [textures, mine], "defaults_seen": 3})
+    assert settings.apply_new_defaults()
+    extensions = settings.get_file_extensions()
+    assert extensions[:3] == [".png", ".psd", ".spp"] and extensions.count(".spp") == 1 and ".ztl" in extensions
+    categories = settings.get_categories()
+    assert [c["name"] for c in categories] == ["Textures & Images", "Painter", "ZBrush", "App Files"]
+    assert categories[0]["subcategories"][0]["extensions"] == [".psd", ".psb"]  # (beside PSD, wherever that's kept)
+    assert categories[1]["extensions"] == [".spp"]
+    substance = next(s for s in categories[3]["subcategories"] if s["name"] == "Substance")
+    assert substance["extensions"] == [".sbsar", ".spsm"]  # (.spp stays in their category: no type shows twice)
+    zbrush = {s["name"]: s["extensions"] for s in categories[2]["subcategories"]}
+    assert zbrush == {"Brushes": [".zbp"], "Tools": [".ztl"], "Projects": [".zpr"]} and categories[2]["extensions"] == [".zmt"]
+
+    # Once only: removed afterwards, it stays removed
+    settings.set_categories(categories[:2])
+    assert not settings.apply_new_defaults()
+    assert [c["name"] for c in settings.get_categories()] == ["Textures & Images", "Painter"]
+
+
 def test_a_config_that_had_zip_gets_rar_and_7z():
     """(Chunk A's set, version 2, reached the user's config before RAR and 7z were added)"""
     archives_category = {"name": "Archives", "extensions": [".zip"], "subcategories": []}
     write_config({"file_extensions": [".png", ".zip"], "categories": OLD_CATEGORIES + [archives_category], "defaults_seen": 2})
     assert settings.apply_new_defaults()
-    assert settings.get_file_extensions() == [".png", ".zip", ".rar", ".7z"]
+    assert settings.get_file_extensions()[:4] == [".png", ".zip", ".rar", ".7z"]
     assert settings.get_categories()[2]["extensions"] == [".zip", ".rar", ".7z"]
 
     # Archives category removed before: not brought back (the types still reach the file list)
     write_config({"file_extensions": [".png", ".zip"], "categories": OLD_CATEGORIES, "defaults_seen": 2})
     settings.apply_new_defaults()
-    assert [c["name"] for c in settings.get_categories()] == ["3D Models", "Videos"]
+    assert [c["name"] for c in settings.get_categories()] == ["3D Models", "Videos", "ZBrush", "App Files"]
 
 
 def test_a_category_already_named_like_a_new_one_keeps_its_own_types():
@@ -58,7 +83,7 @@ def test_a_category_already_named_like_a_new_one_keeps_its_own_types():
     write_config({"categories": OLD_CATEGORIES + [mine]})
     settings.apply_new_defaults()
     categories = settings.get_categories()
-    assert [c["name"] for c in categories] == ["3D Models", "Videos", "archives"]
+    assert [c["name"] for c in categories] == ["3D Models", "Videos", "archives", "ZBrush", "App Files"]
     assert categories[2]["extensions"] == [".rar", ".7z"]  # (its own, plus the new types no category had)
 
 

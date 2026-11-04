@@ -48,10 +48,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPdf import QPdfDocument
 
-from . import alphas, archives
+from . import alphas, app_icons, apps, archives, file_pictures
 from .hdr_image import is_hdr, read_hdr_image
 from .psd_reader import read_psd_composite
-from .scanner import AssetItem
+from .scanner import APP_FILE_EXTENSIONS, AssetItem
 from .video_tools import extract_poster_frame
 
 # Increase Qt's default image allocation limit from 256 MB to 2048 MB
@@ -190,12 +190,35 @@ def _draw_archive_box(painter: QPainter, center_x: float, center_y: float, size:
         y += tooth * 1.4
 
 
+def _draw_file_sheet(painter: QPainter, center_x: float, center_y: float, size: float, colors: tuple) -> None:
+    """A sheet with a folded corner: the picture for an app file whose app isn't on this computer."""
+    light, body, dark = colors
+    w, h = size * 0.30, size * 0.38
+    left, top = center_x - w / 2, center_y - h / 2
+    fold = w * 0.34
+    painter.setPen(QPen(body.lighter(125), 1))
+    painter.setBrush(QBrush(body))
+    painter.drawPolygon(QPolygonF([
+        QPointF(left, top), QPointF(left + w - fold, top), QPointF(left + w, top + fold),
+        QPointF(left + w, top + h), QPointF(left, top + h),
+    ]))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(dark))
+    painter.drawPolygon(QPolygonF([
+        QPointF(left + w - fold, top), QPointF(left + w, top + fold), QPointF(left + w - fold, top + fold),
+    ]))
+    painter.setBrush(QBrush(light))
+    for line in (0.52, 0.66, 0.80):  # lines of "text"
+        painter.drawRect(QRectF(left + w * 0.18, top + h * line, w * 0.64, max(1.0, size * 0.014)))
+
+
 def render_placeholder_image(
-    asset: AssetItem, size: int = 110, style: Optional[dict[str, QColor]] = None, note: str = "", label: str = ""
+    asset: AssetItem, size: int = 110, style: Optional[dict[str, QColor]] = None, note: str = "", label: str = "",
+    icon: Optional[QImage] = None,
 ) -> QImage:
     """Render a fast procedural placeholder card (thread-safe QImage). note: a line such as
     "No preview" under the picture, for files that can't be shown. label: the badge's text
-    (default: the file type)."""
+    (default: the file type). icon: its app's icon, for an app file (core.app_icons)."""
     style = style or _CARD_STYLE
     img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
@@ -220,7 +243,13 @@ def render_placeholder_image(
     cube_h = size * 0.12
     cube_depth = size * 0.18
 
-    if asset.is_archive:
+    if icon is not None:
+        side = max(16, int(size * (0.44 if note else 0.56)))
+        scaled = icon.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        painter.drawImage(QPointF(center_x - scaled.width() / 2, size * (0.32 if note else 0.40) - scaled.height() / 2), scaled)
+    elif asset.opens_in_app:
+        _draw_file_sheet(painter, center_x, size * (0.34 if note else 0.40), size, (top_col, left_col, right_col))
+    elif asset.is_archive:
         _draw_archive_box(painter, center_x, center_y + size * 0.06, size, (top_col, left_col, right_col))
     else:
         _draw_cube(painter, center_x, center_y, cube_w, cube_h, cube_depth, (top_col, left_col, right_col))
@@ -345,6 +374,31 @@ def load_member_picture(member: "archives.ArchiveMember", size: int, relief: boo
         if picture is not None:
             return picture, True
     return load_member_image(member, size), False
+
+
+def load_app_file_picture(asset: AssetItem, size: int = 110, relief: bool = False) -> Optional[QImage]:
+    """A picture for a file only its app can open, to fit a card: the render a .blend holds, the picture
+    a PureRef board holds, or else a picture beside the file that's clearly of it (a brush's alpha:
+    drawn as a relief, with relief). None: there's none, and the card shows the app's icon."""
+    extension = asset.extension.lower()
+    if extension in (".blend", ".pur"):
+        head = file_pictures.file_head(asset)
+        image = file_pictures.blend_picture(head) if extension == ".blend" else file_pictures.board_picture(head)
+        if image is None:
+            return None
+        # (These are small, so they're also made bigger to fill the card)
+        scale = min((size - 16) / image.width, (size - 32) / image.height)
+        if scale > 1:
+            image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.BICUBIC)
+        return _fit_picture(image, size)
+    if asset.in_archive:
+        member = file_pictures.member_pack_picture(asset.archive)
+        return load_member_picture(member, size, relief)[0] if member is not None else None
+    path = file_pictures.pack_picture(asset.path)
+    if path is None:
+        return None
+    picture = load_relief_picture(path, path.name, size) if relief else None
+    return picture if picture is not None else load_texture_picture(path, size)
 
 
 def load_archive_picture(asset: AssetItem, size: int = 110) -> tuple[Optional[QImage], str]:
@@ -554,7 +608,7 @@ def disk_cache_path(asset: AssetItem, size: int, relief: bool = False) -> Option
     """
     if not (
         asset.is_texture or asset.is_video or asset.is_3d_model or (asset.is_document and asset.extension == ".pdf")
-        or asset.is_archive
+        or asset.is_archive or asset.is_app_file
     ):
         return None
     from . import video_tools  # CACHE_ROOT can be redirected (tests)
@@ -619,7 +673,7 @@ class _ThumbnailRunnable(QRunnable):
         self.style = style  # the card colors when it was asked for (taken on the UI thread)
         self.render_model = render_model  # a 3D model without a companion picture: render one
         self.label = ""  # the badge's text, if not the file type ("ZIP · 124")
-        self.relief = relief and asset.is_texture
+        self.relief = relief and (asset.is_texture or asset.is_app_file)
         self.alpha = alpha
         self._relief_file: Optional[Path] = None  # where a relief picture is cached
         self._undecided = False  # whether it's an alpha is only known once it's read (inside an archive)
@@ -635,7 +689,7 @@ class _ThumbnailRunnable(QRunnable):
             return
         if self.asset.is_archive and not self.asset.in_archive:
             self.label = archive_label(self.asset)
-        if self.relief:
+        if self.relief and self.asset.is_texture:
             self._choose_relief_cache()
         picture, note = self._from_disk(), ""
         if picture is None:
@@ -663,6 +717,9 @@ class _ThumbnailRunnable(QRunnable):
 
     def _card(self, picture: Optional[QImage], note: str) -> QImage:
         if picture is None or picture.isNull():
+            if self.asset.opens_in_app:  # (its app's icon says what it is: no "No preview" needed)
+                icon = app_icons.icon_for(self.asset.extension)
+                return render_placeholder_image(self.asset, self.size, self.style, note, self.label, icon)
             return render_placeholder_image(self.asset, self.size, self.style, note or "No preview", self.label)
         if self.asset.is_document:
             return picture  # (a PDF page comes as a whole card)
@@ -696,6 +753,8 @@ class _ThumbnailRunnable(QRunnable):
         """(the picture, or None and why it can't be shown)."""
         asset, size = self.asset, self.size
         try:
+            if asset.opens_in_app:
+                return load_app_file_picture(asset, size, self.relief), ""
             if asset.in_archive:
                 return self._render_member()
             if asset.is_archive:
@@ -817,10 +876,11 @@ class ThumbnailManager(QObject):
         return self._cache_bytes
 
     def placeholder(self, asset: AssetItem, size: int) -> QPixmap:
-        key = (asset.category_name, size)
+        icon = app_icons.known_icon(asset.extension) if asset.opens_in_app else None  # (read by the card's job)
+        key = (asset.category_name, size, icon is not None)
         pixmap = self._placeholders.get(key)
         if pixmap is None:
-            pixmap = self._placeholders[key] = QPixmap.fromImage(render_placeholder_image(asset, size))
+            pixmap = self._placeholders[key] = QPixmap.fromImage(render_placeholder_image(asset, size, icon=icon))
         return pixmap
 
     def _has_companion_picture(self, asset: AssetItem) -> bool:
@@ -834,7 +894,7 @@ class ThumbnailManager(QObject):
     def _renders(self, asset: AssetItem, size: int) -> bool:
         """Whether this 3D model's picture is rendered: small enough to read for it, or already
         rendered and cached (opened in the viewer)."""
-        if not self.render_models or not asset.is_3d_model or self._has_companion_picture(asset):
+        if not self.render_models or not asset.is_3d_model or asset.opens_in_app or self._has_companion_picture(asset):
             return False
         if asset.size_bytes <= MAX_RENDERED_MODEL_BYTES:
             return True
@@ -845,7 +905,7 @@ class ThumbnailManager(QObject):
         return self._rendered_on_disk[key]
 
     def _needs_async(self, asset: AssetItem, size: int = 110) -> bool:
-        if asset.is_texture or asset.is_document or asset.is_video or asset.is_archive:
+        if asset.is_texture or asset.is_document or asset.is_video or asset.is_archive or asset.opens_in_app:
             return True
         return self._has_companion_picture(asset) or self._renders(asset, size)
 
@@ -865,11 +925,15 @@ class ThumbnailManager(QObject):
         elif self._needs_async(asset, size):
             request = self._pending[cache_key] = _Request(cache_key)
             rendered = self._renders(asset, size)
-            cache_file = disk_cache_path(asset, size) if not asset.is_3d_model or rendered else None
-            relief = self.alpha_relief and asset.is_texture
+            relief = self.alpha_relief and (asset.is_texture or asset.is_app_file)
+            # (A pack picture can be an alpha: an app file's picture is kept apart for reliefs on and off)
+            cache_file = (
+                disk_cache_path(asset, size, relief=relief and asset.is_app_file)
+                if not asset.is_3d_model or rendered or asset.opens_in_app else None
+            )
             self._start(_ThumbnailRunnable(
                 request, asset, size, cache_file, card_style(), render_model=rendered,
-                relief=relief, alpha=self.alpha_of(asset) if relief else None,
+                relief=relief, alpha=self.alpha_of(asset) if relief and asset.is_texture else None,
             ), rendered)
 
         return self.placeholder(asset, size)
@@ -946,6 +1010,14 @@ class ThumbnailManager(QObject):
         request = self._pending.pop(path_str, None)
         if request is not None:
             request.cancelled = True
+
+    def forget_app_cards(self) -> None:
+        """The apps in use changed: read their icons again, and redo the cards that show them."""
+        app_icons.forget()
+        self._placeholders.clear()
+        extensions = APP_FILE_EXTENSIONS | {".blend"} | apps.custom_types()
+        for key in [k for k in (*self._cache, *self._pending) if os.path.splitext(k)[1].lower() in extensions]:
+            self.invalidate(key)
 
     def clear_cache(self) -> None:
         """Clear the in-memory thumbnail cache (e.g. after a theme or size change)."""

@@ -15,6 +15,7 @@ The main window puts the parts together and runs what the user asks for. The par
 from __future__ import annotations
 
 import html
+import os
 import sys
 import threading
 from dataclasses import dataclass
@@ -55,7 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import archives, crash_log
+from core import apps, archives, crash_log
 from core.asset_filter import filter_assets
 from core.library_snapshot import load_snapshot
 from core.scanner import AssetItem
@@ -63,6 +64,7 @@ from core import artbook_store
 from core.settings import (
     apply_new_defaults,
     get_archive_contents,
+    get_found_apps,
     get_pages_dir,
     get_background_texture,
     get_file_extensions,
@@ -75,6 +77,7 @@ from core.settings import (
     get_thumbnail_size,
     is_scan_folder,
     set_archive_contents,
+    set_found_apps,
     set_scan_folders,
 )
 from core.search_query import ParsedQuery, parse_query
@@ -99,7 +102,7 @@ from ui import main_thread_gc, scroll_bar_watch
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SidebarHost
-from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, wait_for_background
+from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, run_job, wait_for_background
 from ui.themes import apply_theme, theme_signals
 from ui import title_bar
 from ui.toolbar import CompactToolbar, PathField
@@ -108,6 +111,9 @@ from ui.view_modes import ViewModes, ViewSwitchButton
 from ui.viewer import AssetViewerDialog, ViewerTarget
 from ui.views import install_view_effects
 from self_test import run_self_test
+
+FIND_APPS_AFTER_MS = 2000  # after the window shows: reading every shortcut takes a second or two, off the UI thread
+
 
 @dataclass(frozen=True)
 class ArchiveReturn:
@@ -156,6 +162,13 @@ class MainWindow(QMainWindow):
         self._tag_match_ids: Optional[set[int]] = None
         self._tag_search_generation = 0
         self.thumbnail_size: int = get_thumbnail_size()
+
+        # The apps files open in: as found last time, and looked for again soon after starting (showEvent)
+        apps.load_settings()
+        self._find_apps_timer = QTimer(self)
+        self._find_apps_timer.setSingleShot(True)
+        self._find_apps_timer.setInterval(FIND_APPS_AFTER_MS)
+        self._find_apps_timer.timeout.connect(self._find_apps)
 
         # Asynchronous thumbnail loader & in-memory cache
         self.thumbnail_manager = ThumbnailManager(self)
@@ -293,6 +306,18 @@ class MainWindow(QMainWindow):
             # Once the window has its size, so a split gets its proportions right
             self._view_restored = True
             QTimer.singleShot(0, self.view_modes.restore)
+            self._find_apps_timer.start()
+
+    def _find_apps(self) -> None:
+        run_job(apps.detect, self._on_apps_found)
+
+    def _on_apps_found(self, found: dict[str, list[str]]) -> None:
+        """Installed, moved or removed since last time: the menus and the cards' icons follow."""
+        if found != get_found_apps():
+            set_found_apps(found)
+            apps.load_settings()
+            self.thumbnail_manager.forget_app_cards()
+            self.list_grid.viewport().update()
 
     def _build_control_bar(self) -> QWidget:
         """Build top toolbar with folder picker, library toggle, refresh, preview, search, and settings."""
@@ -764,6 +789,10 @@ class MainWindow(QMainWindow):
             self.action_archive_contents.blockSignals(False)
             self.thumbnail_manager.clear_cache()  # (cards that said "Install 7-Zip")
 
+        if dialog.apps_changed:
+            self.thumbnail_manager.forget_app_cards()
+            self.list_grid.viewport().update()
+
         if dialog.folders_changed or dialog.extensions_changed or dialog.archives_changed:
             if self.browse_folder is None:
                 self._load_library()
@@ -830,10 +859,13 @@ class MainWindow(QMainWindow):
         docs = sum(1 for a in assets if a.is_document)
         videos = sum(1 for a in assets if a.is_video)
         zips = sum(1 for a in assets if a.is_archive)
-        other = len(assets) - models - textures - docs - videos - zips
+        app_files = sum(1 for a in assets if a.is_app_file)
+        other = len(assets) - models - textures - docs - videos - zips - app_files
         summary = f"{models} 3D models, {textures} textures, {docs} documents, {videos} videos"
         if zips:
             summary += f", {zips} archives"
+        if app_files:
+            summary += f", {app_files} app files"
         inside = sum(1 for a in assets if a.in_archive)
         if inside and self.archive_return is None:
             summary += f" ({inside} of them inside archives)"
@@ -1128,6 +1160,9 @@ class MainWindow(QMainWindow):
             else:
                 self._open_archive(asset)
             return
+        if asset.extension.lower() == ".pur":
+            self._open_board(asset)
+            return
         # Previous / next walk through the grid as it's shown now (filters included)
         assets = self.grid_model.assets()
         row = self.grid_model.row_of(str(asset.path))
@@ -1154,8 +1189,55 @@ class MainWindow(QMainWindow):
         for path_str in dialog.unpacked:
             self.thumbnail_manager.invalidate(path_str)
             self.grid_model.thumbnail_changed(path_str)
+        board = dialog.asset if dialog.board_wanted else None
         # Free the viewer (GL context, decoded image, video player) instead of keeping it parented
         dialog.deleteLater()
+        if board is not None:
+            self._open_board(board)
+
+    # ------------------------------------------------------------------
+    # Files only their apps can open, and PureRef boards
+    # ------------------------------------------------------------------
+    def _open_in(self, asset: AssetItem, app: apps.App) -> None:
+        """Right-click > Open In (a file inside an archive: unpacked first, with progress)."""
+        if asset.in_archive:
+            self._unpack_with_progress(
+                f"Unpacking {asset.name}",
+                lambda progress, stop: archives.materialize(asset.archive, progress, stop),
+                lambda path: self._launch(asset, app, path),
+            )
+        elif asset.path.exists():
+            self._launch(asset, app, asset.path)
+        else:
+            self.status_label.setText(f"'{asset.name}' isn't there any more.")
+
+    def _launch(self, asset: AssetItem, app: apps.App, path: Path) -> None:
+        try:
+            sent = apps.launch(app, path)
+        except apps.AppError as exc:
+            self.status_label.setText(str(exc))
+            return
+        if sent:
+            self.status_label.setText(f"Sent {asset.name} to the {app.name} that's open: it imports it as soon as it's free.")
+            return
+        copy = " It's an unpacked copy: save it somewhere else to keep any changes." if asset.in_archive else ""
+        self.status_label.setText(f"Opened {asset.name} in {app.name}.{copy}")
+
+    def _open_board(self, asset: AssetItem, again: bool = False) -> None:
+        """A PureRef board as an Artbook page (ArtbookPanel.open_board), shown. again: a new page."""
+        board = os.path.normcase(str(asset.path))
+
+        def show(path: Path) -> None:
+            self.artbook_panel.open_board(path, board, asset.modified_timestamp, again)
+            if self.view_modes.mode == "asset":
+                self.view_modes.set_mode("artbook")
+
+        if not asset.in_archive:
+            show(asset.path)
+            return
+        self._unpack_with_progress(
+            f"Unpacking {asset.name}", lambda progress, stop: archives.materialize(asset.archive, progress, stop), show,
+        )
 
     # ------------------------------------------------------------------
     # Archives: looked inside like folders; their files unpacked when needed (core.archives)
@@ -1436,6 +1518,8 @@ class MainWindow(QMainWindow):
             open_external=lambda: self._open_external(asset),
             extract=lambda: self._extract(asset),
             send_files=self._send_files,
+            open_in=lambda app: self._open_in(asset, app),
+            import_board=lambda: self._open_board(asset, again=True),
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
         menu = build_asset_menu(self, asset, self._selected_assets(), marks, actions, self.artbook_sender)

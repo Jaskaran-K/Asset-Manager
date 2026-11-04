@@ -1,7 +1,7 @@
 """Application name, version, and source repository information."""
 
 APP_NAME = "Asset Manager"
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.4"
 
 # GitHub repository used by "Check for Updates" (owner/name)
 GITHUB_REPO = "Jaskaran-K/Asset-Manager"

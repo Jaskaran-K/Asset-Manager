@@ -7,6 +7,7 @@ Pages:
 - General > Appearance:  theme, grid size, category colors & icons
 - General > Video:       ffmpeg location, playback backend, preview cache
 - General > Archives:    files inside archives in the library, 7-Zip's location, unpacked copies
+- General > Apps:        the apps files open in (Open In), found by themselves or picked
 - General > Artbook:     where the Artbook's pages are kept (changed right away, not on Save)
 - General > Tags:        custom tags (create, rename, recolor, delete)
 - General > Shortcuts:   every keyboard shortcut / mouse control (from ui.shortcuts)
@@ -20,9 +21,11 @@ import copy
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import shiboken6
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
@@ -57,7 +60,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import archives, artbook_store, crash_log
+from core import app_helpers, apps, archives, artbook_store, crash_log
 from core.scanner import AssetItem
 from core.settings import (
     DEFAULT_CATEGORIES,
@@ -67,9 +70,13 @@ from core.settings import (
     PREVIEWABLE_EXTENSIONS,
     THUMBNAIL_SIZE_RANGE,
     category_extensions,
+    get_app_choices,
+    get_app_types,
     get_archive_contents,
     get_background_texture,
     get_categories,
+    get_custom_apps,
+    get_found_apps,
     get_glass_frost,
     get_ffmpeg_path,
     get_file_extensions,
@@ -83,9 +90,13 @@ from core.settings import (
     import_category_icon,
     parse_extension_list,
     remove_unused_category_icons,
+    set_app_choices,
+    set_app_types,
     set_archive_contents,
     set_background_texture,
     set_categories,
+    set_custom_apps,
+    set_found_apps,
     set_glass_frost,
     set_ffmpeg_path,
     set_file_extensions,
@@ -1332,6 +1343,290 @@ class ArchivesPage(QWidget):
 
 
 # ----------------------------------------------------------------------
+# General > Apps
+# ----------------------------------------------------------------------
+class AppsPage(QWidget):
+    """The apps files open in (Open In), whose icons also stand for their files on the cards; apps
+    added by hand; and the helpers that import models into a Maya or Blender already open."""
+
+    def __init__(
+        self, found: dict[str, list[str]], chosen: dict[str, str], custom: Optional[list[dict[str, Any]]] = None,
+        types: Optional[dict[str, list[str]]] = None, parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self._found = found
+        self._custom = [dict(c) for c in custom or []]
+        self._types = dict(types or {})
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()  # (added apps can make it longer than the window)
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName("scrollContent")
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        layout.addWidget(_page_header(
+            "Apps",
+            "Right-click > Open In opens files in these, and files without a picture show their app's icon. "
+            "They're found by themselves, and the newest version is used unless you pick another here.",
+        ))
+        self._rows_host = QWidget(self)
+        self._rows = QGridLayout(self._rows_host)
+        self._rows.setContentsMargins(0, 0, 0, 0)
+        self._rows.setHorizontalSpacing(10)
+        self._rows.setColumnStretch(1, 1)
+        self._boxes: dict[str, QComboBox] = {}
+        for row, app in enumerate(apps.APPS):
+            self._rows.addWidget(QLabel(app.name), row, 0)
+            box = QComboBox(self._rows_host)
+            box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(10)  # (long paths are cut short here, and shown whole in its list)
+            box.setToolTip(f"The copy of {app.name} to use")
+            box.currentIndexChanged.connect(self._update_helpers)
+            self._boxes[app.id] = box
+            self._fill(app.id, chosen.get(app.id, ""))
+            self._rows.addWidget(box, row, 1)
+            browse = QPushButton("Browse...")
+            browse.setToolTip(f"Pick {app.name}'s program file")
+            browse.clicked.connect(lambda _checked=False, a=app: self._on_browse(a))
+            self._rows.addWidget(browse, row, 2)
+            kinds = QPushButton("File Types...")
+            kinds.setToolTip(f"Which file types Open In offers {app.name} for")
+            kinds.clicked.connect(lambda _checked=False, a=app: self._on_edit_types(a))
+            self._rows.addWidget(kinds, row, 3)
+        self._custom_rows: list[QWidget] = []
+        layout.addWidget(self._rows_host)
+        layout.addSpacing(6)
+        buttons = QHBoxLayout()
+        self.btn_add = QPushButton("Add App...")
+        self.btn_add.setToolTip("Add any other program to Open In, such as Krita: it's given the file when it starts")
+        self.btn_add.clicked.connect(self._on_add)
+        buttons.addWidget(self.btn_add)
+        self.btn_find = QPushButton("Find Apps Again")
+        self.btn_find.setToolTip("Look for them again: in what Windows records, the Start Menu and the Desktop")
+        self.btn_find.clicked.connect(self._on_find)
+        buttons.addWidget(self.btn_find)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        layout.addSpacing(10)
+        layout.addWidget(VideoPage._section_label("Import into the open window"))
+        hint = QLabel(
+            "Open In starts a new window of Maya or Blender each time. With a small helper script in the app, OBJ and "
+            "FBX go into the window you already have open. It only ever imports model files. These buttons act right "
+            "away, and the helper starts the next time you start the app."
+        )
+        hint.setObjectName("pageHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        helpers = QGridLayout()
+        helpers.setHorizontalSpacing(10)
+        helpers.setColumnStretch(1, 1)
+        self._helpers: dict[str, tuple[QLabel, QPushButton]] = {}
+        for row, app_id in enumerate(("maya", "blender")):
+            name = next(a.name for a in apps.APPS if a.id == app_id)
+            helpers.addWidget(QLabel(name), row, 0)
+            status = QLabel()
+            status.setObjectName("pageHint")
+            status.setWordWrap(True)
+            helpers.addWidget(status, row, 1)
+            button = QPushButton()
+            button.setToolTip("Add or remove the helper script")  # (_update_helpers says which)
+            button.clicked.connect(lambda _checked=False, a=app_id: self._on_helper(a))
+            helpers.addWidget(button, row, 2)
+            self._helpers[app_id] = (status, button)
+        layout.addLayout(helpers)
+        layout.addStretch(1)
+        self._build_custom_rows()
+        self._update_helpers()
+
+    # ------------------ the apps found ------------------
+    def _fill(self, app_id: str, current: str) -> None:
+        box = self._boxes[app_id]
+        box.blockSignals(True)
+        box.clear()
+        paths = list(self._found.get(app_id, []))
+        if current and current not in paths:
+            paths.append(current)
+        for path in paths:
+            box.addItem(path, path)
+        if not paths:
+            box.addItem("Not found: use Browse", "")
+        if current:
+            box.setCurrentIndex(paths.index(current))
+        box.blockSignals(False)
+
+    def found(self) -> dict[str, list[str]]:
+        return self._found
+
+    def choices(self) -> dict[str, str]:
+        """The programs picked: only those that aren't the newest found, so a newer one is used when it comes."""
+        chosen = {}
+        for app_id, box in self._boxes.items():
+            path = box.currentData()
+            newest = self._found.get(app_id, [""])[0] if self._found.get(app_id) else ""
+            if path and path != newest:
+                chosen[app_id] = path
+        return chosen
+
+    def _on_browse(self, app: apps.App) -> None:
+        start = self._boxes[app.id].currentData() or str(Path.home())
+        chosen, _ = QFileDialog.getOpenFileName(self, f"Locate {app.name}", start, "Programs (*.exe)")
+        if chosen:
+            self._fill(app.id, str(Path(chosen)))
+            self._update_helpers()
+
+    def _on_find(self) -> None:
+        self.btn_find.setEnabled(False)
+        self.btn_find.setText("Looking...")
+        run_job(apps.detect, self._on_found, self._on_find_failed)
+
+    def _on_found(self, found: dict[str, list[str]]) -> None:
+        if not shiboken6.isValid(self):
+            return  # (Settings was closed meanwhile)
+        current = {app_id: box.currentData() for app_id, box in self._boxes.items()}
+        self._found = found
+        for app_id in self._boxes:
+            self._fill(app_id, current[app_id])
+        self.btn_find.setEnabled(True)
+        self.btn_find.setText("Find Apps Again")
+        self._update_helpers()
+
+    def _on_find_failed(self, _message: str) -> None:
+        if shiboken6.isValid(self):
+            self.btn_find.setEnabled(True)
+            self.btn_find.setText("Find Apps Again")
+
+    # ------------------ file types, and apps added by hand ------------------
+    def custom(self) -> list[dict[str, Any]]:
+        return self._custom
+
+    def types(self) -> dict[str, list[str]]:
+        """The file types set by hand for the apps that came with this one."""
+        return self._types
+
+    def types_in_use(self) -> list[str]:
+        """Every file type set by hand: the library needs to pick them up for Open In to offer them."""
+        return [e for entry in (*self._types.values(), *(c["types"] for c in self._custom)) for e in entry]
+
+    def _ask_types(self, title: str, current: list[str], hint: str) -> Optional[list[str]]:
+        """File types from the user, or None if cancelled or not valid (it says what's wrong)."""
+        text, accepted = QInputDialog.getText(self, title, hint, text=", ".join(current))
+        if not accepted:
+            return None
+        if not text.strip():
+            return []
+        extensions, errors = parse_extension_list(text)
+        if errors:
+            QMessageBox.warning(self, title, "\n".join(errors[:6]))
+            return None
+        return extensions
+
+    def _on_edit_types(self, app: apps.App) -> None:
+        current = self._types.get(app.id, sorted(app.opens))
+        chosen = self._ask_types(
+            f"{app.name}: File Types", current, "File types Open In offers it for, with commas (leave empty for its usual ones):",
+        )
+        if chosen is None:
+            return
+        if chosen and set(chosen) != set(app.opens):
+            self._types[app.id] = chosen
+        else:
+            self._types.pop(app.id, None)
+
+    def _on_add(self) -> None:
+        program, _ = QFileDialog.getOpenFileName(self, "Add App", str(Path.home()), "Programs (*.exe)")
+        if not program:
+            return
+        program = str(Path(program))
+        suggested = Path(program).stem.replace("-", " ").replace("_", " ").title()
+        name, accepted = QInputDialog.getText(self, "Add App", "Its name in Open In:", text=suggested)
+        name = " ".join(name.split())
+        if not accepted or not name:
+            return
+        title = f"{name}: File Types"
+        types = self._ask_types(title, [], "File types Open In offers it for, with commas (.png, .psd, .kra):")
+        if not types:
+            return
+        self._custom.append({"id": f"custom-{uuid.uuid4().hex[:8]}", "name": name, "program": program, "types": types})
+        self._build_custom_rows()
+
+    def _on_edit_custom(self, entry: dict[str, Any]) -> None:
+        chosen = self._ask_types(f"{entry['name']}: File Types", entry["types"], "File types Open In offers it for, with commas:")
+        if chosen:
+            entry["types"] = chosen
+
+    def _on_browse_custom(self, entry: dict[str, Any]) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(self, f"Locate {entry['name']}", entry["program"], "Programs (*.exe)")
+        if chosen:
+            entry["program"] = str(Path(chosen))
+            self._build_custom_rows()
+
+    def _on_remove_custom(self, entry: dict[str, Any]) -> None:
+        self._custom.remove(entry)
+        self._build_custom_rows()
+
+    def _build_custom_rows(self) -> None:
+        for widget in self._custom_rows:
+            self._rows.removeWidget(widget)
+            widget.deleteLater()
+        self._custom_rows = []
+        for offset, entry in enumerate(self._custom):
+            row = len(apps.APPS) + offset
+            label = QLabel(entry["name"])
+            path = QLineEdit(entry["program"])
+            path.setReadOnly(True)
+            path.setToolTip(entry["program"])
+            browse = QPushButton("Browse...")
+            browse.setToolTip(f"Pick {entry['name']}'s program file")
+            browse.clicked.connect(lambda _checked=False, e=entry: self._on_browse_custom(e))
+            kinds = QPushButton("File Types...")
+            kinds.setToolTip(f"Which file types Open In offers {entry['name']} for")
+            kinds.clicked.connect(lambda _checked=False, e=entry: self._on_edit_custom(e))
+            remove = QPushButton("Remove")
+            remove.setToolTip(f"Take {entry['name']} out of Open In (the program itself isn't touched)")
+            remove.clicked.connect(lambda _checked=False, e=entry: self._on_remove_custom(e))
+            for column, widget in enumerate((label, path, browse, kinds, remove)):
+                self._rows.addWidget(widget, row, column)
+                self._custom_rows.append(widget)
+
+    # ------------------ helpers ------------------
+    def _update_helpers(self) -> None:
+        for app_id, (status, button) in self._helpers.items():
+            program = self._boxes[app_id].currentData() or None
+            installed = app_helpers.is_installed(app_id, program)
+            button.setEnabled(program is not None or installed)
+            button.setText("Remove Helper" if installed else "Install Helper")
+            button.setToolTip(
+                "Take the helper script out of the app" if installed else
+                "Add a small script to the app's own scripts folder, so OBJ and FBX can go into its open window"
+            )
+            if program is None:
+                status.setText("Not found.")
+            else:
+                status.setText("Installed." if installed else "Not installed: Open In starts a new window.")
+
+    def _on_helper(self, app_id: str) -> None:
+        program = self._boxes[app_id].currentData() or None
+        status = self._helpers[app_id][0]
+        adding = not app_helpers.is_installed(app_id, program)
+        try:
+            (app_helpers.install if adding else app_helpers.remove)(app_id, program)
+        except app_helpers.HelperError as exc:
+            status.setText(str(exc))
+            return
+        self._update_helpers()
+        name = next(a.name for a in apps.APPS if a.id == app_id)
+        status.setText(
+            f"Installed. It starts the next time you start {name}." if adding
+            else f"Removed. A {name} window that's open keeps it until it's closed."
+        )
+
+
+# ----------------------------------------------------------------------
 # General > Artbook
 # ----------------------------------------------------------------------
 class ArtbookPage(QWidget):
@@ -2025,6 +2320,7 @@ class SettingsDialog(QDialog):
         self.model_thumbnails_changed = False
         self.alpha_relief_changed = False
         self.archives_changed = False  # 7-Zip's location, or whether files inside archives are shown
+        self.apps_changed = False  # the apps in use (Settings > Apps)
 
         self.page_folders = FoldersPage(self._orig_folders)
         self.page_files = FilesPage(self._orig_extensions)
@@ -2036,6 +2332,7 @@ class SettingsDialog(QDialog):
         self.page_appearance.texture_selected.connect(self._on_texture_selected)
         self.page_video = VideoPage(self._orig_ffmpeg_path, self._orig_media_backend)
         self.page_archives = ArchivesPage(self._orig_seven_zip_path, self._orig_archive_contents)
+        self.page_apps = AppsPage(get_found_apps(), get_app_choices(), get_custom_apps(), get_app_types())
         self.page_artbook = ArtbookPage(artbook)
         self.page_tags = TagsPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
@@ -2070,6 +2367,7 @@ class SettingsDialog(QDialog):
             ("Appearance", self.page_appearance),
             ("Video", self.page_video),
             ("Archives", self.page_archives),
+            ("Apps", self.page_apps),
             ("Artbook", self.page_artbook),
             ("Tags", self.page_tags),
             ("Shortcuts", self.page_shortcuts),
@@ -2186,6 +2484,8 @@ class SettingsDialog(QDialog):
 
         folders = self.page_folders.folders()
         extensions = self.page_files.extensions()
+        # (A type given to an app in Settings > Apps, such as .kra: the library picks those up too)
+        extensions += [e for e in dict.fromkeys(self.page_apps.types_in_use()) if e not in extensions]
         categories = self.page_categories.categories()
 
         theme_id = self.page_appearance.theme_id()
@@ -2232,6 +2532,17 @@ class SettingsDialog(QDialog):
         if self.page_archives.archive_contents() != self._orig_archive_contents:
             set_archive_contents(self.page_archives.archive_contents())
             self.archives_changed = True
+        page = self.page_apps
+        if (
+            page.found() != get_found_apps() or page.choices() != get_app_choices()
+            or page.custom() != get_custom_apps() or page.types() != get_app_types()
+        ):
+            set_found_apps(page.found())
+            set_app_choices(page.choices())
+            set_custom_apps(page.custom())
+            set_app_types(page.types())
+            apps.load_settings()
+            self.apps_changed = True
         if self.page_video.media_backend() != self._orig_media_backend:
             set_media_backend(self.page_video.media_backend())
             QMessageBox.information(

@@ -68,13 +68,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import alphas, archives
+from core import alphas, app_icons, apps, archives
 from core.full_image import LoadedImage, load_full_image
 from core.model_loader import Mesh3D, load_3d_model
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions
 from core.settings import ALPHA_PLANE_SIDES, TILE_GRIDS, get_model_view, set_model_view
 from core.scanner import AssetItem
 from core.tag_repository import Tag
+from core.thumbnail_manager import load_app_file_picture
 from ui import file_actions, shortcuts
 from ui.archive_jobs import UnpackJob, unpack_in_background
 from ui.duotone import set_icon
@@ -978,6 +979,9 @@ class ViewerTarget:
     position: str = ""  # e.g. "3 of 120"
 
 
+APP_FILE_PICTURE_SIDE = 480  # the picture of a file only its app can show
+
+
 class AssetViewerDialog(QDialog):
     """Unified modal viewer dialog for 3D models, textures, documents, and videos."""
 
@@ -1012,6 +1016,10 @@ class AssetViewerDialog(QDialog):
         self._file: Optional[Path] = None  # a file inside an archive: its unpacked copy, once unpacked
         self.btn_tile: Optional[QPushButton] = None  # an image's Tile button (and its other tools), when one is shown
         self.unpacked: set[str] = set()  # str(asset.path) of the files inside archives unpacked meanwhile
+        self.board_wanted = False  # a PureRef board's Open in Artbook: the window opens self.asset as a page after this closes
+        self._btn_open_app: Optional[QPushButton] = None  # a file only its app can show: the first of its buttons (O)
+        self._app_status: Optional[QLabel] = None  # (what became of opening it)
+        self._launch_after: Optional[apps.App] = None  # open it in this app once it's been unpacked
         # Window state to return to when leaving fullscreen
         self._state_before_fullscreen = Qt.WindowState.WindowNoState
         self._was_fullscreen_for_video = False  # viewer was already full screen when the video went full screen
@@ -1038,6 +1046,7 @@ class AssetViewerDialog(QDialog):
             self.pdf_viewer = None
         self.asset, self.tags, self._edit_tags, self._position = target.asset, target.tags, target.edit_tags, target.position
         self._file = None
+        self._launch_after = None
         self._init_ui()
         self.setFocus()
 
@@ -1158,6 +1167,7 @@ class AssetViewerDialog(QDialog):
             "Location": str(self.asset.path.parent),
         }
         self.btn_tile: Optional[QPushButton] = None  # (an image's tools: _add_image_tools)
+        self._btn_open_app = self._app_status = None
         member = self.asset.archive
         if member is not None:
             metadata["Location"] = f"Inside {member.archive.name}" + (f" > {member.folder}" if member.folder else "")
@@ -1176,6 +1186,11 @@ class AssetViewerDialog(QDialog):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setWordWrap(True)
             layout.addWidget(lbl, 1)
+        elif self.asset.opens_in_app and (path is not None or self._launch_after is None):
+            layout.addWidget(self._build_app_file_panel(), 1)
+            app, self._launch_after = self._launch_after, None
+            if app is not None:  # (it was unpacked to be opened in this app)
+                self._launch_in(app, path)
         elif path is None:
             layout.addWidget(self._build_unpack_panel(), 1)
 
@@ -1732,6 +1747,8 @@ class AssetViewerDialog(QDialog):
                 self.video_player.set_fullscreen(False)
             else:
                 self._leave_fullscreen()
+        elif shortcuts.matches("viewer.open_app", event) and self._btn_open_app is not None:
+            self._btn_open_app.click()
         else:
             super().keyPressEvent(event)
 
@@ -1767,6 +1784,91 @@ class AssetViewerDialog(QDialog):
     def _reveal_in_explorer(self) -> None:
         """Reveal file in Windows File Explorer (a file inside an archive: the archive)."""
         file_actions.reveal(self.asset.archive.archive if self.asset.in_archive else self.asset.path)
+
+    # ------------------------------------------------------------------
+    # Files only their apps can show
+    # ------------------------------------------------------------------
+    def _build_app_file_panel(self) -> QWidget:
+        """Its picture (or its app's icon), and buttons that open it. Going through the grid with the
+        viewer lands on these too, so nothing opens until a button is pressed."""
+        asset = self.asset
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(14)
+        layout.addStretch(1)
+        picture = QLabel()
+        picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(picture)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        buttons: list[QPushButton] = []
+        if asset.extension.lower() == ".pur":
+            button = QPushButton("Open in Artbook")
+            button.setToolTip("Open this PureRef board as an Artbook page, the same page each time (O)")
+            button.clicked.connect(self._open_board)
+            buttons.append(button)
+        for app in apps.apps_for(asset.extension):
+            button = QPushButton(f"Open in {app.name}")
+            unpack = "Unpacks it first, then opens it" if asset.in_archive else "Open it"
+            button.setToolTip(f"{unpack} in {app.name}" + (" (O)" if not buttons else ""))
+            button.clicked.connect(lambda _checked=False, a=app: self._open_in_app(a))
+            buttons.append(button)
+        for button in buttons:
+            row.addWidget(button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self._btn_open_app = buttons[0] if buttons else None
+        message = "" if buttons else f"No app for {asset.category_name} files was found. Settings > Apps can point to one."
+        self._app_status = QLabel(message)
+        self._app_status.setObjectName("hintLabel")
+        self._app_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._app_status.setWordWrap(True)
+        layout.addWidget(self._app_status)
+        layout.addStretch(2)
+        self._load_app_file_picture(picture)
+        return panel
+
+    def _load_app_file_picture(self, label: QLabel) -> None:
+        token, _stop = self._next_load()
+        asset = self.asset
+        relief = get_model_view()["alpha_relief"]
+
+        def work() -> Optional[QImage]:
+            try:
+                picture = load_app_file_picture(asset, APP_FILE_PICTURE_SIDE, relief)
+            except Exception:  # pylint: disable=broad-except
+                picture = None  # (a picture is a bonus here: the buttons still work)
+            return picture if picture is not None else app_icons.icon_for(asset.extension)
+
+        def done(image: Optional[QImage]) -> None:
+            if image is not None and token == self._load_token and shiboken6.isValid(label):
+                label.setPixmap(QPixmap.fromImage(image))
+
+        run_job(work, done)
+
+    def _open_board(self) -> None:
+        self.board_wanted = True
+        self.accept()
+
+    def _open_in_app(self, app: apps.App) -> None:
+        path = self._file_path()
+        if path is not None:
+            self._launch_in(app, path)
+            return
+        self._launch_after = app  # (shown again once it's unpacked, and opened then)
+        self._init_ui()
+
+    def _launch_in(self, app: apps.App, path: Path) -> None:
+        try:
+            sent = apps.launch(app, path)
+        except apps.AppError as exc:
+            self._app_status.setText(str(exc))
+            return
+        if sent:
+            self._app_status.setText(f"Sent to the {app.name} that's open: it imports it as soon as it's free.")
+            return
+        copy = " It's an unpacked copy: save it somewhere else to keep any changes." if self.asset.in_archive else ""
+        self._app_status.setText(f"Opened in {app.name}.{copy}")
 
     # ------------------------------------------------------------------
     # Files inside archives

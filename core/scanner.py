@@ -6,6 +6,7 @@ Scans local directories for:
 - Documents: .pdf
 - Videos: .mp4, .mov, .mkv, .avi, .webm, .m4v
 - Archives: .zip (their files are listed by core.archives)
+- App files: ZBrush, Substance, Maya, 3ds Max, Toolbag and PureRef files, opened in their apps (core.apps)
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ TEXTURE_EXTENSIONS: set[str] = {
     ".webp",
     ".exr",
     ".psd",
+    ".psb",
     ".hdr",
     ".dds",
 }
@@ -66,6 +68,16 @@ VIDEO_EXTENSIONS: set[str] = {
 # Browsed like folders: their files are listed, searched and shown (core.archives; RAR and 7z
 # through the user's 7-Zip)
 ARCHIVE_EXTENSIONS: frozenset[str] = frozenset({".zip", ".rar", ".7z"})
+
+# Only their own apps can show these: the viewer offers to open them there (core.apps)
+APP_FILE_EXTENSIONS: frozenset[str] = frozenset({
+    ".zbp", ".ztl", ".zpr", ".zmt",  # ZBrush
+    ".spp", ".sbsar", ".spsm",  # Substance
+    ".ma", ".mb",  # Maya
+    ".max",  # 3ds Max
+    ".tbscene",  # Marmoset Toolbag
+    ".pur",  # PureRef boards (they open as Artbook pages)
+})
 
 _VOLUME = re.compile(r"^(.*)\.part(\d+)\.rar$", re.IGNORECASE)  # name.part1.rar, name.part2.rar, ...
 
@@ -101,6 +113,7 @@ def archive_stamp(path: Path | str) -> tuple[int, float]:
 
 ALL_SUPPORTED_EXTENSIONS: set[str] = (
     MODEL_EXTENSIONS | TEXTURE_EXTENSIONS | DOCUMENT_EXTENSIONS | VIDEO_EXTENSIONS | ARCHIVE_EXTENSIONS
+    | APP_FILE_EXTENSIONS
 )
 
 DEFAULT_EXCLUDED_DIRS: set[str] = {
@@ -128,7 +141,7 @@ class AssetItem:
     extension: str
     size_bytes: int
     modified_timestamp: float
-    asset_group: str  # "3D Models", "Textures", "Documents", "Videos", "Archives"
+    asset_group: str  # "3D Models", "Textures", "Documents", "Videos", "Archives", "App Files"
     category_name: str  # e.g. "FBX", "OBJ", "PNG", "TIFF", "PDF"
     # A file inside an archive: path is then virtual (core.archives), not a file on disk
     archive: Optional["ArchiveMember"] = None
@@ -174,6 +187,17 @@ class AssetItem:
         return self.asset_group == "Archives"
 
     @property
+    def is_app_file(self) -> bool:
+        """A ZBrush tool, Painter project, Maya scene, PureRef board..."""
+        return self.asset_group == "App Files"
+
+    @property
+    def opens_in_app(self) -> bool:
+        """The viewer can't show it: an app file, a .blend (a 3D model only Blender reads), or a type
+        added by hand (for an app added in Settings > Apps, say)."""
+        return self.is_app_file or self.asset_group == "Other" or self.extension.lower() == ".blend"
+
+    @property
     def in_archive(self) -> bool:
         """Inside an archive: read through core.archives, never by its path."""
         return self.archive is not None
@@ -197,6 +221,8 @@ def determine_asset_group(extension: str) -> str:
         return "Videos"
     if ext in ARCHIVE_EXTENSIONS:
         return "Archives"
+    if ext in APP_FILE_EXTENSIONS:
+        return "App Files"
     return "Other"
 
 

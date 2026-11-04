@@ -851,6 +851,24 @@ class AppearancePage(QWidget):
             "when you first open them. A picture next to the model (model.png) is used instead when there is one."
         )
         layout.addWidget(self.chk_model_pictures)
+        alpha_row = QHBoxLayout()
+        alpha_row.addWidget(QLabel("Alpha thumbnails"))
+        self.btn_alpha_relief = QPushButton("Relief")
+        self.btn_alpha_relief.setToolTip(
+            "Show grey height images (alphas, displacement maps) as a lit relief, like ZBrush does, "
+            "drawn from their full 16-bit heights"
+        )
+        self.btn_alpha_normal = QPushButton("Normal")
+        self.btn_alpha_normal.setToolTip("Show them as the flat grey image they are")
+        self.alpha_thumbnail_group = QButtonGroup(self)
+        self.alpha_thumbnail_group.setExclusive(True)
+        for button in (self.btn_alpha_relief, self.btn_alpha_normal):
+            button.setCheckable(True)
+            self.alpha_thumbnail_group.addButton(button)
+            alpha_row.addWidget(button)
+        (self.btn_alpha_relief if get_model_view()["alpha_relief"] else self.btn_alpha_normal).setChecked(True)
+        alpha_row.addStretch(1)
+        layout.addLayout(alpha_row)
 
         self.grid_preview = QListWidget()
         self.grid_preview.setObjectName("assetGrid")
@@ -2005,6 +2023,7 @@ class SettingsDialog(QDialog):
         self.theme_changed = False
         self.thumbnail_size_changed = False
         self.model_thumbnails_changed = False
+        self.alpha_relief_changed = False
         self.archives_changed = False  # 7-Zip's location, or whether files inside archives are shown
 
         self.page_folders = FoldersPage(self._orig_folders)
@@ -2178,6 +2197,7 @@ class SettingsDialog(QDialog):
         self.theme_changed = theme_id != self._orig_theme
         self.thumbnail_size_changed = thumbnail_size != self._orig_thumbnail_size
         self.model_thumbnails_changed = self.page_appearance.chk_model_pictures.isChecked() != get_model_view()["thumbnails"]
+        self.alpha_relief_changed = self.page_appearance.btn_alpha_relief.isChecked() != get_model_view()["alpha_relief"]
 
         if self.folders_changed:
             set_scan_folders(folders)
@@ -2197,6 +2217,8 @@ class SettingsDialog(QDialog):
             set_thumbnail_size(thumbnail_size)
         if self.model_thumbnails_changed:
             set_model_view(thumbnails=self.page_appearance.chk_model_pictures.isChecked())
+        if self.alpha_relief_changed:
+            set_model_view(alpha_relief=self.page_appearance.btn_alpha_relief.isChecked())
         motion = self.page_appearance.cb_motion.currentData()
         if motion != get_motion():
             set_motion(motion)

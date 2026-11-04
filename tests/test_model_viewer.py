@@ -95,7 +95,10 @@ def test_colour_material_and_lighting_are_kept(qapp, tmp_path):
     assert viewport.color == QColor("#ff8800") and get_model_view()["color"] == DEFAULT_COLOR  # (kept once it closes)
     popup.close()
     qapp.processEvents()
-    assert get_model_view() == {"color": "#ff8800", "material": "metallic", "lighting": "dramatic", "thumbnails": True}
+    assert get_model_view() == {
+        "color": "#ff8800", "material": "metallic", "lighting": "dramatic", "thumbnails": True,
+        "alpha_relief": True, "alpha_plane": 512, "tile": 2,
+    }
     close(qapp, dialog)
     again = open_viewer(qapp, model_asset(tmp_path))  # (the next model looks the same)
     assert again.viewport.color == QColor("#ff8800") and again.cmb_material.currentData() == "metallic"
@@ -103,8 +106,11 @@ def test_colour_material_and_lighting_are_kept(qapp, tmp_path):
 
 
 def test_damaged_settings_fall_back(qapp):
-    set_model_view(color="red; drop", material="velvet", lighting=5, thumbnails="yes")
-    assert get_model_view() == {"color": DEFAULT_COLOR, "material": "phong", "lighting": "studio", "thumbnails": True}
+    set_model_view(color="red; drop", material="velvet", lighting=5, thumbnails="yes", alpha_relief=1, alpha_plane=700, tile=9)
+    assert get_model_view() == {
+        "color": DEFAULT_COLOR, "material": "phong", "lighting": "studio", "thumbnails": True,
+        "alpha_relief": True, "alpha_plane": 512, "tile": 2,
+    }
 
 
 def test_dragging_turns_the_model_or_the_lights(qapp, tmp_path):

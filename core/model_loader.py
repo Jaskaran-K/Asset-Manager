@@ -149,6 +149,12 @@ def _normalize_geometry(
     return mesh
 
 
+def mesh_from_arrays(name: str, vertices: np.ndarray, faces: np.ndarray, normals: Optional[np.ndarray],
+                     format_type: str, metadata: dict[str, str]) -> Mesh3D:
+    """A Mesh3D made from arrays (an alpha's 3D preview: core.alphas), centred and scaled like a loaded model."""
+    return _normalize_geometry(name, vertices, faces, normals, format_type, metadata)
+
+
 def parse_fbx_file(file_path: Path) -> Mesh3D:
     """Parse Autodesk FBX (Binary or ASCII) into normalized Mesh3D geometry."""
     metadata: dict[str, str] = {

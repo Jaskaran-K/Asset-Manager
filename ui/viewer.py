@@ -51,6 +51,7 @@ from PySide6.QtGui import (
 from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFrame,
@@ -67,11 +68,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import archives
+from core import alphas, archives
 from core.full_image import LoadedImage, load_full_image
 from core.model_loader import Mesh3D, load_3d_model
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions
-from core.settings import get_model_view, set_model_view
+from core.settings import ALPHA_PLANE_SIDES, TILE_GRIDS, get_model_view, set_model_view
 from core.scanner import AssetItem
 from core.tag_repository import Tag
 from ui import file_actions, shortcuts
@@ -817,6 +818,13 @@ class TextureViewerWidget(QWidget):
 
         self.last_mouse_pos: Optional[QPoint] = None
         self._fit_to_screen_requested: bool = True
+        self.tiles = 1  # the image repeated tiles x tiles (Tile: to check the seams)
+
+    def set_tiles(self, tiles: int) -> None:
+        """Show the image repeated tiles x tiles (1: once), fitted to the view again."""
+        self.tiles = max(1, tiles)
+        self.fit_to_screen()
+        self.update()
 
     def set_image(self, pixmap: QPixmap, has_alpha: bool) -> None:
         self.pixmap, self.has_alpha, self.message = pixmap, has_alpha, ""
@@ -837,8 +845,8 @@ class TextureViewerWidget(QWidget):
             return
         w, h = self.width(), self.height()
         if w > 20 and h > 20:
-            scale_w = (w - 40) / self.pixmap.width()
-            scale_h = (h - 40) / self.pixmap.height()
+            scale_w = (w - 40) / (self.pixmap.width() * self.tiles)
+            scale_h = (h - 40) / (self.pixmap.height() * self.tiles)
             self.zoom = min(scale_w, scale_h, 1.0)
             self.pan_x = 0.0
             self.pan_y = 0.0
@@ -910,8 +918,8 @@ class TextureViewerWidget(QWidget):
             )
             return
 
-        target_w = self.pixmap.width() * self.zoom
-        target_h = self.pixmap.height() * self.zoom
+        tile_w, tile_h = self.pixmap.width() * self.zoom, self.pixmap.height() * self.zoom
+        target_w, target_h = tile_w * self.tiles, tile_h * self.tiles
 
         # Center if no manual pan has taken place
         if self.pan_x == 0.0 and self.pan_y == 0.0:
@@ -935,9 +943,13 @@ class TextureViewerWidget(QWidget):
                 painter.fillRect(visible, self._checker_brush)
                 painter.restore()
 
-        # Render texture smoothly
+        # Render texture smoothly (repeated, when tiled: each copy edge to edge, so seams show)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.drawPixmap(img_rect.toRect(), self.pixmap)
+        for row in range(self.tiles):
+            for col in range(self.tiles):
+                tile = QRectF(dest_x + col * tile_w, dest_y + row * tile_h, tile_w, tile_h)
+                if tile.intersects(QRectF(0, 0, w, h)):
+                    painter.drawPixmap(tile, self.pixmap, QRectF(self.pixmap.rect()))
 
         # Subtle card border around image
         painter.setPen(QPen(QColor(60, 65, 80), 1))
@@ -998,6 +1010,7 @@ class AssetViewerDialog(QDialog):
         self.video_player: Optional[VideoPlayer] = None  # at most one, owned by this dialog
         self.pdf_viewer: Optional[PdfViewer] = None  # (saves where you were before it goes)
         self._file: Optional[Path] = None  # a file inside an archive: its unpacked copy, once unpacked
+        self.btn_tile: Optional[QPushButton] = None  # an image's Tile button (and its other tools), when one is shown
         self.unpacked: set[str] = set()  # str(asset.path) of the files inside archives unpacked meanwhile
         # Window state to return to when leaving fullscreen
         self._state_before_fullscreen = Qt.WindowState.WindowNoState
@@ -1144,6 +1157,7 @@ class AssetViewerDialog(QDialog):
             "Modified": self.asset.formatted_modified_time,
             "Location": str(self.asset.path.parent),
         }
+        self.btn_tile: Optional[QPushButton] = None  # (an image's tools: _add_image_tools)
         member = self.asset.archive
         if member is not None:
             metadata["Location"] = f"Inside {member.archive.name}" + (f" > {member.folder}" if member.folder else "")
@@ -1204,6 +1218,7 @@ class AssetViewerDialog(QDialog):
             btn_checker.setToolTip("Check Transparency")
             btn_checker.toggled.connect(tex_viewer.toggle_checkerboard)
             tb_layout.addWidget(btn_checker)
+            self._add_image_tools(t_toolbar, tb_layout, tex_viewer, path)
 
             tb_layout.addStretch(1)
             hint_lbl = QLabel("Scroll to zoom • Drag to pan")
@@ -1211,7 +1226,10 @@ class AssetViewerDialog(QDialog):
             tb_layout.addWidget(hint_lbl)
 
             layout.addWidget(t_toolbar)
-            layout.addWidget(tex_viewer, 1)
+            # The flat image, and (an alpha's, once asked for) its 3D surface
+            self._image_stack = QStackedWidget()
+            self._image_stack.addWidget(tex_viewer)
+            layout.addWidget(self._image_stack, 1)
 
         # Case C: Document (PDF) Viewer
         elif self.asset.is_document:
@@ -1386,6 +1404,161 @@ class AssetViewerDialog(QDialog):
         tb_layout.addStretch(1)
         return v_toolbar
 
+    # ------------------------------------------------------------------
+    # Images: Tile, and an alpha's 3D surface (core.alphas)
+    # ------------------------------------------------------------------
+    def _add_image_tools(self, toolbar: QWidget, layout: QHBoxLayout, tex_viewer: TextureViewerWidget, path: Path) -> None:
+        """Tile (2 x 2 / 3 x 3) for every image; 3D for an alpha (shown once it's known to be one)."""
+        self._alpha_page: Optional[QWidget] = None
+        self._alpha_viewport: Optional[Model3DViewportWidget] = None
+        self._alpha_heights: dict[int, np.ndarray] = {}  # read heights, by plane size (rebuilt from them)
+        self._alpha_token = 0
+        view = get_model_view()
+
+        self.btn_tile = QPushButton("Tile")
+        set_icon(self.btn_tile, "tile")
+        self.btn_tile.setCheckable(True)
+        self.btn_tile.setToolTip("Show the image repeated, edge to edge, to check its seams (T)")
+        layout.addWidget(self.btn_tile)
+        self.tile_choice = QButtonGroup(toolbar)
+        for tiles in TILE_GRIDS:
+            button = QPushButton(f"{tiles}×{tiles}")
+            button.setCheckable(True)
+            button.setChecked(tiles == view["tile"])
+            button.setToolTip(f"Tile {tiles} × {tiles}")
+            self.tile_choice.addButton(button, tiles)
+            layout.addWidget(button)
+
+        def apply_tiles() -> None:
+            tex_viewer.set_tiles(self.tile_choice.checkedId() if self.btn_tile.isChecked() else 1)
+
+        def tiles_picked(tiles: int) -> None:
+            set_model_view(tile=tiles)
+            if self.btn_tile.isChecked():
+                apply_tiles()
+            else:
+                self.btn_tile.setChecked(True)  # (picking a grid turns Tile on)
+
+        self.btn_tile.toggled.connect(lambda _checked: apply_tiles())
+        self.tile_choice.idClicked.connect(tiles_picked)
+
+        self.btn_3d = QPushButton("3D")
+        set_icon(self.btn_3d, "cube")
+        self.btn_3d.setCheckable(True)
+        self.btn_3d.setToolTip("See this alpha as a 3D surface, with the 3D viewer's materials and lights (3)")
+        self.btn_3d.toggled.connect(self._show_alpha_3d)
+        self.btn_3d.hide()
+        layout.addWidget(self.btn_3d)
+
+        asset, name = self.asset, self.asset.name
+
+        def detected(is_alpha: bool) -> None:
+            if is_alpha and self.asset is asset and shiboken6.isValid(self.btn_3d):
+                self.btn_3d.show()
+
+        run_job(lambda: alphas.detect(path, name), detected)
+
+    def _show_alpha_3d(self, on: bool) -> None:
+        """Switch between the flat image and the alpha's 3D surface (made the first time)."""
+        if on:
+            if self._alpha_page is None:
+                self._alpha_page = self._build_alpha_page()
+                self._image_stack.addWidget(self._alpha_page)
+                self._load_alpha_mesh()
+            self._image_stack.setCurrentWidget(self._alpha_page)
+            self._alpha_viewport.setFocus()
+        else:
+            self._image_stack.setCurrentWidget(self.tex_viewer)
+            self.tex_viewer.setFocus()
+
+    def _build_alpha_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        viewport = Model3DViewportWidget()
+        viewport.set_status(f"Making a 3D surface of {self.asset.name}...")
+        self._alpha_viewport = viewport
+
+        bar = QWidget()
+        bar.setObjectName("viewerToolbar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(8)
+        label = QLabel("Height")
+        label.setObjectName("toolbarLabel")
+        row.addWidget(label)
+        self.slider_alpha_height = QSlider(Qt.Orientation.Horizontal)
+        self.slider_alpha_height.setRange(1, 60)
+        self.slider_alpha_height.setValue(15)  # (x 1/100 of the longest side)
+        self.slider_alpha_height.setFixedWidth(160)
+        self.slider_alpha_height.setToolTip("How high the white parts rise")
+        row.addWidget(self.slider_alpha_height)
+        self.btn_alpha_invert = QPushButton("Invert")
+        set_icon(self.btn_alpha_invert, "invert")
+        self.btn_alpha_invert.setCheckable(True)
+        self.btn_alpha_invert.setToolTip("Turn the heights upside down: for alphas made the other way round (I)")
+        row.addWidget(self.btn_alpha_invert)
+        self.alpha_detail = QButtonGroup(bar)
+        for side in ALPHA_PLANE_SIDES:
+            button = QPushButton(f"{side} px")
+            button.setCheckable(True)
+            button.setChecked(side == get_model_view()["alpha_plane"])
+            button.setToolTip(
+                f"Detail: {side} points along the longest side "
+                + ("(smooth and instant)" if side == ALPHA_PLANE_SIDES[0] else "(finer, for close looks: about 2 million triangles)")
+            )
+            self.alpha_detail.addButton(button, side)
+            row.addWidget(button)
+        row.addStretch(1)
+
+        rebuild = QTimer(page)  # (a slider drag rebuilds once it pauses, not on every step)
+        rebuild.setSingleShot(True)
+        rebuild.setInterval(120)
+        rebuild.timeout.connect(self._load_alpha_mesh)
+        self.slider_alpha_height.valueChanged.connect(lambda _value: rebuild.start())
+        self.btn_alpha_invert.toggled.connect(lambda _checked: self._load_alpha_mesh())
+
+        def detail_picked(side: int) -> None:
+            set_model_view(alpha_plane=side)
+            self._load_alpha_mesh()
+
+        self.alpha_detail.idClicked.connect(detail_picked)
+        layout.addWidget(bar)
+        layout.addWidget(self._build_model_toolbar(viewport))
+        layout.addWidget(viewport, 1)
+        return page
+
+    def _load_alpha_mesh(self) -> None:
+        """(Re)build the 3D surface on a worker thread: its heights are read once per detail size."""
+        viewport = self._alpha_viewport
+        if viewport is None:
+            return
+        self._alpha_token += 1
+        token, asset, path = self._alpha_token, self.asset, self._file_path()
+        side = self.alpha_detail.checkedId()
+        strength, invert = self.slider_alpha_height.value() / 100.0, self.btn_alpha_invert.isChecked()
+        known = self._alpha_heights.get(side)
+
+        def work():
+            height = known if known is not None else alphas.read_height(path, asset.name, side)
+            if height is None:
+                raise ValueError("It isn't a grey height image.")
+            return side, height, alphas.height_mesh(height, strength, invert, asset.name)
+
+        def done(result) -> None:
+            if token != self._alpha_token or self.asset is not asset or not shiboken6.isValid(viewport):
+                return  # (a newer one is on its way, or another file is shown)
+            made_side, height, mesh = result
+            self._alpha_heights[made_side] = height
+            viewport.set_mesh(mesh)
+
+        def failed(message: str) -> None:
+            if token == self._alpha_token and shiboken6.isValid(viewport):
+                viewport.set_status(f"No 3D surface could be made.\n{message}")
+
+        run_job(work, done, failed)
+
     def _pick_model_color(self, viewport: Model3DViewportWidget) -> None:
         """The Artbook's colour picker: the model follows it as you drag."""
         from core.model_look import DEFAULT_COLOR
@@ -1542,6 +1715,8 @@ class AssetViewerDialog(QDialog):
             self._leave_fullscreen()
 
     def keyPressEvent(self, event) -> None:
+        if self.btn_tile is not None and self._image_keys(event):
+            return
         if shortcuts.matches("viewer.previous", event) or shortcuts.matches("viewer.previous_alt", event):
             self.go(-1)
         elif shortcuts.matches("viewer.next", event) or shortcuts.matches("viewer.next_alt", event):
@@ -1559,6 +1734,18 @@ class AssetViewerDialog(QDialog):
                 self._leave_fullscreen()
         else:
             super().keyPressEvent(event)
+
+    def _image_keys(self, event) -> bool:
+        """T, 3 and I on an image (True if the key was one of them)."""
+        if shortcuts.matches("image.tile", event):
+            self.btn_tile.toggle()
+        elif shortcuts.matches("image.view_3d", event) and self.btn_3d.isVisible():
+            self.btn_3d.toggle()
+        elif shortcuts.matches("image.invert", event) and self.btn_3d.isChecked():
+            self.btn_alpha_invert.toggle()
+        else:
+            return False
+        return True
 
     def done(self, result: int) -> None:
         """Stop playback and release the video file however the dialog closes."""

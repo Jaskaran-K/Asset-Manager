@@ -112,6 +112,13 @@ MIGRATIONS: list[str] = [
     ALTER TABLE assets ADD COLUMN poly_count INTEGER;
     ALTER TABLE assets ADD COLUMN meta_key TEXT;
     """,
+    # v6: whether an image is an alpha (core.alphas; is:alpha). Images' details are read again
+    # once, to find out.
+    """
+    ALTER TABLE assets ADD COLUMN alpha INTEGER;
+    UPDATE assets SET meta_key = NULL WHERE extension IN
+        ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.tga', '.bmp', '.webp', '.psd', '.psb', '.exr', '.dds');
+    """,
 ]
 
 
@@ -166,6 +173,7 @@ class AssetMeta:
     height: Optional[int] = None
     duration_ms: Optional[int] = None
     poly_count: Optional[int] = None
+    alpha: Optional[bool] = None  # an image that's an alpha (core.alphas); None for other files
 
 
 def meta_key(size: int, mtime: float) -> str:
@@ -886,12 +894,13 @@ class TagRepository:
         result: dict[int, AssetMeta] = {}
         for chunk in _chunks(list(asset_ids)):
             for row in self._conn().execute(
-                f"SELECT id, size, mtime, width, height, duration_ms, poly_count, meta_key FROM assets "
+                f"SELECT id, size, mtime, width, height, duration_ms, poly_count, alpha, meta_key FROM assets "
                 f"WHERE meta_key IS NOT NULL AND id IN ({_placeholders(len(chunk))})",
                 chunk,
             ):
                 if row["meta_key"] == meta_key(row["size"], row["mtime"]):
-                    result[row["id"]] = AssetMeta(row["width"], row["height"], row["duration_ms"], row["poly_count"])
+                    alpha = None if row["alpha"] is None else bool(row["alpha"])
+                    result[row["id"]] = AssetMeta(row["width"], row["height"], row["duration_ms"], row["poly_count"], alpha)
         return result
 
     def assets_needing_meta(self, asset_ids: Sequence[int]) -> list[tuple[int, str, str, str]]:
@@ -912,9 +921,9 @@ class TagRepository:
         """Save details read for {asset_id: (details, key from assets_needing_meta)}."""
         with self._transaction() as conn:
             conn.executemany(
-                "UPDATE assets SET width = ?, height = ?, duration_ms = ?, poly_count = ?, meta_key = ? WHERE id = ?",
+                "UPDATE assets SET width = ?, height = ?, duration_ms = ?, poly_count = ?, alpha = ?, meta_key = ? WHERE id = ?",
                 [
-                    (m.width, m.height, m.duration_ms, m.poly_count, key, asset_id)
+                    (m.width, m.height, m.duration_ms, m.poly_count, None if m.alpha is None else int(m.alpha), key, asset_id)
                     for asset_id, (m, key) in details.items()
                 ],
             )

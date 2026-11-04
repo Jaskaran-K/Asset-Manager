@@ -477,7 +477,7 @@ class TagSearchBar(QFrame):
             "Type to search file names.\n"
             "tag:name  has the tag (pick a suggestion, or type it and press Enter)\n"
             "-tag:name  doesn't have it      tag:a|b  has any of them\n"
-            "is:fav, rating:>=3, res:>=2048, size:>10mb, dur:<30s, poly:<10k, ext:png\n"
+            "is:fav, is:alpha, rating:>=3, res:>=2048, size:>10mb, dur:<30s, poly:<10k, ext:png\n"
             "A minus excludes (-ext:png, -is:fav); several words match in any order.\n"
             "Click a tag chip to switch has / doesn't have. Esc clears."
         )

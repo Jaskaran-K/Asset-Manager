@@ -57,16 +57,20 @@ def test_favorite_files_are_relinked_when_moved(tmp_path):
 # ----------------------------------------------------------------------
 def test_reads_image_sizes(tmp_path, qapp):
     png = tmp_path / "wide.png"
-    Image.new("RGB", (640, 200)).save(png)
-    assert read_details(str(png), ".png") == AssetMeta(width=640, height=200)
+    Image.new("RGB", (640, 200), (200, 80, 30)).save(png)
+    assert read_details(str(png), ".png") == AssetMeta(width=640, height=200, alpha=False)
 
     psd = tmp_path / "deep.psd"  # header of a 16-bit PSD: Qt can't open it, the header reader can
     psd.write_bytes(b"8BPS" + struct.pack(">H6xHIIHH", 1, 3, 300, 4000, 16, 3) + b"\0" * 64)
-    assert read_details(str(psd), ".psd") == AssetMeta(width=4000, height=300)
+    assert read_details(str(psd), ".psd") == AssetMeta(width=4000, height=300, alpha=False)
 
     hdr = tmp_path / "sky.hdr"
     hdr.write_bytes(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1024 +X 2048\n" + b"\0" * 16)
-    assert read_details(str(hdr), ".hdr") == AssetMeta(width=2048, height=1024)
+    assert read_details(str(hdr), ".hdr") == AssetMeta(width=2048, height=1024, alpha=False)
+
+    alpha = tmp_path / "rock_alpha.png"  # one channel, 16-bit: an alpha
+    Image.new("I;16", (64, 64), 30000).save(alpha)
+    assert read_details(str(alpha), ".png") == AssetMeta(width=64, height=64, alpha=True)
 
 
 def test_unreadable_files_have_empty_details(tmp_path, qapp):

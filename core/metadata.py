@@ -100,17 +100,58 @@ def _member_image_size(path: str) -> Optional[tuple[int, int]]:
         return im.size
 
 
+MAX_MEMBER_CHECK_BYTES = 20 * 1024 * 1024  # an image inside an archive is unpacked up to this to tell if it's an alpha
+
+
+def _member_alpha(path: str) -> bool:
+    """Whether an image inside an archive is an alpha (core.alphas): read in memory, or a PSD / EXR
+    (their readers want a file) from a temporary copy; bigger ones only when they're one channel."""
+    import io
+
+    from . import alphas
+    from .archives import ArchiveError, iter_chunks, local_file, member_for_path, read_bytes
+
+    member = member_for_path(path)
+    if member is None or alphas.named_like_map(member.base_name):
+        return False
+    try:
+        if member.size > MAX_MEMBER_CHECK_BYTES:
+            head = bytearray()
+            for piece in iter_chunks(member):
+                head += piece
+                if len(head) >= _HEAD_BYTES:
+                    break
+            if member.base_name.lower().endswith((".psd", ".psb")):
+                return head[:4] == b"8BPS" and struct.unpack(">H", bytes(head[24:26]))[0] in (1, 8)
+            from PIL import Image
+
+            with Image.open(io.BytesIO(bytes(head))) as im:
+                return im.mode in alphas.SINGLE_CHANNEL_MODES
+        if member.base_name.lower().endswith((".psd", ".psb", ".exr")):
+            with local_file(member) as copy:
+                return alphas.detect(copy, member.base_name)
+        return alphas.detect_bytes(read_bytes(member), member.base_name)
+    except (ArchiveError, OSError, ValueError):
+        return False
+
+
 def read_details(path: str, extension: str) -> Optional[AssetMeta]:
     """The file's details (EMPTY if there's nothing to read), or None to try again later
     (a video while ffmpeg isn't installed). Inside an archive, only images have theirs read."""
     ext = extension.lower()
     try:
         if "|" in path:  # (core.archives.SEPARATOR: a file inside an archive)
-            size = _member_image_size(path) if ext in TEXTURE_EXTENSIONS else None
-            return AssetMeta(width=size[0], height=size[1]) if size else EMPTY
+            if ext not in TEXTURE_EXTENSIONS:
+                return EMPTY
+            size = _member_image_size(path)
+            return AssetMeta(width=size[0] if size else None, height=size[1] if size else None, alpha=_member_alpha(path))
         if ext in TEXTURE_EXTENSIONS:
+            from .alphas import detect
+
             size = image_size(path)
-            return AssetMeta(width=size[0], height=size[1]) if size else EMPTY
+            if not size:
+                return EMPTY  # (unreadable)
+            return AssetMeta(width=size[0], height=size[1], alpha=detect(path, os.path.basename(path)))
         if ext in VIDEO_EXTENSIONS:
             from .video_tools import find_ffmpeg, probe_video
 

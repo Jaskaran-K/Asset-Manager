@@ -1,6 +1,7 @@
 """Search filters on file details, typed into the search box next to the file name text.
 
     is:fav            favorites                 rating:3   3 stars or more (rating:=3, rating:<2 ...)
+    is:alpha          alphas: grey height images (core.alphas)
     ext:png           file type (ext:png,jpg)   size:>10mb  file size (b, kb, mb, gb; default mb)
     res:>=2048        larger side in pixels (k = 1024, so res:4k = 4096)
     dur:<30s          video length (s, m, h, or 1:30)
@@ -38,6 +39,7 @@ _WORD = re.compile(r'"([^"]*)"|(\S+)')
 TAG_NAME = r'(?:"[^"]+"|[^\s|"]+)'
 TAG_TOKEN = re.compile(rf'(?<!\S)(-?)tag:({TAG_NAME}(?:\|{TAG_NAME})*)\|?(?!\S)', re.IGNORECASE)
 _COMPARISON = re.compile(r"^(<=|>=|<|>|=)?(.+)$")
+_META_FIELDS = ("res", "dur", "poly", "alpha")  # read from inside the files, in the background
 _OPS: dict[str, Callable[[float, float], bool]] = {
     "=": operator.eq, "<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge,
 }
@@ -46,20 +48,22 @@ _SIZE_UNITS = {"b": 1, "kb": 1024, "k": 1024, "mb": 1024 ** 2, "m": 1024 ** 2, "
 
 @dataclass(frozen=True)
 class DetailFilter:
-    field: str  # "favorite", "rating", "ext", "size", "res", "dur", "poly"
+    field: str  # "favorite", "alpha", "rating", "ext", "size", "res", "dur", "poly"
     op: str
     value: object
     negate: bool = False  # typed with a minus: files that don't match
     tolerance: float = 0  # "=" matches value +- tolerance (half a step of the last digit typed)
 
     def matches(self, asset: AssetItem, marks: Marks, meta: Optional[AssetMeta]) -> bool:
-        if meta is None and self.field in ("res", "dur", "poly"):
+        if meta is None and self.field in _META_FIELDS:
             return False  # not read yet: unknown either way
         return self._test(asset, marks, meta) != self.negate
 
     def _test(self, asset: AssetItem, marks: Marks, meta: Optional[AssetMeta]) -> bool:
         if self.field == "favorite":
             return marks.favorite
+        if self.field == "alpha":
+            return bool(meta.alpha)
         if self.field == "ext":
             return asset.extension.lstrip(".") in self.value
         if self.field == "rating":
@@ -92,7 +96,7 @@ class ParsedQuery:
 
     @property
     def uses_meta(self) -> bool:
-        return any(f.field in ("res", "dur", "poly") for f in self.filters)
+        return any(f.field in _META_FIELDS for f in self.filters)
 
     def name_matches(self, name: str) -> bool:
         folded = name.casefold()
@@ -126,6 +130,8 @@ def _parse_filter(key: str, raw: str, negate: bool = False) -> DetailFilter:
     if key == "is":
         if raw.lower() in ("fav", "favorite", "favourite", "starred"):
             return DetailFilter("favorite", "=", True, negate)
+        if raw.lower() in ("alpha", "alphas", "height", "heightmap"):
+            return DetailFilter("alpha", "=", True, negate)
         raise ValueError(raw)
     if key in ("ext", "type"):
         exts = frozenset(e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip())

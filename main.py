@@ -160,6 +160,8 @@ class MainWindow(QMainWindow):
         # Asynchronous thumbnail loader & in-memory cache
         self.thumbnail_manager = ThumbnailManager(self)
         self.thumbnail_manager.render_models = get_model_view()["thumbnails"]
+        self.thumbnail_manager.alpha_relief = get_model_view()["alpha_relief"]
+        self.thumbnail_manager.alpha_of = self._known_alpha
         self.thumbnail_manager.thumbnail_loaded.connect(self._on_async_thumbnail_loaded)
         self.thumbnail_manager.thumbnail_skipped.connect(self._on_thumbnail_skipped)
         theme_signals().changed.connect(self._on_theme_changed)  # (also while previewing in Settings)
@@ -744,8 +746,10 @@ class MainWindow(QMainWindow):
 
         if dialog.model_thumbnails_changed:
             self.thumbnail_manager.render_models = get_model_view()["thumbnails"]
+        if dialog.alpha_relief_changed:
+            self.thumbnail_manager.alpha_relief = get_model_view()["alpha_relief"]
 
-        if dialog.thumbnail_size_changed or dialog.model_thumbnails_changed:
+        if dialog.thumbnail_size_changed or dialog.model_thumbnails_changed or dialog.alpha_relief_changed:
             # Thumbnails bake in the size, so regenerate them (a new theme already did: _on_theme_changed)
             self.thumbnail_manager.clear_cache()
             self._refresh_grid_display()
@@ -1013,6 +1017,11 @@ class MainWindow(QMainWindow):
 
     def _marks_of(self, asset: AssetItem) -> Marks:
         return self.library.marks_of(asset)
+
+    def _known_alpha(self, asset: AssetItem) -> Optional[bool]:
+        """Whether an image is an alpha, if its details have been read (for its thumbnail)."""
+        meta = self.library.meta_of(asset)
+        return meta.alpha if meta is not None else None
 
     def _marks_for_index(self, index) -> Marks:
         asset = index.data(ASSET_ROLE)

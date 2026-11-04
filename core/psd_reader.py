@@ -3,7 +3,8 @@
 Pillow only decodes 8-bit PSDs, but many texture and alpha packs (e.g. ZBrush
 alphas) are saved as 16-bit grayscale. This reads the "Image Data" section,
 which Photoshop always writes as a fully merged copy of the document, and
-returns it as an 8-bit Pillow image.
+returns it as an 8-bit Pillow image (read_psd_composite), or as stored, 16 / 32 bits
+kept (read_psd_planes: alphas' heights, core.alphas).
 
 Supports 8/16/32-bit Grayscale, RGB, CMYK and Duotone documents with raw,
 RLE (PackBits) or ZIP compression.
@@ -37,6 +38,13 @@ def read_psd_composite(file_path: Path | str, max_size: Optional[int] = None) ->
     thumbnails don't need to decode every pixel; the result is at least max_size on
     its longest side and still needs a final resize.
     """
+    return _planes_to_image(*read_psd_planes(file_path, max_size))
+
+
+def read_psd_planes(file_path: Path | str, max_size: Optional[int] = None) -> tuple[np.ndarray, int, int, int]:
+    """The merged composite at full precision: (planes (channels, h, w) as stored: uint8 / uint16 /
+    float32, bit depth, colour mode (1 grayscale, 3 RGB, 4 CMYK, 8 duotone), colour channels).
+    max_size subsamples raw files as read_psd_composite does."""
     with open(file_path, "rb") as f:
         signature, version, _reserved, channels, height, width, depth, color_mode = struct.unpack(
             ">4sH6sHIIHH", f.read(26)
@@ -99,7 +107,7 @@ def read_psd_composite(file_path: Path | str, max_size: Optional[int] = None) ->
         else:
             raise ValueError(f"Unsupported PSD compression: {compression}")
 
-    return _planes_to_image(pixels, depth, color_mode, base_channels)
+    return pixels, depth, color_mode, base_channels
 
 
 def _planes_to_image(pixels: np.ndarray, depth: int, color_mode: int, base_channels: int) -> Image.Image:

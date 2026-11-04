@@ -30,6 +30,16 @@ the app starts from that copy and notes it in the crash log.
   are tone mapped so bright skies keep their detail, and one-channel height maps are stretched to their range.
   Files that can't be shown say so on their card ("No preview", or "Too large to preview" for images over
   about 180 megapixels).
+- **Alphas** (grey height images: ZBrush alphas, displacement and height maps) are recognised by themselves:
+  any grey image whose name doesn't say it's another kind of grey map (AO, gloss, roughness, metal, mask...).
+  - In the grid they're drawn as a **lit relief**, clay grey and lit from the top left, as ZBrush shows them,
+    from their full 16-bit heights (8 bits would show steps on gentle slopes). **Settings > Appearance >
+    Alpha thumbnails** switches between **Relief** and **Normal** (the flat grey image).
+  - `is:alpha` in the search finds them (`-is:alpha`: everything else), including alphas inside archives.
+  - In the viewer, **3D** (or **3**) shows an alpha as a surface with the 3D viewer's materials and lights:
+    **Height** slider, **Invert** (**I**) for alphas made the other way round, and **512 px** / **1024 px**
+    detail.
+  - **Tile** (or **T**) shows any image repeated **2×2** or **3×3**, edge to edge, to check its seams.
 - **Drag files out** of the grid into Explorer, Blender, Photoshop, Unreal and so on. They're copied; the
   library keeps its files.
 - **Archives (ZIP, RAR, 7z)** are browsed without unpacking them:

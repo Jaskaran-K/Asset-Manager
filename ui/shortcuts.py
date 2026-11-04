@@ -89,6 +89,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("search.toggle_chip", SEARCH, "Click a tag chip", "Switch it between has / doesn't have"),
     Shortcut("search.save", SEARCH, "Click the star in the search box", "Save the search as a sidebar collection"),
     Shortcut("search.details", SEARCH, "is:fav  rating:>=3  ext:png", "Favorites, star rating, file type"),
+    Shortcut("search.alpha", SEARCH, "is:alpha", "Alphas: grey height images (-is:alpha: everything else)"),
     Shortcut("search.details_size", SEARCH, "res:>=2048  size:>10mb", "Image / video resolution (res:4k = 4096), file size"),
     Shortcut("search.details_media", SEARCH, "dur:<30s  poly:<10k", "Video length, 3D model faces"),
     Shortcut("search.remove_last_chip", SEARCH, "Backspace (empty box)", "Remove the last tag filter", "Backspace"),
@@ -222,6 +223,9 @@ SHORTCUTS: tuple[Shortcut, ...] = (
 
     # Image / texture viewer
     Shortcut("image.zoom", IMAGE, "Mouse wheel", "Zoom toward the cursor"),
+    Shortcut("image.tile", IMAGE, "T", "Tile: the image repeated 2 x 2 or 3 x 3, to check its seams", "T"),
+    Shortcut("image.view_3d", IMAGE, "3", "An alpha as a 3D surface, or back to the flat image", "3"),
+    Shortcut("image.invert", IMAGE, "I", "3D view of an alpha: invert its heights (alphas made the other way round)", "I"),
     Shortcut("image.pan", IMAGE, "Left-drag / Middle-drag", "Pan the image"),
 
     # Video player

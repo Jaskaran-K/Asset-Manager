@@ -538,6 +538,25 @@ def _back(p, primary, secondary):
     _line(p, primary, 2.1, (11, 8), (7, 12), (11, 16))
 
 
+def _tile(p, primary, secondary):
+    """One picture repeated 2 x 2: an image tiled, to check its seams."""
+    for x in (3, 12.5):
+        for y in (3.5, 13):
+            _body(p, _rounded(x, y, 8.5, 7.5, 1.6), secondary)
+            _picture(p, primary, x + 1.6, y + 2.6, 5.4, 3.6)
+
+
+def _invert(p, primary, secondary):
+    """A disc half dark, half light: heights turned upside down (an alpha made the other way round)."""
+    _body(p, _circle(12, 12, 9.5), secondary)
+    half = QPainterPath()
+    half.moveTo(12, 2.5)
+    half.arcTo(QRectF(2.5, 2.5, 19, 19), 90, 180)
+    half.closeSubpath()
+    p.fillPath(half, primary)
+    _outline(p, _circle(12, 12, 9.5), primary, 1.6)
+
+
 def _extract(p, primary, secondary):
     """An arrow up out of an open box: unpack files from an archive."""
     _body(p, _polygon((3, 12), (8, 12), (8, 14.5), (16, 14.5), (16, 12), (21, 12), (21, 21), (3, 21)), secondary, 2.0)
@@ -584,7 +603,7 @@ ICONS: dict[str, IconPainter] = {
     "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "save": _save, "palette": _palette, "import": _import, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
-    "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back,
+    "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
 }
 
 

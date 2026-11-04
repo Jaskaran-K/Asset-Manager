@@ -591,9 +591,15 @@ def get_sidebar_state(key: str = "sidebar") -> dict[str, Any]:
     }
 
 
+ALPHA_PLANE_SIDES = (512, 1024)  # the 3D preview of an alpha: points along its longest side
+TILE_GRIDS = (2, 3)  # the image viewer's Tile: 2 x 2 or 3 x 3
+
+
 def get_model_view() -> dict[str, Any]:
     """The 3D viewer's look, kept between viewings: {"color": "#rrggbb", "material", "lighting"}
-    (core.model_look's names), and whether models get rendered thumbnails ("thumbnails")."""
+    (core.model_look's names), whether models get rendered thumbnails ("thumbnails"), and for images:
+    alphas shown as a lit relief in the grid ("alpha_relief"), the detail of an alpha's 3D preview
+    ("alpha_plane": ALPHA_PLANE_SIDES) and the Tile grid ("tile": TILE_GRIDS)."""
     from core.model_look import DEFAULT_COLOR, DEFAULT_LIGHTING, DEFAULT_MATERIAL, LIGHTINGS, MATERIALS
 
     raw = _load_raw_config().get("model_view")
@@ -604,11 +610,14 @@ def get_model_view() -> dict[str, Any]:
         "material": raw.get("material") if raw.get("material") in MATERIALS else DEFAULT_MATERIAL,
         "lighting": raw.get("lighting") if raw.get("lighting") in LIGHTINGS else DEFAULT_LIGHTING,
         "thumbnails": raw.get("thumbnails") if isinstance(raw.get("thumbnails"), bool) else True,
+        "alpha_relief": raw.get("alpha_relief") if isinstance(raw.get("alpha_relief"), bool) else True,
+        "alpha_plane": raw.get("alpha_plane") if raw.get("alpha_plane") in ALPHA_PLANE_SIDES else ALPHA_PLANE_SIDES[0],
+        "tile": raw.get("tile") if raw.get("tile") in TILE_GRIDS else TILE_GRIDS[0],
     }
 
 
 def set_model_view(**changes: Any) -> None:
-    """Update some of color / material / lighting / thumbnails (anything invalid reads back as the default)."""
+    """Update some of get_model_view's settings (anything invalid reads back as the default)."""
     state = get_model_view()
     state.update({k: v for k, v in changes.items() if k in state})
     _update_config("model_view", state)

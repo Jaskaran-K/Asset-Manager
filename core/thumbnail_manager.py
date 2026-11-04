@@ -21,7 +21,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PIL import Image
 from PySide6.QtCore import (
@@ -48,7 +48,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPdf import QPdfDocument
 
-from . import archives
+from . import alphas, archives
 from .hdr_image import is_hdr, read_hdr_image
 from .psd_reader import read_psd_composite
 from .scanner import AssetItem
@@ -322,6 +322,31 @@ def load_member_image(member: "archives.ArchiveMember", size: int = 110) -> QIma
         return load_texture_picture(path, size)
 
 
+def load_relief_picture(source, name: str, size: int = 110) -> Optional[QImage]:
+    """An alpha's picture as a lit relief, from its full-precision heights, to fit a card; None if the
+    image isn't an alpha (core.alphas). source: a file, or its bytes (not PSD / EXR)."""
+    height = alphas.read_height(source, name, max(16, size - 16))
+    if height is None:
+        return None
+    with alphas.relief_image(height) as im:
+        return _fit_picture(im, size)
+
+
+def load_member_picture(member: "archives.ArchiveMember", size: int, relief: bool) -> tuple[QImage, bool]:
+    """An image inside an archive to fit a card: (picture, whether it's a relief). With relief, an
+    alpha is drawn as one; anything else as itself."""
+    if relief:
+        name = member.base_name
+        if name.lower().endswith((".psd", ".psb", ".exr")):
+            with archives.local_file(member) as path:
+                picture = load_relief_picture(path, name, size)
+        else:
+            picture = load_relief_picture(io.BytesIO(archives.read_bytes(member)), name, size)
+        if picture is not None:
+            return picture, True
+    return load_member_image(member, size), False
+
+
 def load_archive_picture(asset: AssetItem, size: int = 110) -> tuple[Optional[QImage], str]:
     """An archive's card picture: the best image inside (core.archives.card_picture_candidates),
     or None and a note: what's inside ("MP4, SRT"), or why it can't be read."""
@@ -519,7 +544,7 @@ class _WorkerSignals(QObject):
     skipped = Signal(object)  # the _Request: its card left the screen before the job's turn
 
 
-def disk_cache_path(asset: AssetItem, size: int) -> Optional[Path]:
+def disk_cache_path(asset: AssetItem, size: int, relief: bool = False) -> Optional[Path]:
     """Where a thumbnail's picture is cached on disk, or None for types that aren't cached.
 
     The picture is stored without its card, so a theme change doesn't make every file be read
@@ -537,6 +562,8 @@ def disk_cache_path(asset: AssetItem, size: int) -> Optional[Path]:
     key = f"{os.path.normcase(str(asset.path))}|{asset.size_bytes}|{asset.modified_timestamp!r}|{size}|{_CACHE_VERSION}"
     if asset.archive is not None:
         key += f"|{asset.archive.crc}|{asset.archive.archive_size}"  # (its archive replaced by another)
+    if relief:
+        key += "|relief"  # an alpha drawn as a lit relief (core.alphas)
     return video_tools.THUMB_DIR / f"{_CACHE_PREFIX}{hashlib.sha1(key.encode('utf-8')).hexdigest()}.png"
 
 
@@ -580,8 +607,10 @@ class _ThumbnailRunnable(QRunnable):
 
     def __init__(
         self, request: _Request, asset: AssetItem, size: int, cache_file: Optional[Path],
-        style: dict[str, QColor], render_model: bool = False,
+        style: dict[str, QColor], render_model: bool = False, relief: bool = False, alpha: Optional[bool] = None,
     ):
+        """relief: an image that's an alpha is drawn as a lit relief; alpha: whether it is one, if
+        known (the library's file details), else it's found out here."""
         super().__init__()
         self.request = request
         self.asset = asset
@@ -590,6 +619,11 @@ class _ThumbnailRunnable(QRunnable):
         self.style = style  # the card colors when it was asked for (taken on the UI thread)
         self.render_model = render_model  # a 3D model without a companion picture: render one
         self.label = ""  # the badge's text, if not the file type ("ZIP · 124")
+        self.relief = relief and asset.is_texture
+        self.alpha = alpha
+        self._relief_file: Optional[Path] = None  # where a relief picture is cached
+        self._undecided = False  # whether it's an alpha is only known once it's read (inside an archive)
+        self._made_relief = False
         self.signals = _WorkerSignals()
 
     def run(self) -> None:
@@ -601,12 +635,31 @@ class _ThumbnailRunnable(QRunnable):
             return
         if self.asset.is_archive and not self.asset.in_archive:
             self.label = archive_label(self.asset)
+        if self.relief:
+            self._choose_relief_cache()
         picture, note = self._from_disk(), ""
         if picture is None:
             picture, note = self._render()
             if picture is not None and not picture.isNull():
+                if self._undecided:
+                    self.cache_file = self._relief_file if self._made_relief else disk_cache_path(self.asset, self.size)
                 self._to_disk(picture)
         self.signals.ready.emit(request, self._card(picture, note))
+
+    def _choose_relief_cache(self) -> None:
+        """An alpha's relief picture is cached apart from its plain one (so turning reliefs off and on
+        needs no reading, and the plain pictures of everything else stay as they are)."""
+        alpha = self.alpha
+        if alpha is None and not self.asset.in_archive:
+            alpha = alphas.detect(self.asset.path, self.asset.name)  # (from its header: milliseconds)
+        if alpha is False:
+            self.relief = False
+            return
+        self._relief_file = disk_cache_path(self.asset, self.size, relief=True)
+        if alpha is True or self._relief_file is not None and self._relief_file.is_file():
+            self.cache_file = self._relief_file
+        else:
+            self.cache_file, self._undecided = None, True  # (read first: a plain picture made before may be an alpha's)
 
     def _card(self, picture: Optional[QImage], note: str) -> QImage:
         if picture is None or picture.isNull():
@@ -666,6 +719,11 @@ class _ThumbnailRunnable(QRunnable):
     def _render_file(self, path: Path) -> Optional[QImage]:
         """The picture of the file at path (the asset's own, or an unpacked copy of it)."""
         asset, size = self.asset, self.size
+        if asset.is_texture and self.relief:
+            picture = load_relief_picture(path, asset.name, size)
+            if picture is not None:
+                self._made_relief = True
+                return picture
         if asset.is_texture:
             return load_texture_picture(path, size)
         if asset.is_document and asset.extension == ".pdf":
@@ -692,7 +750,8 @@ class _ThumbnailRunnable(QRunnable):
         if member.size > archives.MAX_PREVIEW_BYTES:
             return None, "Open to preview"
         if asset.is_texture:
-            return load_member_image(member, self.size), ""
+            picture, self._made_relief = load_member_picture(member, self.size, self.relief)
+            return picture, ""
         if asset.is_3d_model and not self.render_model:
             return None, ""
         with archives.local_file(member) as path:
@@ -746,6 +805,9 @@ class ThumbnailManager(QObject):
         self._model_pool = QThreadPool()
         self._model_pool.setMaxThreadCount(1)
         self.render_models = True  # (core.settings model_view "thumbnails"; set by the main window)
+        self.alpha_relief = True  # alphas drawn as a lit relief (model_view "alpha_relief"; set by the main window)
+        # Whether a file is an alpha, when the library knows it already (else the job finds out)
+        self.alpha_of: Callable[[AssetItem], Optional[bool]] = lambda asset: None
 
     def cached(self, asset: AssetItem) -> Optional[QPixmap]:
         return self._cache.get(str(asset.path))
@@ -804,7 +866,11 @@ class ThumbnailManager(QObject):
             request = self._pending[cache_key] = _Request(cache_key)
             rendered = self._renders(asset, size)
             cache_file = disk_cache_path(asset, size) if not asset.is_3d_model or rendered else None
-            self._start(_ThumbnailRunnable(request, asset, size, cache_file, card_style(), render_model=rendered), rendered)
+            relief = self.alpha_relief and asset.is_texture
+            self._start(_ThumbnailRunnable(
+                request, asset, size, cache_file, card_style(), render_model=rendered,
+                relief=relief, alpha=self.alpha_of(asset) if relief else None,
+            ), rendered)
 
         return self.placeholder(asset, size)
 

@@ -15,6 +15,8 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from .model_stats import ModelStats
+
 
 def _trimesh():
     """trimesh, imported when a model is first read: it brings scipy with it, over half a
@@ -40,6 +42,7 @@ class Mesh3D:
     format_type: str = "Unknown"
     metadata: dict[str, str] = field(default_factory=dict)
     stand_in: bool = False  # the file couldn't be read: this is the placeholder cube
+    stats: Optional[ModelStats] = None  # what the file holds (polygon kinds, units), if its reader could tell
 
     @property
     def vertex_count(self) -> int:
@@ -88,9 +91,11 @@ def _normalize_geometry(
     raw_normals: Optional[np.ndarray],
     format_type: str,
     metadata: dict[str, str],
+    stats: Optional[ModelStats] = None,
 ) -> Mesh3D:
-    """Normalize vertices to fit nicely within standard viewport view bounds."""
-    mesh = Mesh3D(name=name, format_type=format_type)
+    """Normalize vertices to fit nicely within standard viewport view bounds. stats: what the file
+    holds, if its reader could tell (otherwise only the triangles drawn are known)."""
+    mesh = Mesh3D(name=name, format_type=format_type, stats=stats)
 
     if raw_verts is None or len(raw_verts) == 0:
         mesh.vertices, mesh.faces, mesh.normals = _get_default_preview_cube()
@@ -138,15 +143,24 @@ def _normalize_geometry(
     mesh.dimensions = (float(dx), float(dy), float(dz))
     mesh.ground_y = ground_y
 
-    meta = {
-        "Format": format_type,
-        "Vertices": f"{len(verts):,}",
-        "Triangles / Faces": f"{len(faces):,}",
-        "Dimensions (X×Y×Z)": f"{dx:.2f} × {dy:.2f} × {dz:.2f}",
-    }
+    meta = {"Format": format_type}
+    if stats is not None and stats.polygons > 0:
+        meta.update(stats.rows(len(faces)))
+    else:
+        meta.update({"Vertices": f"{len(verts):,}", "Triangles / Faces": f"{len(faces):,}"})
+    size, unit = _real_size((dx, dy, dz), format_type, stats)
+    meta["Dimensions (X×Y×Z)"] = f"{size[0]:.2f} × {size[1]:.2f} × {size[2]:.2f} {unit}"
     meta.update(metadata)
     mesh.metadata = meta
     return mesh
+
+
+def _real_size(size: tuple[float, float, float], format_type: str, stats: Optional[ModelStats]) -> tuple[tuple[float, float, float], str]:
+    """The model's size and its unit, where its format says: an FBX states its own, glTF is always
+    in metres, and the numbers of the others (OBJ, STL...) mean whatever whoever exported it meant."""
+    if stats is not None and stats.unit_cm is not None:
+        return (size[0] * stats.unit_cm, size[1] * stats.unit_cm, size[2] * stats.unit_cm), "cm"
+    return size, "m" if format_type == "glTF" else "units"
 
 
 def mesh_from_arrays(name: str, vertices: np.ndarray, faces: np.ndarray, normals: Optional[np.ndarray],
@@ -166,12 +180,13 @@ def parse_fbx_file(file_path: Path) -> Mesh3D:
     try:
         from core.fbx_fast import FbxError, read_fbx
 
-        verts, faces, meshes = read_fbx(file_path)
+        stats = ModelStats()
+        verts, faces, meshes = read_fbx(file_path, stats=stats)
         metadata["Subtype"] = "Binary FBX"
         if meshes > 1:
             metadata["Meshes"] = f"{meshes:,}"
         return _normalize_geometry(
-            name=file_path.name, raw_verts=verts, raw_faces=faces, raw_normals=None, format_type="FBX", metadata=metadata,
+            name=file_path.name, raw_verts=verts, raw_faces=faces, raw_normals=None, format_type="FBX", metadata=metadata, stats=stats,
         )
     except FbxError as exc:
         fast_note = str(exc)  # (shown only if nothing else can read it either)
@@ -210,6 +225,8 @@ def parse_fbx_file(file_path: Path) -> Mesh3D:
                 raw_p = [int(x.strip()) for x in p_match.group(1).replace("\n", "").split(",") if x.strip()]
                 verts = np.array(raw_v, dtype=np.float32).reshape(-1, 3)
 
+                stats = ModelStats(vertices=len(verts))
+                stats.add_fbx_polygons(np.array(raw_p, dtype=np.int64))
                 faces = []
                 current_poly: list[int] = []
                 for idx in raw_p:
@@ -230,6 +247,7 @@ def parse_fbx_file(file_path: Path) -> Mesh3D:
                     raw_normals=None,
                     format_type="FBX",
                     metadata=metadata,
+                    stats=stats,
                 )
     except Exception:
         pass
@@ -264,10 +282,11 @@ def parse_obj_file(file_path: Path, should_stop: Optional[Callable[[], bool]] = 
     from core.obj_fast import LoadCancelled, ObjError, read_obj
 
     try:
-        verts, faces, normals = read_obj(file_path, should_stop)
+        stats = ModelStats()
+        verts, faces, normals = read_obj(file_path, should_stop, stats=stats)
         return _normalize_geometry(
             name=file_path.name, raw_verts=verts, raw_faces=faces, raw_normals=normals, format_type="OBJ",
-            metadata=metadata,
+            metadata=metadata, stats=stats,
         )
     except (LoadCancelled, MemoryError):
         raise

@@ -721,18 +721,23 @@ def get_sidebar_state(key: str = "sidebar") -> dict[str, Any]:
 
 ALPHA_PLANE_SIDES = (512, 1024)  # the 3D preview of an alpha: points along its longest side
 TILE_GRIDS = (2, 3)  # the image viewer's Tile: 2 x 2 or 3 x 3
+HDRI_EXPOSURE_RANGE = (-3.0, 3.0)  # stops, either side of the HDRI's automatic exposure
 
 
 def get_model_view() -> dict[str, Any]:
     """The 3D viewer's look, kept between viewings: {"color": "#rrggbb", "material", "lighting"}
     (core.model_look's names), whether models get rendered thumbnails ("thumbnails"), and for images:
     alphas shown as a lit relief in the grid ("alpha_relief"), the detail of an alpha's 3D preview
-    ("alpha_plane": ALPHA_PLANE_SIDES) and the Tile grid ("tile": TILE_GRIDS)."""
-    from core.model_look import DEFAULT_COLOR, DEFAULT_LIGHTING, DEFAULT_MATERIAL, LIGHTINGS, MATERIALS
+    ("alpha_plane": ALPHA_PLANE_SIDES) and the Tile grid ("tile": TILE_GRIDS).
+    An HDRI as the lighting: its path ("hdri": "" for none, "lighting" then says which preset), its exposure in
+    stops ("hdri_exposure": within HDRI_EXPOSURE_RANGE) and whether it's shown behind the model ("hdri_backdrop").
+    Metal's roughness ("metal_roughness": 0-1)."""
+    from core.model_look import DEFAULT_COLOR, DEFAULT_LIGHTING, DEFAULT_MATERIAL, DEFAULT_ROUGHNESS, LIGHTINGS, MATERIALS
 
     raw = _load_raw_config().get("model_view")
     raw = raw if isinstance(raw, dict) else {}
-    color = raw.get("color")
+    color, hdri, exposure, roughness = raw.get("color"), raw.get("hdri"), raw.get("hdri_exposure"), raw.get("metal_roughness")
+    low, high = HDRI_EXPOSURE_RANGE
     return {
         "color": color if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color) else DEFAULT_COLOR,
         "material": raw.get("material") if raw.get("material") in MATERIALS else DEFAULT_MATERIAL,
@@ -741,6 +746,10 @@ def get_model_view() -> dict[str, Any]:
         "alpha_relief": raw.get("alpha_relief") if isinstance(raw.get("alpha_relief"), bool) else True,
         "alpha_plane": raw.get("alpha_plane") if raw.get("alpha_plane") in ALPHA_PLANE_SIDES else ALPHA_PLANE_SIDES[0],
         "tile": raw.get("tile") if raw.get("tile") in TILE_GRIDS else TILE_GRIDS[0],
+        "hdri": hdri if isinstance(hdri, str) else "",
+        "hdri_exposure": float(exposure) if type(exposure) in (int, float) and low <= exposure <= high else 0.0,
+        "hdri_backdrop": raw.get("hdri_backdrop") if isinstance(raw.get("hdri_backdrop"), bool) else False,
+        "metal_roughness": float(roughness) if type(roughness) in (int, float) and 0 <= roughness <= 1 else DEFAULT_ROUGHNESS,
     }
 
 

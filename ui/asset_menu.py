@@ -14,6 +14,7 @@ from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import QMenu, QWidget
 
 from core import app_helpers, apps, artbook_store
+from core.hdr_image import HDR_EXTENSIONS
 from core.scanner import AssetItem
 from core.settings import get_artbook_page
 from core.tag_repository import Marks
@@ -126,6 +127,7 @@ class AssetMenuActions:
     send_files: Optional[Callable[[list[Path]], list[Path]]] = None  # the real files to send to the Artbook
     open_in: Optional[Callable[[apps.App], None]] = None  # open it in one of the apps (Open In)
     import_board: Optional[Callable[[], None]] = None  # a PureRef board: make a new Artbook page from it
+    use_as_lighting: Optional[Callable[[], None]] = None  # an HDR image: light 3D models with it
 
 
 def build_asset_menu(
@@ -156,6 +158,11 @@ def build_asset_menu(
         set_icon(action_again, "import")
         action_again.setToolTip("Make a new Artbook page from the board as it is now. The page it has already stays as it is")
         action_again.triggered.connect(actions.import_board)
+    if actions.use_as_lighting is not None and asset.extension.lower() in HDR_EXTENSIONS:
+        action_light = menu.addAction("Use as Viewer Lighting")
+        set_icon(action_light, "light")
+        action_light.setToolTip("Light 3D models in the viewer with this HDRI (a colour 2:1 panorama)")
+        action_light.triggered.connect(actions.use_as_lighting)
 
     menu.addSeparator()
 

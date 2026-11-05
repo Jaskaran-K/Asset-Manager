@@ -20,11 +20,13 @@ from typing import Any, Optional
 
 import numpy as np
 
-MAGIC = b"Kaydara FBX Binary  \x00"
+from .model_stats import ModelStats
+
+MAGIC =b"Kaydara FBX Binary  \x00"
 _ARRAY_TYPES = {"f": np.float32, "d": np.float64, "l": np.int64, "i": np.int32, "b": np.uint8, "c": np.uint8}
 _SCALARS = {"Y": ("<h", 2), "C": ("<?", 1), "I": ("<i", 4), "F": ("<f", 4), "D": ("<d", 8), "L": ("<q", 8)}
 # Nodes whose contents are needed (others are skipped whole, by their end offset)
-_KEEP = {"Objects", "Geometry", "Model", "Vertices", "PolygonVertexIndex", "Properties70", "P", "Connections", "C"}
+_KEEP = {"GlobalSettings", "Objects", "Geometry", "Model", "Vertices", "PolygonVertexIndex", "Properties70", "P", "Connections", "C"}
 
 
 class FbxError(Exception):
@@ -41,7 +43,9 @@ class _Node:
         return next((c for c in self.children if c.name == name), None)
 
 
-def _read_tree(data: memoryview) -> list[_Node]:
+def _read_tree(data: memoryview, keep: Optional[set[str]] = None) -> list[_Node]:
+    """The file's nodes; of those not named in keep (default: what geometry needs), only their names."""
+    keep = _KEEP if keep is None else keep
     if bytes(data[:21]) != MAGIC:
         raise FbxError("not a binary FBX")
     version = struct.unpack_from("<I", data, 23)[0]
@@ -83,7 +87,7 @@ def _read_tree(data: memoryview) -> list[_Node]:
         name_len = data[offset + head.size]
         name = bytes(data[offset + head.size + 1: offset + head.size + 1 + name_len]).decode("ascii", "replace")
         props_at = offset + head.size + 1 + name_len
-        if name not in _KEEP:
+        if name not in keep:
             return _Node(name, []), end  # (skipped, arrays and all)
         node = _Node(name, read_props(props_at, count))
         at = props_at + props_size
@@ -161,9 +165,18 @@ def triangulate(polygon_vertex_index: np.ndarray) -> np.ndarray:
     return triangles
 
 
-def read_fbx(path: Path) -> tuple[np.ndarray, np.ndarray, int]:
+def _unit_cm(settings: Optional[_Node]) -> Optional[float]:
+    """How many centimetres one of the file's units is (GlobalSettings' UnitScaleFactor)."""
+    block = settings.child("Properties70") if settings is not None else None
+    for p in block.children if block is not None else []:
+        if len(p.props) >= 5 and p.props[0] == "UnitScaleFactor" and isinstance(p.props[4], (int, float)) and p.props[4] > 0:
+            return float(p.props[4])
+    return None
+
+
+def read_fbx(path: Path, stats: Optional[ModelStats] = None) -> tuple[np.ndarray, np.ndarray, int]:
     """(vertices N x 3 float32, triangles M x 3 uint32, how many meshes) from a binary FBX.
-    Raises FbxError if it isn't one this reader can read."""
+    stats, if given, is told what the file holds. Raises FbxError if it isn't one this reader can read."""
     from fbxloader.utils import get_transform
 
     with open(path, "rb") as file:
@@ -203,10 +216,15 @@ def read_fbx(path: Path) -> tuple[np.ndarray, np.ndarray, int]:
         if model_id is None:
             continue
         vertices = np.asarray(vertices_node.props[0], dtype=np.float64).reshape(-1, 3)
-        faces = triangulate(index_node.props[0])
+        polygon_vertex_index = index_node.props[0]
+        faces = triangulate(polygon_vertex_index)
         vertices_node.props, index_node.props = [], []  # (let each array go once it's used: a sculpt's are hundreds of MB)
         if len(vertices) == 0 or len(faces) == 0 or int(faces.max()) >= len(vertices):
             continue
+        if stats is not None:
+            stats.vertices += len(vertices)
+            stats.add_fbx_polygons(polygon_vertex_index)
+        del polygon_vertex_index
         matrix = world(model_id) @ get_transform(_properties(models[model_id])["geometric"])
         placed = vertices.astype(np.float32)
         del vertices
@@ -218,6 +236,8 @@ def read_fbx(path: Path) -> tuple[np.ndarray, np.ndarray, int]:
         offset += len(placed)
     if not vertex_parts:
         raise FbxError("no meshes")
+    if stats is not None:
+        stats.unit_cm = _unit_cm(tree.get("GlobalSettings"))
     if len(vertex_parts) == 1:
         return vertex_parts[0], face_parts[0], 1
     count = len(vertex_parts)

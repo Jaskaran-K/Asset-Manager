@@ -43,8 +43,20 @@ def _node(name: str, props: list, children: list, at: int, wide: bool) -> bytes:
     return head.pack(end, len(props), len(prop_bytes)) + bytes([len(name)]) + name.encode() + prop_bytes + body
 
 
-def write_fbx(path, meshes, version=7400, compress=True):
-    """meshes: [(id, vertices N x 3, polygons [[i, j, k, ...]], translation, parent id or 0)]."""
+def _uv_layer(number, layer, compress):
+    name, uvs, index, mapping, reference = layer
+    children = [("Name", [name], []), ("MappingInformationType", [mapping], []), ("ReferenceInformationType", [reference], []),
+                ("UV", [("d", uvs.reshape(-1), compress)], [])]
+    if index is not None:
+        children.append(("UVIndex", [("i", index, compress)], []))
+    return "LayerElementUV", [number], children
+
+
+def write_fbx(path, meshes, version=7400, compress=True, unit_scale=None, uv_sets=None, orphan_geometry=False):
+    """meshes: [(id, vertices N x 3, polygons [[i, j, k, ...]], translation, parent id or 0)].
+    unit_scale: the file's UnitScaleFactor (how many cm one of its units is), if it's to say.
+    uv_sets: {mesh id: [(name, UVs N x 2, UV index or None, mapping, reference)]}.
+    orphan_geometry: its meshes aren't connected to their models (not in the scene)."""
     wide = version >= 7500
     objects, connections = [], []
     for mesh_id, vertices, polygons, translation, parent in meshes:
@@ -54,13 +66,16 @@ def write_fbx(path, meshes, version=7400, compress=True):
         objects.append(("Geometry", [mesh_id + 1, "Geometry::m\x00\x01Geometry", "Mesh"], [
             ("Vertices", [("d", np.asarray(vertices, dtype=float).reshape(-1), compress)], []),
             ("PolygonVertexIndex", [("i", np.asarray(index), compress)], []),
+            *[_uv_layer(number, layer, compress) for number, layer in enumerate((uv_sets or {}).get(mesh_id, []))],
         ]))
         p70 = [("P", ["Lcl Translation", "Lcl Translation", "", "A", *map(float, translation)], [])]
         objects.append(("Model", [mesh_id, "Model::m\x00\x01Model", "Mesh"], [("Properties70", [], p70)]))
-        connections.append(("C", ["OO", mesh_id + 1, mesh_id], []))
+        if not orphan_geometry:
+            connections.append(("C", ["OO", mesh_id + 1, mesh_id], []))
         connections.append(("C", ["OO", mesh_id, parent], []))
     data = b"Kaydara FBX Binary  \x00\x1a\x00" + struct.pack("<I", version)
-    for name, children in (("Objects", objects), ("Connections", connections)):
+    settings = [("Properties70", [], [("P", ["UnitScaleFactor", "double", "Number", "", unit_scale], [])])] if unit_scale is not None else []
+    for name, children in (("GlobalSettings", settings), ("Objects", objects), ("Connections", connections)):
         data += _node(name, [], children, len(data), wide)
     data += b"\0" * (25 if wide else 13) + b"\0" * 176
     path.write_bytes(data)

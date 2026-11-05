@@ -9,7 +9,8 @@ are turned themselves with a yaw / pitch (light_directions).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Optional
 
 import numpy as np
 
@@ -27,17 +28,44 @@ class Material:
     rim: float = 0.0  # light along the silhouette
     bands: int = 0  # toon: this many flat steps of light
     normals: bool = False  # show the surface direction as colour (to check normals)
+    reflection_blur: float = 5.0  # under an HDRI: how blurred it reflects (core.environment.reflection_level)
+    roughness: float = 0.0  # metal: how far reflections soften toward the surface's own direction (with_roughness)
+    env_specular: Optional[float] = None  # under an HDRI: how strong its reflections are (None: as specular)
 
 
 MATERIALS: dict[str, Material] = {
     "matte": Material("Matte", "No shine: only the shape's light and shadow", diffuse=1.0),
-    "clay": Material("Clay", "Soft, like sculpting clay: light wraps round the forms", diffuse=0.95, wrap=0.5, specular=0.06, shininess=6.0, rim=0.06),
-    "phong": Material("Phong", "Classic shading with a soft highlight", diffuse=0.9, specular=0.45, shininess=24.0, phong=True, rim=0.12),
-    "glossy": Material("Glossy", "Shiny plastic or varnish: tight, bright highlights", diffuse=0.85, specular=0.9, shininess=90.0, rim=0.22),
-    "metallic": Material("Metallic", "Metal: the colour is in the highlights and reflections", diffuse=0.25, specular=1.0, shininess=60.0, metal=1.0, rim=0.2),
+    "clay": Material("Clay", "Soft, like sculpting clay: light wraps round the forms", diffuse=0.95, wrap=0.5, specular=0.06, shininess=6.0, rim=0.06, reflection_blur=6.0),
+    "phong": Material("Phong", "Classic shading with a soft highlight", diffuse=0.9, specular=0.45, shininess=24.0, phong=True, rim=0.12, reflection_blur=4.5),
+    "glossy": Material("Glossy", "Shiny plastic or varnish: tight, bright highlights", diffuse=0.85, specular=0.9, shininess=90.0, rim=0.22, reflection_blur=2.5),
+    "metallic": Material("Metallic", "Metal: the colour is in the highlights and reflections", diffuse=0.25, specular=1.0, shininess=60.0, metal=1.0, rim=0.2, reflection_blur=4.0),
     "toon": Material("Toon", "Flat steps of light, like a cartoon", diffuse=1.0, specular=0.35, shininess=40.0, bands=3),
     "normals": Material("Normals", "The surface direction as colour: to check the model's normals", normals=True),
 }
+
+
+DEFAULT_ROUGHNESS = 0.5  # metal: a satin finish, not chrome
+
+
+def with_roughness(material: Material, roughness: float) -> Material:
+    """Metal at this roughness (0 a mirror, 1 very soft): wider, dimmer highlights, blurrier
+    reflections and more of the broad light that rough metal scatters. Other materials stay as they are."""
+    if material.metal <= 0:
+        return material
+    r = max(0.0, min(1.0, roughness))
+    return replace(
+        material,
+        roughness=r,
+        shininess=6.0 + 300.0 * (1.0 - r) ** 3,
+        specular=0.2 + 0.8 * (1.0 - r) ** 2,  # (a wider highlight is a dimmer one, or rough metal would glow)
+        env_specular=1.0 - 0.45 * r,  # (a blurred panorama keeps its light by itself: this is a little less)
+        diffuse=0.08 + 0.42 * r,
+        rim=0.2 * (1.0 - r),
+        reflection_blur=0.5 + 7.5 * r ** 0.8,
+    )
+
+
+MATERIALS["metallic"] = with_roughness(MATERIALS["metallic"], DEFAULT_ROUGHNESS)
 
 
 @dataclass(frozen=True)
@@ -140,7 +168,8 @@ def shade(normals: np.ndarray, to_eye: np.ndarray, color: tuple[float, float, fl
     out = base * (ambient + diffuse) * material.diffuse + spec_color * spec * material.specular
     facing = np.maximum(np.sum(n * to_eye, axis=1, keepdims=True), 0.0)
     if material.metal > 0:
-        reflected = 2 * facing * n - to_eye
+        reflected = (2 * facing * n - to_eye) * (1 - material.roughness) + n * material.roughness
+        reflected /= np.maximum(np.linalg.norm(reflected, axis=1, keepdims=True), 1e-9)
         t = reflected[:, 1:2] * 0.5 + 0.5
         env = np.asarray(ENV_LOW) * (1 - t) + np.asarray(ENV_HIGH) * t
         out += base * env * 0.9 * material.metal

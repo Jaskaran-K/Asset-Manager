@@ -215,14 +215,19 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("pdf.contents", PDF, "Click in Contents / Pages", "Go to that chapter or page"),
 
     # 3D model viewport
-    Shortcut("viewer3d.orbit", MODEL, "Left-drag", "Turn the model (the lights, when Turn Lights is on)"),
-    Shortcut("viewer3d.light_drag", MODEL, "Shift+Left-drag", "Turn the lights round the model"),
+    Shortcut("viewer3d.orbit", MODEL, "Left-drag", "Turn the model (the lights or HDRI, when Turn Lights is on)"),
+    Shortcut("viewer3d.light_drag", MODEL, "Shift+Left-drag", "Turn the lights round the model (an HDRI: round the vertical)"),
     Shortcut("viewer3d.pan", MODEL, "Right-drag / Middle-drag", "Pan the camera"),
     Shortcut("viewer3d.zoom", MODEL, "Mouse wheel", "Zoom"),
     Shortcut("viewer3d.wireframe", MODEL, "W", "Cycle shaded / wireframe / both", "W"),
     Shortcut("viewer3d.grid", MODEL, "G", "Toggle the ground grid", "G"),
     Shortcut("viewer3d.reset", MODEL, "R", "Reset the camera", "R"),
     Shortcut("viewer3d.drag_lights", MODEL, "L", "Turn Lights on / off: whether dragging turns the lights or the model", "L"),
+    Shortcut("viewer3d.uv", MODEL, "U", "See the model's UV layout, or back to the model", "U"),
+    Shortcut("viewer3d.uv_pan", MODEL, "Drag (UV layout)", "Move the layout around"),
+    Shortcut("viewer3d.uv_zoom", MODEL, "Mouse wheel (UV layout)", "Zoom toward the pointer (R fits it to the window)"),
+    Shortcut("viewer3d.backdrop", MODEL, "B", "Under an HDRI: show it behind the model, or not", "B"),
+    Shortcut("viewer3d.hdri_pick", MODEL, "Right-click an HDR > Use as Viewer Lighting", "Light models with that HDRI (also: the Lighting list)"),
 
     # Image / texture viewer
     Shortcut("image.zoom", IMAGE, "Mouse wheel", "Zoom toward the cursor"),

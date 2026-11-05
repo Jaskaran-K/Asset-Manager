@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import apps, archives, crash_log
+from core import apps, archives, crash_log, environment
 from core.asset_filter import filter_assets
 from core.library_snapshot import load_snapshot
 from core.scanner import AssetItem
@@ -78,6 +78,7 @@ from core.settings import (
     is_scan_folder,
     set_archive_contents,
     set_found_apps,
+    set_model_view,
     set_scan_folders,
 )
 from core.search_query import ParsedQuery, parse_query
@@ -1183,6 +1184,7 @@ class MainWindow(QMainWindow):
             asset, self, tags=target.tags, edit_tags=target.edit_tags,
             navigate=navigate if row is not None and len(assets) > 1 else None, position=target.position,
             artbook=self.artbook_sender, model_viewed=self.thumbnail_manager.model_viewed,
+            hdri_assets=lambda: self.library.assets,
         )
         dialog.exec()
         # Files inside archives unpacked to be shown: their thumbnails can be made now (videos, big files)
@@ -1503,6 +1505,19 @@ class MainWindow(QMainWindow):
             self.list_grid.viewport().update()
         self.status_label.setText(message)
 
+    def _use_as_viewer_lighting(self, asset: AssetItem) -> None:
+        """Right-click an HDR image: models open under it from now on (renders and bakes can't light a scene)."""
+        key = str(asset.path)
+
+        def usable(_result) -> None:
+            set_model_view(hdri=key)
+            self.status_label.setText(f"3D models now open under {asset.name}. The Lighting list in the viewer changes it.")
+
+        def failed(message: str) -> None:
+            self.status_label.setText(message)
+
+        run_job(lambda: environment.check(key), usable, failed)
+
     def _show_context_menu(self, pos) -> None:
         """Display right-click context menu for selected asset."""
         index = self.list_grid.indexAt(pos)
@@ -1520,6 +1535,7 @@ class MainWindow(QMainWindow):
             send_files=self._send_files,
             open_in=lambda app: self._open_in(asset, app),
             import_board=lambda: self._open_board(asset, again=True),
+            use_as_lighting=lambda: self._use_as_viewer_lighting(asset),
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
         menu = build_asset_menu(self, asset, self._selected_assets(), marks, actions, self.artbook_sender)

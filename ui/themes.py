@@ -434,6 +434,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 /* Asset viewer */
 #headerBar { background: $surface; border-bottom: 1px solid $border; }
 #infoPanel { background: $sidebar_bg; border-left: 1px solid $border; }
+#infoPanelScroll, #infoPanelContents { background: transparent; }
 #bottomBar { background: $surface; border-top: 1px solid $border; }
 #viewerToolbar { background: $surface_alt; border-bottom: 1px solid $border; }
 #viewerTitle { color: $text_strong; }

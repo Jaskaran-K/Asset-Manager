@@ -15,7 +15,7 @@ import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import shiboken6
@@ -68,10 +68,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import alphas, app_icons, apps, archives
+from core import alphas, app_icons, apps, archives, environment
 from core.full_image import LoadedImage, load_full_image
 from core.model_loader import Mesh3D, load_3d_model
-from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions
+from core.model_uvs import UvLayout, read_uvs, tiles_text
+from core.obj_fast import LoadCancelled
+from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions, with_roughness
 from core.settings import ALPHA_PLANE_SIDES, TILE_GRIDS, get_model_view, set_model_view
 from core.scanner import AssetItem
 from core.tag_repository import Tag
@@ -79,6 +81,8 @@ from core.thumbnail_manager import load_app_file_picture
 from ui import file_actions, shortcuts
 from ui.archive_jobs import UnpackJob, unpack_in_background
 from ui.duotone import set_icon
+from ui.model_lighting import LightingControls, RoughnessBar
+from ui.uv_view import UvViewWidget
 from ui.pdf_viewer import PdfViewer
 from ui.tag_widgets import run_job, tag_chip_cloud
 from ui.video_player import VideoPlayer, control_icon
@@ -87,6 +91,8 @@ from ui.video_player import VideoPlayer, control_icon
 # ----------------------------------------------------------------------
 # 3D Model Viewport (Hardware-Accelerated OpenGL)
 # ----------------------------------------------------------------------
+_FIELD_OF_VIEW = 45.0  # degrees, top to bottom
+
 _MESH_VERT_SHADER = """#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -105,8 +111,26 @@ void main() {
 }
 """
 
+# What the model and the backdrop share under an HDRI. The panorama's look-ups and tone mapping:
+# textureLod always, since a seam in the panorama would otherwise show as a line of the blurriest mipmap.
+_ENV_GLSL = """
+uniform sampler2D uEnv;
+uniform mat3 uViewToEnv;
+uniform float uExposure;
+const float PI = 3.14159265;
+
+vec2 toEquirect(vec3 d) {
+    return vec2(atan(d.x, -d.z) / (2.0 * PI) + 0.5, acos(clamp(d.y, -1.0, 1.0)) / PI);
+}
+
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+"""
+
 # Lighting in view space (lights stay put while the model turns). The same sums as
-# core.model_look.shade, which renders thumbnails: keep the two alike.
+# core.model_look.shade, which renders thumbnails: keep the two alike. (An HDRI has its own
+# sums, and thumbnails don't use it.)
 _MESH_FRAG_SHADER = """#version 330 core
 in vec3 vNormal;
 in vec3 vViewPos;
@@ -129,8 +153,61 @@ uniform float uMetal;
 uniform float uRim;
 uniform float uBands;
 uniform float uShowNormals;
-
+uniform float uUseEnv;
+uniform vec3 uSH[9];
+uniform float uEnvLevel;
+uniform float uEnvSpread;
+uniform float uRoughness;
+%(environment)s
 out vec4 FragColor;
+
+vec3 irradiance(vec3 n) {
+    return uSH[0] * 0.282095 * 3.141593
+        + (uSH[1] * n.y + uSH[2] * n.z + uSH[3] * n.x) * 0.488603 * 2.094395
+        + (uSH[4] * n.x * n.y + uSH[5] * n.y * n.z + uSH[7] * n.x * n.z) * 1.092548 * 0.785398
+        + uSH[6] * 0.315392 * (3.0 * n.z * n.z - 1.0) * 0.785398
+        + uSH[8] * 0.546274 * (n.x * n.x - n.y * n.y) * 0.785398;
+}
+
+// Reflections: five looks round the mirror direction, as one look at a small mipmap shows its square pixels.
+vec3 blurredReflection(vec3 r) {
+    vec3 side = normalize(cross(r, abs(r.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 other = cross(r, side);
+    vec3 sum = textureLod(uEnv, toEquirect(r), uEnvLevel).rgb;
+    sum += textureLod(uEnv, toEquirect(normalize(r + side * uEnvSpread)), uEnvLevel).rgb;
+    sum += textureLod(uEnv, toEquirect(normalize(r - side * uEnvSpread)), uEnvLevel).rgb;
+    sum += textureLod(uEnv, toEquirect(normalize(r + other * uEnvSpread)), uEnvLevel).rgb;
+    sum += textureLod(uEnv, toEquirect(normalize(r - other * uEnvSpread)), uEnvLevel).rgb;
+    return sum / 5.0;
+}
+
+// Under an HDRI (core.environment): in linear light, with the panorama's soft light and its lights.
+// Highlights are in the reflections, which hold the sun too, so the lights only add their diffuse.
+vec3 environmentLook(vec3 n, vec3 v) {
+    vec3 base = pow(uColor, vec3(2.2));
+    vec3 light = max(irradiance(uViewToEnv * n) / PI, vec3(0.0));
+    float glints = 0.0;
+    for (int i = 0; i < %(lights)d; i++) {
+        if (i >= uLightCount) break;
+        vec3 l = normalize(uLightDir[i]);
+        float lit = dot(n, l);
+        light += uLightColor[i] * max((lit + uWrap) / (1.0 + uWrap), 0.0);
+        if (lit > 0.0 && pow(max(dot(n, normalize(l + v)), 0.0), uShininess) > 0.5) glints = 1.0;
+    }
+    float facing = max(dot(n, v), 0.0);
+    if (uBands > 0.5) {  // Toon: the same light, in flat steps, on the exposed brightness
+        float level = dot(light, vec3(0.2126, 0.7152, 0.0722)) * uExposure;
+        float stepped = max(floor(min(level, 1.0) * uBands + 0.5) / uBands, 0.5 / uBands);
+        vec3 tint = light / max(level / uExposure, 0.0001);  // (the light's colour, at brightness 1)
+        vec3 toon = aces(base * tint * stepped + glints * uSpecular);
+        return pow(toon, vec3(1.0 / 2.2)) * (facing < 0.22 ? 0.35 : 1.0);
+    }
+    vec3 reflected = blurredReflection(uViewToEnv * reflect(-v, n));
+    float head_on = 0.04 + 0.12 * uSpecular;  // (a little more than physical: a viewer should show what a material does)
+    float fresnel = head_on + (1.0 - head_on) * pow(1.0 - facing, 5.0);
+    vec3 color = base * light * uDiffuse + mix(vec3(fresnel), base, uMetal) * reflected * uSpecular;
+    return pow(aces(color * uExposure), vec3(1.0 / 2.2));
+}
 
 void main() {
     if (uUnlit > 0.5) {
@@ -144,6 +221,10 @@ void main() {
         return;
     }
     vec3 v = normalize(-vViewPos);
+    if (uUseEnv > 0.5) {
+        FragColor = vec4(environmentLook(n, v), 1.0);
+        return;
+    }
     float hemi = uBands > 0.5 ? 0.5 : n.y * 0.5 + 0.5;
     vec3 ambient = mix(uGround, uSky, hemi);
     vec3 diffuse = vec3(0.0);
@@ -166,7 +247,7 @@ void main() {
     vec3 color = uColor * (ambient + diffuse) * uDiffuse + specColor * spec * uSpecular;
     float facing = max(dot(n, v), 0.0);
     if (uMetal > 0.0) {
-        vec3 r = reflect(-v, n);
+        vec3 r = normalize(mix(reflect(-v, n), n, uRoughness));
         vec3 env = mix(uEnvLow, uEnvHigh, r.y * 0.5 + 0.5);
         color += uColor * env * 0.9 * uMetal;
     }
@@ -174,7 +255,29 @@ void main() {
     if (uBands > 0.5 && facing < 0.22) color *= 0.35;
     FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }
-""" % {"lights": MAX_LIGHTS}
+""" % {"lights": MAX_LIGHTS, "environment": _ENV_GLSL}
+
+# The HDRI behind everything: a triangle over the whole window, looked up by the view direction
+_BACKDROP_VERT_SHADER = """#version 330 core
+out vec2 vScreen;
+
+void main() {
+    vScreen = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+    gl_Position = vec4(vScreen, 1.0, 1.0);
+}
+"""
+
+_BACKDROP_FRAG_SHADER = """#version 330 core
+in vec2 vScreen;
+%(environment)s
+uniform vec2 uViewScale;
+out vec4 FragColor;
+
+void main() {
+    vec3 d = normalize(uViewToEnv * vec3(vScreen * uViewScale, -1.0));
+    FragColor = vec4(pow(aces(textureLod(uEnv, toEquirect(d), 0.0).rgb * uExposure), vec3(1.0 / 2.2)), 1.0);
+}
+""" % {"environment": _ENV_GLSL}
 
 _GRID_VERT_SHADER = """#version 330 core
 layout(location = 0) in vec3 aPos;
@@ -206,6 +309,8 @@ class Model3DViewportWidget(QOpenGLWidget):
     The mesh can come later (set_mesh): big models load on a worker thread meanwhile."""
 
     drag_lights_changed = Signal(bool)  # (L switches what dragging turns)
+    lighting_changed = Signal()  # an HDRI arrived or was dropped: the toolbar shows what's in use
+    backdrop_changed = Signal(bool)  # (B)
 
     def __init__(self, mesh: Optional[Mesh3D] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -225,10 +330,22 @@ class Model3DViewportWidget(QOpenGLWidget):
         self.color = QColor(look["color"])
         self.material_id: str = look["material"]
         self.lighting_id: str = look["lighting"]
-        self.light_yaw: float = 0.0  # the lights turned round the model (degrees)
+        self.roughness: float = look["metal_roughness"]
+        self.light_yaw: float = 0.0  # the lights (or the HDRI) turned round the model (degrees)
         self.light_pitch: float = 0.0
         self.drag_lights: bool = False  # left-drag turns the lights instead of the model
         self.status_text: str = ""  # shown instead of the model (e.g. "Loading...")
+        # An HDRI as the lighting (core.environment), instead of the preset self.lighting_id
+        self.environment: Optional[environment.Environment] = None
+        self.hdri_key: str = ""  # the HDRI in use or on its way
+        self.exposure_stops: float = look["hdri_exposure"]
+        self.show_backdrop: bool = look["hdri_backdrop"]
+        self.notice: str = ""  # a passing message over the model
+        self._hdri_token = 0
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.setInterval(6000)
+        self._notice_timer.timeout.connect(self._clear_notice)
 
         # Mouse interaction tracking
         self.last_mouse_pos: Optional[QPoint] = None
@@ -258,10 +375,16 @@ class Model3DViewportWidget(QOpenGLWidget):
         self.index_count: int = 0
         self.vertex_count: int = 0
         self.face_count: int = 0
+        self.backdrop_program: Optional[QOpenGLShaderProgram] = None
+        self.backdrop_vao: Optional[int] = None
+        self._env_texture: Optional[int] = None
+        self._env_dirty = False
         self._gl_ready = False
         self._needs_upload = False
         if mesh is not None:
             self.set_mesh(mesh)
+        if look["hdri"]:
+            self.use_hdri(look["hdri"], chosen=False)
 
     # ------------------ the model and its look ------------------
     def set_mesh(self, mesh: Mesh3D) -> None:
@@ -277,7 +400,7 @@ class Model3DViewportWidget(QOpenGLWidget):
         self.update()
 
     def material(self) -> Material:
-        return MATERIALS[self.material_id]
+        return with_roughness(MATERIALS[self.material_id], self.roughness)
 
     def lighting(self) -> Lighting:
         return LIGHTINGS[self.lighting_id]
@@ -296,11 +419,92 @@ class Model3DViewportWidget(QOpenGLWidget):
             set_model_view(material=material_id)
             self.update()
 
+    def set_roughness(self, roughness: float, remember: bool = True) -> None:
+        """Metal's roughness (remember: as for set_color)."""
+        self.roughness = roughness
+        if remember:
+            set_model_view(metal_roughness=roughness)
+        self.update()
+
     def set_lighting(self, lighting_id: str) -> None:
+        """A preset: any HDRI goes (or stops being waited for)."""
         if lighting_id in LIGHTINGS:
             self.lighting_id = lighting_id
-            set_model_view(lighting=lighting_id)
+            self._hdri_token += 1
+            had_hdri = bool(self.hdri_key)
+            if self.environment is not None:  # (how it was turned means nothing to the preset's lights)
+                self.light_yaw = self.light_pitch = 0.0
+            self.hdri_key, self.environment = "", None
+            self._env_dirty = self._env_texture is not None  # (let its texture go)
+            set_model_view(lighting=lighting_id, hdri="")
+            self._clear_notice()
+            if had_hdri:
+                self.lighting_changed.emit()
             self.update()
+
+    def use_hdri(self, key: str, chosen: bool = True) -> None:
+        """Light the model with this panorama (a path; read on a worker thread, once). The current
+        lighting stays until it's ready. chosen: picked now, so it's remembered once it has worked
+        (else it's the remembered one: left as it is if it can't be read, as on a drive that's
+        unplugged for now)."""
+        self._hdri_token += 1
+        token = self._hdri_token
+        self.hdri_key = key
+        self.set_notice(f"Loading {environment.display_name(key)}...", lasting=True)
+
+        def done(loaded: environment.Environment) -> None:
+            if token != self._hdri_token or not shiboken6.isValid(self):
+                return
+            self.environment = loaded
+            self._env_dirty = True
+            self.light_yaw = self._key_light_yaw()
+            if chosen:
+                set_model_view(hdri=key)
+            self._clear_notice()
+            self.lighting_changed.emit()
+            self.update()
+
+        def failed(message: str) -> None:
+            if token != self._hdri_token or not shiboken6.isValid(self):
+                return
+            self.hdri_key = self.environment.key if self.environment is not None else ""
+            self.set_notice(f"That HDRI can't be used: {message}")
+            self.lighting_changed.emit()
+
+        run_job(lambda: environment.load(key), done, failed)
+
+    def set_exposure(self, stops: float, remember: bool = True) -> None:
+        self.exposure_stops = stops
+        if remember:
+            set_model_view(hdri_exposure=stops)
+        self.update()
+
+    def set_backdrop(self, on: bool) -> None:
+        if on != self.show_backdrop:
+            self.show_backdrop = on
+            set_model_view(hdri_backdrop=on)
+            self.backdrop_changed.emit(on)
+            self.update()
+
+    def set_notice(self, text: str, lasting: bool = False) -> None:
+        self.notice = text
+        self._notice_timer.stop()
+        if not lasting:
+            self._notice_timer.start()
+        self.update()
+
+    def _clear_notice(self) -> None:
+        self.notice = ""
+        self._notice_timer.stop()
+        self.update()
+
+    def _view_to_env(self) -> np.ndarray:
+        return environment.view_to_env(self.rot_x, self.rot_y, self.light_yaw)
+
+    def _key_light_yaw(self) -> float:
+        """How an HDRI starts out turned: as its strongest light comes to the front right of what's
+        seen now. Where it happens to sit in the panorama, it could be behind the model."""
+        return environment.key_light_yaw(self.environment, self.rot_y)
 
     def set_drag_lights(self, on: bool) -> None:
         if on != self.drag_lights:
@@ -310,6 +514,8 @@ class Model3DViewportWidget(QOpenGLWidget):
 
     def reset_lights(self) -> None:
         self.light_yaw = self.light_pitch = 0.0
+        if self.environment is not None:
+            self.light_yaw = self._key_light_yaw()
         self.update()
 
     def set_render_mode(self, mode: str) -> None:
@@ -341,6 +547,8 @@ class Model3DViewportWidget(QOpenGLWidget):
 
     def _on_turntable_tick(self) -> None:
         self.rot_y = (self.rot_y + 0.8) % 360.0
+        if self.environment is not None:  # (the model spins in a still HDRI: it's the camera that orbits)
+            self.light_yaw = (self.light_yaw - 0.8) % 360.0
         self.update()
 
     # ------------------ Mouse & Keyboard Controls ------------------
@@ -358,7 +566,8 @@ class Model3DViewportWidget(QOpenGLWidget):
             if event.buttons() & Qt.MouseButton.LeftButton:
                 if self._turning_lights:
                     self.light_yaw = (self.light_yaw + dx * 0.5) % 360.0
-                    self.light_pitch = max(-85.0, min(85.0, self.light_pitch + dy * 0.5))  # (drag up: the light goes up)
+                    if self.environment is None:  # (an HDRI only turns round the vertical: its horizon stays level)
+                        self.light_pitch = max(-85.0, min(85.0, self.light_pitch + dy * 0.5))  # (drag up: the light goes up)
                 else:
                     # Orbit rotation
                     self.rot_y += dx * 0.5
@@ -405,6 +614,8 @@ class Model3DViewportWidget(QOpenGLWidget):
             self.reset_camera()
         elif shortcuts.matches("viewer3d.drag_lights", event):
             self.set_drag_lights(not self.drag_lights)
+        elif shortcuts.matches("viewer3d.backdrop", event) and self.environment is not None:
+            self.set_backdrop(not self.show_backdrop)
         else:
             super().keyPressEvent(event)
 
@@ -423,8 +634,17 @@ class Model3DViewportWidget(QOpenGLWidget):
         self._uniforms = {
             name: self.mesh_program.uniformLocation(name)
             for name in ("uUnlit", "uLightCount", "uLightDir", "uLightColor", "uSky", "uGround", "uEnvLow", "uEnvHigh", "uDiffuse", "uWrap",
-                         "uSpecular", "uShininess", "uPhong", "uMetal", "uRim", "uBands", "uShowNormals")
+                         "uSpecular", "uShininess", "uPhong", "uMetal", "uRim", "uBands", "uShowNormals",
+                         "uUseEnv", "uEnv", "uSH", "uViewToEnv", "uExposure", "uEnvLevel", "uEnvSpread", "uRoughness")
         }
+
+        self.backdrop_program = QOpenGLShaderProgram(self)
+        self.backdrop_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, _BACKDROP_VERT_SHADER)
+        self.backdrop_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Fragment, _BACKDROP_FRAG_SHADER)
+        self.backdrop_program.link()
+        self.backdrop_vao = GL.glGenVertexArrays(1)  # (empty: the triangle comes from gl_VertexID)
+        self._env_texture = None  # (it went with the old context, if there was one)
+        self._env_dirty = self.environment is not None
 
         self.grid_program = QOpenGLShaderProgram(self)
         self.grid_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, _GRID_VERT_SHADER)
@@ -562,18 +782,85 @@ class Model3DViewportWidget(QOpenGLWidget):
     def resizeGL(self, w: int, h: int) -> None:
         GL.glViewport(0, 0, w, h)
 
+    def _upload_environment(self) -> None:
+        """The panorama to the GPU, with mipmaps for blurred reflections. Half floats, read straight
+        from the array, as its pixels may be asked for again in a new context."""
+        self._env_dirty = False
+        if self._env_texture is not None:
+            GL.glDeleteTextures(1, [self._env_texture])
+            self._env_texture = None
+        if self.environment is None:
+            return
+        pixels = self.environment.pixels
+        self._env_texture = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._env_texture)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB16F, pixels.shape[1], pixels.shape[0], 0, GL.GL_RGB, GL.GL_HALF_FLOAT,
+                        pixels.ctypes.data_as(ctypes.c_void_p))
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 4)
+        GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_REPEAT)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+
+    def _env_ready(self) -> bool:
+        return self.environment is not None and self._env_texture is not None
+
+    def _set_env_uniforms(self, program: QOpenGLShaderProgram, uniforms: dict[str, int]) -> None:
+        """What the model and the backdrop share: the panorama, how it's turned, the exposure."""
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._env_texture)
+        GL.glUniform1i(uniforms["uEnv"], 0)
+        GL.glUniformMatrix3fv(uniforms["uViewToEnv"], 1, GL.GL_TRUE, self._view_to_env().astype(np.float32))
+        GL.glUniform1f(uniforms["uExposure"], self.environment.exposure * 2.0 ** self.exposure_stops)
+
+    def _draw_backdrop(self, aspect: float) -> None:
+        """The HDRI behind everything else (not in the depth buffer, so anything draws over it)."""
+        program = self.backdrop_program
+        program.bind()
+        uniforms = {name: program.uniformLocation(name) for name in ("uEnv", "uViewToEnv", "uExposure", "uViewScale")}
+        self._set_env_uniforms(program, uniforms)
+        half = math.tan(math.radians(_FIELD_OF_VIEW / 2))
+        GL.glUniform2f(uniforms["uViewScale"], half * aspect, half)
+        GL.glDepthMask(GL.GL_FALSE)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glBindVertexArray(self.backdrop_vao)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
+        GL.glBindVertexArray(0)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glDepthMask(GL.GL_TRUE)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        program.release()
+
     def _set_look_uniforms(self, unlit: bool) -> None:
         """The material and lights for the next draw (or flat, unlit colour for lines and points)."""
         u = self._uniforms
         GL.glUniform1f(u["uUnlit"], 1.0 if unlit else 0.0)
         if unlit:
             return
-        material, lighting = self.material(), self.lighting()
+        material = self.material()
         dirs = np.zeros((MAX_LIGHTS, 3), dtype=np.float32)
         colors = np.zeros((MAX_LIGHTS, 3), dtype=np.float32)
-        count = len(lighting.lights)
-        dirs[:count] = light_directions(lighting, self.light_yaw, self.light_pitch)
-        colors[:count] = [light.color for light in lighting.lights]
+        use_env = self._env_ready()
+        GL.glUniform1f(u["uUseEnv"], 1.0 if use_env else 0.0)
+        lighting = self.lighting()
+        if use_env:
+            env = self.environment
+            count = len(env.lights)
+            if count:
+                dirs[:count] = np.array([light.direction for light in env.lights]) @ self._view_to_env()  # (to view space)
+                colors[:count] = [light.color for light in env.lights]
+            self._set_env_uniforms(self.mesh_program, u)
+            GL.glUniform3fv(u["uSH"], 9, env.harmonics)
+            level = environment.reflection_level(material.reflection_blur, env.pixels.shape[1])
+            GL.glUniform1f(u["uEnvLevel"], level)
+            GL.glUniform1f(u["uEnvSpread"], environment.reflection_spread(level, env.pixels.shape[1]))
+        else:
+            count = len(lighting.lights)
+            dirs[:count] = light_directions(lighting, self.light_yaw, self.light_pitch)
+            colors[:count] = [light.color for light in lighting.lights]
         GL.glUniform1i(u["uLightCount"], count)
         GL.glUniform3fv(u["uLightDir"], MAX_LIGHTS, dirs)
         GL.glUniform3fv(u["uLightColor"], MAX_LIGHTS, colors)
@@ -581,21 +868,26 @@ class Model3DViewportWidget(QOpenGLWidget):
         GL.glUniform3f(u["uGround"], *lighting.ground)
         GL.glUniform3f(u["uEnvLow"], *ENV_LOW)
         GL.glUniform3f(u["uEnvHigh"], *ENV_HIGH)
-        for name, value in (("uDiffuse", material.diffuse), ("uWrap", material.wrap), ("uSpecular", material.specular),
+        specular = material.env_specular if use_env and material.env_specular is not None else material.specular
+        for name, value in (("uDiffuse", material.diffuse), ("uWrap", material.wrap), ("uSpecular", specular),
                             ("uShininess", material.shininess), ("uPhong", float(material.phong)), ("uMetal", material.metal),
-                            ("uRim", material.rim), ("uBands", float(material.bands)), ("uShowNormals", float(material.normals))):
+                            ("uRim", material.rim), ("uBands", float(material.bands)), ("uShowNormals", float(material.normals)),
+                            ("uRoughness", material.roughness)):
             GL.glUniform1f(u[name], value)
 
     def paintGL(self) -> None:
         if self._needs_upload and self._gl_ready:
             self._upload_mesh_data()
+        if self._env_dirty and self._gl_ready:
+            self._upload_environment()
         # QPainter (used for the HUD overlay) resets GL state at the end of every
         # frame, so depth testing and blending must be re-applied before each draw.
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glDepthFunc(GL.GL_LEQUAL)
         GL.glDepthMask(GL.GL_TRUE)
         GL.glEnable(GL.GL_BLEND)
-        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        # (the window's own alpha stays solid: Qt treats it as how see-through the pixel is)
+        GL.glBlendFuncSeparate(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA, GL.GL_ONE, GL.GL_ONE_MINUS_SRC_ALPHA)
         GL.glDisable(GL.GL_CULL_FACE)
 
         GL.glClearColor(0.08, 0.09, 0.11, 1.0)
@@ -607,7 +899,7 @@ class Model3DViewportWidget(QOpenGLWidget):
 
         # Matrices
         proj = QMatrix4x4()
-        proj.perspective(45.0, aspect, 0.05, 100.0)
+        proj.perspective(_FIELD_OF_VIEW, aspect, 0.05, 100.0)
 
         view = QMatrix4x4()
         cam_dist = 3.2 / max(self.zoom, 0.05)
@@ -618,6 +910,9 @@ class Model3DViewportWidget(QOpenGLWidget):
         model = QMatrix4x4()
         model_view = view * model
         mvp = proj * model_view
+
+        if self.show_backdrop and self._env_ready() and self.backdrop_program is not None:
+            self._draw_backdrop(aspect)
 
         # 1. Draw Ground Plane Grid
         if self.show_grid and self.grid_vao is not None and self.grid_program is not None:
@@ -685,6 +980,7 @@ class Model3DViewportWidget(QOpenGLWidget):
                 GL.glDrawElements(GL.GL_TRIANGLES, self.index_count, GL.GL_UNSIGNED_INT, ctypes.c_void_p(0))
 
             GL.glBindVertexArray(0)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
             self.mesh_program.release()
 
         # 3. 2D HUD & Orientation Gizmo Overlay via QPainter
@@ -734,7 +1030,9 @@ class Model3DViewportWidget(QOpenGLWidget):
         painter.drawText(QPointF(gx + zx + 3, gy + zy + 3), "Z")
 
         # 2. Viewport Mode Badge in top-left
-        badge_text = f"{self.render_mode}  {self.face_count:,} tris"
+        stats = self.mesh.stats if self.mesh is not None else None
+        count_text = stats.summary() if stats is not None and stats.polygons > 0 else f"{self.face_count:,} tris"
+        badge_text = f"{self.render_mode}  {count_text}"
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(20, 22, 28, 190))
         badge_width = max(175, painter.fontMetrics().horizontalAdvance(badge_text) + 40)
@@ -742,6 +1040,8 @@ class Model3DViewportWidget(QOpenGLWidget):
         painter.setPen(QColor(209, 213, 219))
         painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
         painter.drawText(QRectF(12, 12, badge_width, 26), Qt.AlignmentFlag.AlignCenter, badge_text)
+        if self.notice:  # (an HDRI on its way, or why it can't be used)
+            painter.drawText(QRectF(14, 42, w - 90, 40), Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, self.notice)
 
         # 3. The key light's direction, top-right: a dot on a disc (hollow when it's behind)
         self._draw_light_dial(painter, QPointF(w - 40.0, 40.0), 22.0)
@@ -749,7 +1049,8 @@ class Model3DViewportWidget(QOpenGLWidget):
         # 4. How to move it, bottom-right
         painter.setPen(QColor(156, 163, 175, 170))
         painter.setFont(QFont("Segoe UI", 8))
-        hint = "Drag: turn   Shift+drag: lights   Right-drag: pan   Scroll: zoom"
+        turned = "HDRI" if self.environment is not None else "lights"
+        hint = f"Drag: turn   Shift+drag: {turned}   Right-drag: pan   Scroll: zoom"
         painter.drawText(QRectF(0, h - 26, w - 12, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, hint)
         painter.end()
 
@@ -758,15 +1059,26 @@ class Model3DViewportWidget(QOpenGLWidget):
         painter.setPen(QPen(QColor(209, 213, 219, 200 if turning else 110), 1.2))
         painter.setBrush(QColor(20, 22, 28, 190))
         painter.drawEllipse(center, radius, radius)
-        x, y, z = light_directions(self.lighting(), self.light_yaw, self.light_pitch)[0]
-        dot = QPointF(center.x() + x * radius * 0.8, center.y() - y * radius * 0.8)
-        painter.setPen(QPen(QColor(253, 224, 71), 1.5))
-        painter.setBrush(QColor(253, 224, 71) if z >= 0 else Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(dot, 4.0, 4.0)
+        key = self._key_light_direction()
+        if key is not None:  # (a soft, even HDRI has no light to point at)
+            x, y, z = key
+            dot = QPointF(center.x() + x * radius * 0.8, center.y() - y * radius * 0.8)
+            painter.setPen(QPen(QColor(253, 224, 71), 1.5))
+            painter.setBrush(QColor(253, 224, 71) if z >= 0 else Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(dot, 4.0, 4.0)
         if turning:
             painter.setPen(QColor(209, 213, 219))
             painter.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
-            painter.drawText(QRectF(center.x() - 60, center.y() + radius + 2, 120, 16), Qt.AlignmentFlag.AlignCenter, "Lights")
+            label = "HDRI" if self.environment is not None else "Lights"
+            painter.drawText(QRectF(center.x() - 60, center.y() + radius + 2, 120, 16), Qt.AlignmentFlag.AlignCenter, label)
+
+    def _key_light_direction(self) -> Optional[np.ndarray]:
+        """The strongest light's direction in view space."""
+        if self.environment is None:
+            return light_directions(self.lighting(), self.light_yaw, self.light_pitch)[0]
+        if not self.environment.lights:
+            return None
+        return np.array(self.environment.lights[0].direction) @ self._view_to_env()
 
 
 def _swatch_icon(color: QColor) -> QIcon:
@@ -995,6 +1307,7 @@ class AssetViewerDialog(QDialog):
         position: str = "",
         artbook=None,
         model_viewed: Optional[Callable[[AssetItem, Mesh3D], None]] = None,
+        hdri_assets: Optional[Callable[[], Sequence[AssetItem]]] = None,
     ):
         """tags: the asset's tags to show (None hides the section).
         edit_tags: opens the tagging dialog; returns the updated tags, or None if nothing changed.
@@ -1002,7 +1315,8 @@ class AssetViewerDialog(QDialog):
         it enables the < > buttons and Page Up / Page Down. position: e.g. "3 of 120".
         artbook: a ui.asset_menu.ArtbookSender (fill_artbook_menu, send_image_to_artbook): a PDF's pages can be
         sent to the Artbook (None: they can't). model_viewed(asset, mesh): a 3D model was loaded
-        (the grid renders its picture from it; its arrays are let go after the call)."""
+        (the grid renders its picture from it; its arrays are let go after the call).
+        hdri_assets: the library's files, to offer its HDRIs as lighting."""
         super().__init__(parent)
         self.asset = asset
         self.tags = tags
@@ -1011,6 +1325,7 @@ class AssetViewerDialog(QDialog):
         self._position = position
         self._artbook = artbook
         self._model_viewed = model_viewed
+        self._hdri_assets = hdri_assets
         self.video_player: Optional[VideoPlayer] = None  # at most one, owned by this dialog
         self.pdf_viewer: Optional[PdfViewer] = None  # (saves where you were before it goes)
         self._file: Optional[Path] = None  # a file inside an archive: its unpacked copy, once unpacked
@@ -1037,6 +1352,7 @@ class AssetViewerDialog(QDialog):
     def show_target(self, target: ViewerTarget) -> None:
         """Switch to another file, keeping the window (and full screen) as it is."""
         self._cancel_load()
+        self._cancel_uvs()
         if self.video_player is not None:
             self.video_player.set_fullscreen(False)
             self.video_player.stop()
@@ -1167,6 +1483,7 @@ class AssetViewerDialog(QDialog):
             "Location": str(self.asset.path.parent),
         }
         self.btn_tile: Optional[QPushButton] = None  # (an image's tools: _add_image_tools)
+        self.btn_uv: Optional[QPushButton] = None  # (a model's UVs: _add_uv_controls)
         self._btn_open_app = self._app_status = None
         member = self.asset.archive
         if member is not None:
@@ -1200,8 +1517,10 @@ class AssetViewerDialog(QDialog):
             viewport.set_status(f"Loading {self.asset.name}...")
             self.viewport = viewport
             self._load_model(viewport)
-            layout.addWidget(self._build_model_toolbar(viewport))
-            layout.addWidget(viewport, 1)
+            self._model_stack = QStackedWidget()  # (the model, and its UVs once they're asked for)
+            self._model_stack.addWidget(viewport)
+            layout.addWidget(self._build_model_toolbar(viewport, has_uvs=True))
+            layout.addWidget(self._model_stack, 1)
 
         # Case B: Texture / Image Viewer (decoded on a worker thread: a big one takes seconds)
         elif self.asset.is_texture:
@@ -1340,13 +1659,19 @@ class AssetViewerDialog(QDialog):
         old.deleteLater()
         self._splitter.setSizes(sizes)
 
-    def _build_model_toolbar(self, viewport: Model3DViewportWidget) -> QWidget:
-        """Shading, material, colour, lighting, and what dragging turns."""
+    def _build_model_toolbar(self, viewport: Model3DViewportWidget, has_uvs: bool = False) -> QWidget:
+        """Shading, material, colour, lighting, what dragging turns, and (a model from a file) its UVs."""
         v_toolbar = QWidget()
         v_toolbar.setObjectName("viewerToolbar")
-        tb_layout = QHBoxLayout(v_toolbar)
-        tb_layout.setContentsMargins(8, 4, 8, 4)
+        rows = QVBoxLayout(v_toolbar)
+        rows.setContentsMargins(8, 4, 8, 4)
+        rows.setSpacing(4)
+        tb_layout = QHBoxLayout()
         tb_layout.setSpacing(8)
+        rows.addLayout(tb_layout)
+        tools = QHBoxLayout()  # (a second row: one is too wide for the window, and squeezes the details beside it)
+        tools.setSpacing(8)
+        rows.addLayout(tools)
 
         cb_mode = QComboBox()
         cb_mode.addItems(["Shaded", "Wireframe", "Shaded + Wireframe", "Vertices"])
@@ -1360,7 +1685,6 @@ class AssetViewerDialog(QDialog):
             self.cmb_material.setItemData(self.cmb_material.count() - 1, material.tip, Qt.ItemDataRole.ToolTipRole)
         self.cmb_material.setCurrentIndex(self.cmb_material.findData(viewport.material_id))
         self.cmb_material.setToolTip("The material: how the surface takes the light")
-        self.cmb_material.currentIndexChanged.connect(lambda _i: viewport.set_material(self.cmb_material.currentData()))
         tb_layout.addWidget(self.cmb_material)
 
         self.btn_model_color = QPushButton()
@@ -1371,19 +1695,15 @@ class AssetViewerDialog(QDialog):
         tb_layout.addWidget(self.btn_model_color)
 
         self.cmb_lighting = QComboBox()
-        for lighting_id, lighting in LIGHTINGS.items():
-            self.cmb_lighting.addItem(lighting.label, lighting_id)
-            self.cmb_lighting.setItemData(self.cmb_lighting.count() - 1, lighting.tip, Qt.ItemDataRole.ToolTipRole)
-        self.cmb_lighting.setCurrentIndex(self.cmb_lighting.findData(viewport.lighting_id))
-        self.cmb_lighting.setToolTip("The lighting set-up")
-        self.cmb_lighting.currentIndexChanged.connect(lambda _i: viewport.set_lighting(self.cmb_lighting.currentData()))
+        self._look_details = QWidget(v_toolbar)  # (what applies to the look now: none of it to UVs)
+        self.lighting_controls = LightingControls(viewport, self.cmb_lighting, self._look_details, self._hdri_assets)
         tb_layout.addWidget(self.cmb_lighting)
 
         self.btn_drag_lights = QPushButton("Turn Lights")
         set_icon(self.btn_drag_lights, "light")
         self.btn_drag_lights.setCheckable(True)
         self.btn_drag_lights.setToolTip(
-            "On: dragging turns the lights round the model. Off: it turns the model (L; or hold Shift while dragging)"
+            "On: dragging turns the lights or the HDRI round the model. Off: it turns the model (L; or hold Shift while dragging)"
         )
         self.btn_drag_lights.toggled.connect(viewport.set_drag_lights)
         viewport.drag_lights_changed.connect(self.btn_drag_lights.setChecked)
@@ -1408,16 +1728,126 @@ class AssetViewerDialog(QDialog):
             set_icon(btn_turntable, "pause" if checked else "play")
 
         btn_turntable.toggled.connect(on_turntable_toggled)
-        tb_layout.addWidget(btn_turntable)
+        tb_layout.addStretch(1)
+        tools.addWidget(btn_turntable)
 
         btn_reset = QPushButton("Reset View")
         set_icon(btn_reset, "refresh")
         btn_reset.setToolTip("Reset the camera and the lights (R resets the camera)")
         btn_reset.clicked.connect(viewport.reset_camera)
         btn_reset.clicked.connect(viewport.reset_lights)
-        tb_layout.addWidget(btn_reset)
-        tb_layout.addStretch(1)
+        tools.addWidget(btn_reset)
+
+        details = QHBoxLayout(self._look_details)
+        details.setContentsMargins(8, 0, 0, 0)
+        details.setSpacing(16)
+        self.roughness_bar = RoughnessBar(viewport, self._look_details)  # (shows on metal)
+        details.addWidget(self.roughness_bar)
+        details.addWidget(self.lighting_controls.bar)  # (shows while an HDRI is in use)
+        tools.addWidget(self._look_details)
+        tools.addStretch(1)
+        material_combo = self.cmb_material
+
+        def material_picked(_index: int) -> None:
+            viewport.set_material(material_combo.currentData())
+            self.roughness_bar.show_for_material()
+
+        material_combo.currentIndexChanged.connect(material_picked)
+        self.roughness_bar.show_for_material()
+
+        self.btn_uv = None
+        if has_uvs:
+            self._add_uv_controls(tools, btn_reset, v_toolbar,
+                                  [cb_mode, material_combo, self.btn_model_color, self.cmb_lighting, self.btn_drag_lights, btn_grid, btn_turntable])
         return v_toolbar
+
+    # ------------------------------------------------------------------
+    # A model's UVs (core.model_uvs): read the first time they're asked for
+    # ------------------------------------------------------------------
+    def _add_uv_controls(self, row: QHBoxLayout, btn_reset: QPushButton, toolbar: QWidget, model_only: list[QWidget]) -> None:
+        self.uv_view: Optional[UvViewWidget] = None
+        self._uv_stop: Optional[threading.Event] = None
+        self._uv_set_names: list[str] = []
+        self._model_only_controls = model_only
+        self.btn_uv = QPushButton("UV")
+        set_icon(self.btn_uv, "uv")
+        self.btn_uv.setCheckable(True)
+        self.btn_uv.setToolTip("See the model's UV layout: its polygons flat, with the UDIM tiles they're in (U)")
+        self.btn_uv.toggled.connect(self._show_uvs)
+        row.insertWidget(0, self.btn_uv)
+        self.cmb_uv_set = QComboBox(toolbar)
+        self.cmb_uv_set.setToolTip("Which of the model's UV sets to show")
+        self.cmb_uv_set.hide()
+        self.cmb_uv_set.activated.connect(self._read_uvs)
+        row.insertWidget(row.count() - 1, self.cmb_uv_set)  # (before the stretch)
+        btn_reset.clicked.connect(self._fit_uvs)
+
+    def _show_uvs(self, on: bool) -> None:
+        """Between the model and its UVs (read the first time)."""
+        for control in self._model_only_controls:
+            control.setEnabled(not on)
+        self._look_details.setVisible(not on)
+        if on:
+            if self.uv_view is None:
+                self.uv_view = UvViewWidget()
+                self._model_stack.addWidget(self.uv_view)
+                self._read_uvs(0)
+            self._model_stack.setCurrentWidget(self.uv_view)
+            self.uv_view.setFocus()
+        else:
+            self._model_stack.setCurrentWidget(self.viewport)
+            self.viewport.setFocus()
+        self.cmb_uv_set.setVisible(on and len(self._uv_set_names) > 1)
+
+    def _fit_uvs(self) -> None:
+        if self.uv_view is not None:
+            self.uv_view.fit()
+
+    def _cancel_uvs(self) -> None:
+        self._uv_token = getattr(self, "_uv_token", 0) + 1
+        stop = getattr(self, "_uv_stop", None)
+        if stop is not None:
+            stop.set()
+
+    def _read_uvs(self, set_index: int) -> None:
+        """Read the UV set on a worker thread; show it (and the tiles it's in) when it's ready."""
+        self._cancel_uvs()
+        token, view, path = self._uv_token, self.uv_view, self._file_path()
+        stop = self._uv_stop = threading.Event()
+        view.set_status("Reading the UVs...")
+
+        def done(layout: Optional[UvLayout]) -> None:
+            if token != self._uv_token or not shiboken6.isValid(view):
+                return  # (another file is shown now, or the viewer was closed)
+            if layout is None:
+                view.set_status("This model has no UVs.")
+                return
+            view.set_layout(layout)
+            self._uv_loaded(layout)
+
+        def failed(message: str) -> None:
+            if token == self._uv_token and shiboken6.isValid(view):
+                view.set_status(f"The UVs couldn't be shown.\n{message}")
+
+        def work() -> Optional[UvLayout]:
+            try:
+                return read_uvs(path, set_index, stop.is_set)
+            except LoadCancelled:
+                return None  # (nobody wants them any more: done() sees the token has moved on)
+
+        run_job(work, done, failed)
+
+    def _uv_loaded(self, layout: UvLayout) -> None:
+        self._metadata["UV Tiles"] = tiles_text(layout)
+        self._uv_set_names = layout.set_names
+        combo = self.cmb_uv_set
+        if len(layout.set_names) > 1:
+            self._metadata["UV Set"] = f"{layout.set_names[layout.set_index]} ({layout.set_index + 1} of {len(layout.set_names)})"
+            combo.clear()
+            combo.addItems([f"{number + 1}: {name}" for number, name in enumerate(layout.set_names)])  # (sets can share a name)
+            combo.setCurrentIndex(layout.set_index)
+        combo.setVisible(len(layout.set_names) > 1 and self.btn_uv.isChecked())
+        self._refresh_inspector()
 
     # ------------------------------------------------------------------
     # Images: Tile, and an alpha's 3D surface (core.alphas)
@@ -1595,9 +2025,22 @@ class AssetViewerDialog(QDialog):
         """Construct sidebar listing metadata details."""
         panel = QWidget()
         panel.setObjectName("infoPanel")
-        layout = QVBoxLayout(panel)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # (it scrolls: a model's details and the file's tags are taller than a small window)
+        scroll = QScrollArea()
+        scroll.setObjectName("infoPanelScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.viewport().setAutoFillBackground(False)
+        contents = QWidget()
+        contents.setObjectName("infoPanelContents")
+        layout = QVBoxLayout(contents)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
+        scroll.setWidget(contents)
+        outer.addWidget(scroll)
 
         header = QLabel("METADATA INSPECTOR")
         header.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -1749,6 +2192,8 @@ class AssetViewerDialog(QDialog):
                 self._leave_fullscreen()
         elif shortcuts.matches("viewer.open_app", event) and self._btn_open_app is not None:
             self._btn_open_app.click()
+        elif shortcuts.matches("viewer3d.uv", event) and self.btn_uv is not None:
+            self.btn_uv.toggle()
         else:
             super().keyPressEvent(event)
 
@@ -1767,6 +2212,7 @@ class AssetViewerDialog(QDialog):
     def done(self, result: int) -> None:
         """Stop playback and release the video file however the dialog closes."""
         self._cancel_load()  # (a model still being read stops)
+        self._cancel_uvs()
         if self.video_player is not None:
             self.video_player.stop()
         if self.pdf_viewer is not None:

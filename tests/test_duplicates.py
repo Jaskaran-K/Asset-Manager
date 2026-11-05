@@ -22,7 +22,8 @@ def lib(tmp_path):
     (root / "b" / "rock copy.png").write_bytes(big)
     (root / "b" / "rock again.png").write_bytes(big)
     # Same size and same first/last 64 KB, different middle: only the full hash tells them apart
-    (root / "a" / "sneaky.png").write_bytes(big[:150_000] + b"X" + big[150_001:])
+    # (the byte is flipped, not set: a set one matches the random one 1 time in 256, and the file's then no different)
+    (root / "a" / "sneaky.png").write_bytes(big[:150_000] + bytes([big[150_000] ^ 1]) + big[150_001:])
     (root / "a" / "tree.png").write_bytes(b"tree")
     (root / "b" / "tree2.png").write_bytes(b"tree")
     (root / "a" / "empty1.png").write_bytes(b"")

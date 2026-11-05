@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel
 
-from core.model_look import DEFAULT_COLOR
+from core.model_look import DEFAULT_COLOR, DEFAULT_ROUGHNESS
 from core.scanner import AssetItem
 from core.settings import get_model_view, set_model_view
 from tests.test_thumbnail_cache import CUBE_OBJ
@@ -64,7 +64,7 @@ def test_the_model_loads_in_the_background(qapp, tmp_path):
     assert pump(qapp, lambda: viewport.face_count == 12)
     assert viewport.status_text == "" and viewed == [("crate.obj", 12)]
     texts = {label.text() for label in dialog.inspector_panel.findChildren(QLabel)}
-    assert "VERTICES" in texts and "TRIANGLES / FACES" in texts  # (the model's details, once it's read)
+    assert {"VERTICES", "POLYGONS", "QUADS", "TRIANGLES", "N-GONS"} <= texts  # (the model's details, once it's read)
     close(qapp, dialog)
 
 
@@ -97,7 +97,8 @@ def test_colour_material_and_lighting_are_kept(qapp, tmp_path):
     qapp.processEvents()
     assert get_model_view() == {
         "color": "#ff8800", "material": "metallic", "lighting": "dramatic", "thumbnails": True,
-        "alpha_relief": True, "alpha_plane": 512, "tile": 2,
+        "alpha_relief": True, "alpha_plane": 512, "tile": 2, "hdri": "", "hdri_exposure": 0.0, "hdri_backdrop": False,
+        "metal_roughness": DEFAULT_ROUGHNESS,
     }
     close(qapp, dialog)
     again = open_viewer(qapp, model_asset(tmp_path))  # (the next model looks the same)
@@ -106,11 +107,15 @@ def test_colour_material_and_lighting_are_kept(qapp, tmp_path):
 
 
 def test_damaged_settings_fall_back(qapp):
-    set_model_view(color="red; drop", material="velvet", lighting=5, thumbnails="yes", alpha_relief=1, alpha_plane=700, tile=9)
+    set_model_view(color="red; drop", material="velvet", lighting=5, thumbnails="yes", alpha_relief=1, alpha_plane=700, tile=9,
+                   hdri=7, hdri_exposure=99, hdri_backdrop="yes", metal_roughness=4)
     assert get_model_view() == {
         "color": DEFAULT_COLOR, "material": "phong", "lighting": "studio", "thumbnails": True,
-        "alpha_relief": True, "alpha_plane": 512, "tile": 2,
+        "alpha_relief": True, "alpha_plane": 512, "tile": 2, "hdri": "", "hdri_exposure": 0.0, "hdri_backdrop": False,
+        "metal_roughness": DEFAULT_ROUGHNESS,
     }
+    set_model_view(hdri_exposure=True)
+    assert get_model_view()["hdri_exposure"] == 0.0  # (not a number, whatever Python says)
 
 
 def test_dragging_turns_the_model_or_the_lights(qapp, tmp_path):

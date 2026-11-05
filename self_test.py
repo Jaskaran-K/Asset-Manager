@@ -62,6 +62,28 @@ def run_self_test(log_path: Optional[str]) -> int:
                 raise RuntimeError("rendering a model's thumbnail failed")
             return ", ".join(results) + ", rendered thumbnail"
 
+    def check_viewer_lighting_and_uvs():
+        # HDRI lighting (a panorama read and turned into what the shader needs), and a model's UVs
+        import numpy as np
+        import trimesh
+        from core import environment
+        from core.model_uvs import read_uvs
+        pixels = np.full((256, 512, 3), 0.4, np.float32)
+        pixels[40:44, 100:104] = 5000.0
+        env = environment.build(pixels, "sky.hdr")
+        if not env.lights or env.pixels.dtype != np.float16:
+            raise RuntimeError("an HDRI's light wasn't found")
+        with tempfile.TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "quad.obj"
+            obj.write_text("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n", encoding="utf-8")
+            layout = read_uvs(obj)
+            if layout is None or layout.edge_count != 4 or layout.tiles != [1001]:
+                raise RuntimeError("reading an OBJ's UVs failed")
+            glb = Path(tmp) / "box.glb"
+            trimesh.creation.box().export(glb)
+            read_uvs(glb)  # (no UVs in it: only that it reads)
+        return f"{len(env.lights)} light from a panorama, OBJ UVs read"
+
     def check_images():
         from PIL import Image
         from core.thumbnail_manager import load_texture_thumbnail_image
@@ -176,6 +198,7 @@ def run_self_test(log_path: Optional[str]) -> int:
 
     step("imports", check_imports)
     step("3D model loading", check_models)
+    step("HDRI lighting and UVs", check_viewer_lighting_and_uvs)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
     step("app files", check_app_files)

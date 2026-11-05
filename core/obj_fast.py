@@ -24,6 +24,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .model_stats import ModelStats
+
 BLOCK_BYTES = 64 * 1024 * 1024
 _TEX_AND_NORMAL = re.compile(rb"/\S*")  # "12/5/7" -> "12" (for faces whose corners differ in form)
 
@@ -54,9 +56,10 @@ def _numbers(lines: list[bytes], dtype, per_line: int, what: str) -> np.ndarray:
 
 
 def read_obj(
-    path: Path, should_stop: Optional[Callable[[], bool]] = None
+    path: Path, should_stop: Optional[Callable[[], bool]] = None, stats: Optional[ModelStats] = None,
 ) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """(vertices float32 (N, 3), triangles int32 (M, 3), normals float32 (N, 3) or None) of an OBJ."""
+    """(vertices float32 (N, 3), triangles int32 (M, 3), normals float32 (N, 3) or None) of an OBJ.
+    stats, if given, is told what the file holds (the vertices returned can be more: see above)."""
     vertex_blocks: list[np.ndarray] = []
     normal_blocks: list[np.ndarray] = []
     index_blocks: list[np.ndarray] = []  # position index of every polygon corner (1-based, as in the file)
@@ -118,8 +121,11 @@ def read_obj(
     if corners.min() < 1 or corners.max() > len(vertices):
         raise ObjError("Relative or out-of-range vertex indices")  # (trimesh follows relative ones)
     corners -= 1
+    if stats is not None:
+        stats.vertices += len(vertices)
+        stats.add_polygons(counts)
 
-    file_normals = np.concatenate(normal_blocks) if normal_blocks else None
+    file_normals =np.concatenate(normal_blocks) if normal_blocks else None
     corner_normal_index = None
     if corner_normals and file_normals is not None and corner_normal_blocks:
         corner_normal_index = np.concatenate(corner_normal_blocks)

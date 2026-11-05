@@ -572,6 +572,19 @@ def _open_in(p, primary, secondary):
     _line(p, primary, 2.1, (9, 11.5), (12.5, 15), (9, 18.5))
 
 
+def _backdrop(p, primary, secondary):
+    """A picture of hills under a sun: an HDRI shown behind the model."""
+    _body(p, _rounded(2.5, 4.5, 19, 15, 2.4), secondary)
+    p.fillPath(_circle(16.5, 9, 2.1), primary)  # the sun
+    _line(p, primary, 2.1, (5, 16.5), (10, 11), (13.5, 14.5), (15.5, 12.8), (19, 16.5))  # the hills
+
+
+def _uv(p, primary, secondary):
+    """A square sheet with a polygon laid out flat on it: a model's UVs."""
+    _body(p, _rounded(3, 3, 18, 18, 2.4), secondary)
+    _line(p, primary, 2.0, (7.5, 16.5), (7.5, 8.5), (13, 6.5), (17, 11), (13, 16.5), (7.5, 16.5))
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -612,7 +625,7 @@ ICONS: dict[str, IconPainter] = {
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
-    "open_in": _open_in,
+    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv,
 }
 
 

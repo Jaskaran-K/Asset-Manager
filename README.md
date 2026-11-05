@@ -237,6 +237,18 @@ Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid
 - **Turning the lights:** Shift+drag turns the lights round the model instead of the model; or switch on
   **Turn Lights** (**L**) to make a plain drag do it. The dial in the top right shows where the main light is
   (hollow when it's behind the model). **Reset View** puts the lights back too.
+- **Metal's roughness:** Metallic has a **Roughness** slider, from a mirror (0) to a soft sheen (100), remembered
+  for every model.
+- **HDRI lighting:** the colour 2:1 HDRIs in your library are listed under **Lighting**, with **Browse for an
+  HDRI...** for any other, and right-click an HDR in the grid > **Use as Viewer Lighting**. Up to three of its
+  brightest sources become real lights (`core/environment.py`) and the rest gives the soft light. The HDRI stays
+  fixed in the scene as you orbit, **Shift+drag** turns it, and **Auto Rotate** spins the model inside it. It has
+  an **Exposure** slider, and **Backdrop** (**B**) shows it behind the model. Presets and thumbnails are unaffected,
+  and there are no cast shadows or ambient occlusion.
+- **What it's made of:** the details list polygons, quads, triangles and n-gons as the file has them, and the size
+  with its unit where the format says one (cm from FBX, m for glTF).
+- **UVs:** **U** shows the UV layout, read only when you ask: true polygons for OBJ and binary FBX, the UDIM tiles
+  in use numbered, and a picker for files with several UV sets. Drag to pan, scroll to zoom, **R** to fit.
 - **Thumbnails:** models get a rendered picture in the grid, made once and kept with the other thumbnails.
   Models over 150 MB get theirs the first time you open them (reading one just for the grid would take
   seconds and a lot of memory). A picture next to the model (`model.png`) is used instead when there is one;

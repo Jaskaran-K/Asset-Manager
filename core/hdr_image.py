@@ -9,6 +9,7 @@ as they are, and one-channel maps (height / displacement) are stretched to their
 from __future__ import annotations
 
 import re
+import struct
 import threading
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,56 @@ def read_hdr_image(path: Path | str, max_size: Optional[int] = None) -> Image.Im
         else:
             pixels = _read_radiance(path, max_size)
     return Image.fromarray(_to_display(pixels))
+
+
+def read_linear(path: Path | str) -> np.ndarray:
+    """Every pixel as linear light (H x W x 3 float32), for lighting a scene: skipping pixels, as
+    read_hdr_image may, can miss the sun, and with it nearly all of the light."""
+    path = Path(path)
+    with _DECODES:
+        pixels = _read_exr(path) if path.suffix.lower() == ".exr" else _read_radiance(path, None)
+    if pixels.ndim != 3 or pixels.shape[2] < 3:
+        raise ValueError("It has no colour channels")
+    pixels = np.nan_to_num(pixels[..., :3].astype(np.float32, copy=False), nan=0.0, posinf=65504.0, neginf=0.0)
+    return pixels.clip(0, None)
+
+
+def header_info(head: bytes, extension: str) -> Optional[tuple[int, int, bool]]:
+    """(width, height, has colour) from the first bytes of an .exr / .hdr, or None if they can't
+    be read. Takes bytes, so a file inside an archive needs no unpacking."""
+    try:
+        if extension.lower() == ".exr":
+            return _exr_header_info(head)
+        _header, (width, height, _flip_x, _flip_y), _start = _radiance_header(head)
+        return width, height, True
+    except (ValueError, IndexError, struct.error):
+        return None
+
+
+def _exr_header_info(head: bytes) -> Optional[tuple[int, int, bool]]:
+    """EXR attributes are (name, type, size, value), ended by an empty name. Both wanted ones come
+    before any preview image, which can be bigger than the bytes read."""
+    if head[:4] != b"\x76\x2f\x31\x01":
+        return None
+    at, size, colour = 8, None, None
+    while head[at] != 0 and (size is None or colour is None):
+        end = head.index(b"\0", at)
+        name = head[at:end]
+        at = head.index(b"\0", end + 1) + 1
+        (length,) = struct.unpack_from("<i", head, at)
+        at += 4
+        if name == b"dataWindow":
+            x0, y0, x1, y1 = struct.unpack_from("<iiii", head, at)
+            size = x1 - x0 + 1, y1 - y0 + 1
+        elif name == b"channels":
+            channels, pos = [], at
+            while head[pos] != 0:  # (each: a name, then 16 bytes about it)
+                end = head.index(b"\0", pos)
+                channels.append(head[pos:end])
+                pos = end + 17
+            colour = any(c == b"R" or c.endswith(b".R") for c in channels)
+        at += length
+    return (size[0], size[1], bool(colour)) if size is not None and colour is not None else None
 
 
 def _subsample(pixels: np.ndarray, max_size: Optional[int]) -> np.ndarray:

@@ -223,6 +223,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("viewer3d.grid", MODEL, "G", "Toggle the ground grid", "G"),
     Shortcut("viewer3d.reset", MODEL, "R", "Reset the camera", "R"),
     Shortcut("viewer3d.drag_lights", MODEL, "L", "Turn Lights on / off: whether dragging turns the lights or the model", "L"),
+    Shortcut("viewer3d.render", MODEL, "F12", "Render what's in the viewer, with real light (LuxCore) or as it's shown", "F12"),
     Shortcut("viewer3d.uv", MODEL, "U", "See the model's UV layout, or back to the model", "U"),
     Shortcut("viewer3d.uv_pan", MODEL, "Drag (UV layout)", "Move the layout around"),
     Shortcut("viewer3d.uv_zoom", MODEL, "Mouse wheel (UV layout)", "Zoom toward the pointer (R fits it to the window)"),

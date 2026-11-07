@@ -84,6 +84,27 @@ def run_self_test(log_path: Optional[str]) -> int:
             read_uvs(glb)  # (no UVs in it: only that it reads)
         return f"{len(env.lights)} light from a panorama, OBJ UVs read"
 
+    def check_render():
+        # The Render button: the app's Python must be the one LuxCore's download is built for, and a
+        # render's process must start up and say what became of it (here: LuxCore isn't there)
+        import json
+        from unittest import mock
+        import numpy as np
+        from core import render_engine, render_scene, render_worker
+        if not render_engine.supported():
+            raise RuntimeError(f"LuxCore's download is for Python {render_engine.PYTHON}: update core.render_engine")
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            render_scene.RenderJob("none.obj", 64, 36, 1.0, False, [0, 0, 3], [0, 0, 0], [0, 1, 0]).save(folder)
+            with mock.patch.object(render_engine, "is_installed", lambda: False):
+                code = render_worker.run(folder)
+            state = json.loads((folder / render_worker.STATUS_FILE).read_text(encoding="utf-8"))
+            if code != 1 or state["phase"] != "failed":
+                raise RuntimeError(f"a render with no engine ended as {state}")
+            ply = folder / "mesh.ply"
+            render_worker.write_ply(ply, np.zeros((3, 3), np.float32), np.array([[0, 1, 2]], np.uint32), np.zeros((3, 3), np.float32))
+        return f"LuxCore {render_engine.ENGINE_VERSION} fits this Python; the worker reports back"
+
     def check_images():
         from PIL import Image
         from core.thumbnail_manager import load_texture_thumbnail_image
@@ -199,6 +220,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("imports", check_imports)
     step("3D model loading", check_models)
     step("HDRI lighting and UVs", check_viewer_lighting_and_uvs)
+    step("rendering", check_render)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
     step("app files", check_app_files)

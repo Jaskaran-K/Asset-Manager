@@ -585,6 +585,13 @@ def _uv(p, primary, secondary):
     _line(p, primary, 2.0, (7.5, 16.5), (7.5, 8.5), (13, 6.5), (17, 11), (13, 16.5), (7.5, 16.5))
 
 
+def _render(p, primary, secondary):
+    """A camera: render a picture of the model."""
+    _body(p, _rounded(2.5, 6.5, 19, 14, 2.4), secondary)
+    _line(p, primary, 2.0, (8.5, 6.5), (9.8, 3.8), (14.2, 3.8), (15.5, 6.5))  # its top
+    p.fillPath(_circle(12, 13.5, 3.4), primary)  # the lens
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -625,7 +632,7 @@ ICONS: dict[str, IconPainter] = {
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
-    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv,
+    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render,
 }
 
 

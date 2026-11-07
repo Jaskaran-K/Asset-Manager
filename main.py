@@ -1642,6 +1642,12 @@ def main() -> None:
         index = sys.argv.index("--self-test")
         log_path = sys.argv[index + 1] if index + 1 < len(sys.argv) else None
         sys.exit(run_self_test(log_path))
+    if "--render" in sys.argv:
+        # A render, in a process of its own (the viewer's Render window starts it: core.render_worker)
+        from core.render_worker import run as run_render
+
+        code = run_render(Path(sys.argv[sys.argv.index("--render") + 1]))
+        os._exit(code)  # (everything's written: LuxCore can crash as it's unloaded in a normal exit)
     if "--theme-studio" in sys.argv:
         # The Theme Studio on its own (ui.theme_studio): the app's window isn't made at all
         from ui.theme_studio import run as run_theme_studio

@@ -220,7 +220,7 @@ def load(key: str, should_stop: Optional[Callable[[], bool]] = None) -> Environm
         if known is not None:
             _kept.move_to_end(key)
             return known
-    path = _local_path(key, should_stop)
+    path = local_path(key, should_stop)
     extension = Path(path).suffix
     with open(path, "rb") as f:
         _require_panorama(display_name(key), hdr_image.header_info(f.read(HEADER_BYTES), extension))
@@ -232,7 +232,8 @@ def load(key: str, should_stop: Optional[Callable[[], bool]] = None) -> Environm
     return environment
 
 
-def _local_path(key: str, should_stop: Optional[Callable[[], bool]]) -> Path:
+def local_path(key: str, should_stop: Optional[Callable[[], bool]] = None) -> Path:
+    """A real file for this panorama (a file inside an archive: its unpacked copy, unpacked if need be)."""
     if archives.SEPARATOR not in key:
         return Path(key)
     member = archives.member_for_path(key)

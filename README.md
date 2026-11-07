@@ -249,6 +249,13 @@ Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid
   with its unit where the format says one (cm from FBX, m for glTF).
 - **UVs:** **U** shows the UV layout, read only when you ask: true polygons for OBJ and binary FBX, the UDIM tiles
   in use numbered, and a picker for files with several UV sets. Drag to pan, scroll to zoom, **R** to fit.
+- **Rendering:** **Render** (**F12**) makes a PNG of what's in the viewer, at 720p, 1080p or 1440p. It uses
+  [LuxCore](https://luxcorerender.org/), a free path tracer that gives cast shadows and light between parts of a
+  model. It downloads once, the first time (157 MB, about 300 MB unpacked), and renders in a process of its own for 5,
+  20 or 60 seconds (**Draft**, **Good**, **Best**), with a live preview, **Stop** (which keeps what's done) and
+  denoising. Its first render on a computer spends a couple of minutes preparing for the graphics card. If LuxCore can't
+  run on your computer, the **Viewer** renderer needs nothing: the same picture as on screen, instantly, without
+  cast shadows. Toon and Normals can't be rendered, and textures aren't used yet. **Remove LuxCore** deletes it.
 - **Thumbnails:** models get a rendered picture in the grid, made once and kept with the other thumbnails.
   Models over 150 MB get theirs the first time you open them (reading one just for the grid would take
   seconds and a lot of memory). A picture next to the model (`model.png`) is used instead when there is one;

@@ -760,6 +760,29 @@ def set_model_view(**changes: Any) -> None:
     _update_config("model_view", state)
 
 
+def get_render_settings() -> dict[str, Any]:
+    """The Render window's choices: which renderer ("engine": "luxcore" or "viewer"), "resolution" and "quality"
+    (core.render_scene's names), "denoise", and the "folder" last saved to."""
+    from core.render_scene import DEFAULT_QUALITY, DEFAULT_RESOLUTION, QUALITIES, RESOLUTIONS
+
+    raw = _load_raw_config().get("render")
+    raw = raw if isinstance(raw, dict) else {}
+    folder = raw.get("folder")
+    return {
+        "engine": raw.get("engine") if raw.get("engine") in ("luxcore", "viewer") else "luxcore",
+        "resolution": raw.get("resolution") if raw.get("resolution") in RESOLUTIONS else DEFAULT_RESOLUTION,
+        "quality": raw.get("quality") if raw.get("quality") in QUALITIES else DEFAULT_QUALITY,
+        "denoise": raw.get("denoise") if isinstance(raw.get("denoise"), bool) else True,
+        "folder": folder if isinstance(folder, str) else "",
+    }
+
+
+def set_render_settings(**changes: Any) -> None:
+    state = get_render_settings()
+    state.update({k: v for k, v in changes.items() if k in state})
+    _update_config("render", state)
+
+
 def set_sidebar_state(key: str = "sidebar", **changes: Any) -> None:
     """Update some of open / pinned / width."""
     state = get_sidebar_state(key)

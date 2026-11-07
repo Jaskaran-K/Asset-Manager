@@ -260,3 +260,64 @@ def test_the_shaders_draw_what_they_should(tmp_path):
         pytest.skip("No OpenGL 3.3 here")
     assert result.returncode == 0, result.stderr[-3000:] + result.stdout[-1000:]
     assert result.stdout.strip().endswith("ok")
+
+
+RENDER_PROGRAM = r"""
+import sys
+import numpy as np
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
+from PySide6.QtWidgets import QApplication
+
+fmt = QSurfaceFormat()
+fmt.setDepthBufferSize(24)
+fmt.setVersion(3, 3)
+fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+QSurfaceFormat.setDefaultFormat(fmt)
+app = QApplication([])
+context = QOpenGLContext()
+context.setFormat(fmt)
+surface = QOffscreenSurface()
+surface.setFormat(fmt)
+surface.create()
+if not context.create() or not context.makeCurrent(surface) or context.format().version() < (3, 3):
+    sys.exit(77)
+context.doneCurrent()
+
+from core.model_loader import mesh_from_arrays
+from ui.viewer import Model3DViewportWidget
+
+# A triangle high up in the picture, seen from straight ahead
+vertices = np.array([[-1, 0.2, 0], [1, 0.2, 0], [0, 1, 0]], dtype=np.float32)
+mesh = mesh_from_arrays("triangle", vertices, np.array([[0, 1, 2]], dtype=np.uint32), None, "test", {})
+view = Model3DViewportWidget(mesh)
+view.rot_x, view.rot_y = 0.0, 0.0
+view.material_id = "matte"
+view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+view.resize(320, 180)
+view.show()
+app.processEvents()
+assert view.render_image(16, 9) is not None
+view.pan_y = 0.5  # (the normalized triangle moved up, into the top of the picture)
+for width, height in ((1280, 720), (2560, 1440)):
+    image = view.render_image(width, height)
+    assert image is not None and (image.width(), image.height()) == (width, height), image
+    row = lambda y: image.pixelColor(width // 2, y)
+    background = image.pixelColor(2, height - 2)
+    assert row(int(height * 0.25)) != background, "the model should be near the top: is the picture upside down?"
+    assert row(int(height * 0.9)) == background, "nothing should be near the bottom: is the picture upside down?"
+print("ok")
+view.close()
+"""
+
+
+def test_the_viewers_renderer_draws_the_right_way_up_at_every_size(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+    # (the viewport reads its look from the config: this keeps it from the real one)
+    env.update(USERPROFILE=str(tmp_path), HOME=str(tmp_path), LOCALAPPDATA=str(tmp_path), APPDATA=str(tmp_path))
+    result = subprocess.run([sys.executable, "-c", RENDER_PROGRAM], capture_output=True, text=True, env=env, cwd=tmp_path, timeout=120)
+    if result.returncode == NO_OPENGL:
+        pytest.skip("No OpenGL 3.3 here")
+    assert result.returncode == 0, result.stderr[-3000:] + result.stdout[-1000:]
+    assert result.stdout.strip().endswith("ok")

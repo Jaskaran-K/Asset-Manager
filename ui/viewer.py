@@ -48,7 +48,7 @@ from PySide6.QtGui import (
     QPolygonF,
     QVector3D,
 )
-from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram
+from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat, QOpenGLShader, QOpenGLShaderProgram
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -73,6 +73,7 @@ from core.full_image import LoadedImage, load_full_image
 from core.model_loader import Mesh3D, load_3d_model
 from core.model_uvs import UvLayout, read_uvs, tiles_text
 from core.obj_fast import LoadCancelled
+from core.render_scene import UNRENDERABLE
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions, with_roughness
 from core.settings import ALPHA_PLANE_SIDES, TILE_GRIDS, get_model_view, set_model_view
 from core.scanner import AssetItem
@@ -82,6 +83,7 @@ from ui import file_actions, shortcuts
 from ui.archive_jobs import UnpackJob, unpack_in_background
 from ui.duotone import set_icon
 from ui.model_lighting import LightingControls, RoughnessBar
+from ui.render_window import RenderWindow
 from ui.uv_view import UvViewWidget
 from ui.pdf_viewer import PdfViewer
 from ui.tag_widgets import run_job, tag_chip_cloud
@@ -876,6 +878,34 @@ class Model3DViewportWidget(QOpenGLWidget):
             GL.glUniform1f(u[name], value)
 
     def paintGL(self) -> None:
+        self._draw_scene(self.width(), self.height(), self.show_grid)
+        # 3. 2D HUD & Orientation Gizmo Overlay via QPainter
+        self._draw_hud_and_gizmo(self.width(), self.height())
+
+    def render_image(self, width: int, height: int) -> Optional[QImage]:
+        """What's shown, without the grid or the overlay, as a picture of this size (the Render
+        window's way when LuxCore can't be used). None if OpenGL isn't up yet."""
+        if not self._gl_ready:
+            return None
+        self.makeCurrent()
+        try:
+            picture_format = QOpenGLFramebufferObjectFormat()
+            picture_format.setAttachment(QOpenGLFramebufferObject.Attachment.CombinedDepthStencil)
+            picture_format.setSamples(8)
+            picture_format.setInternalTextureFormat(GL.GL_RGBA8)
+            target = QOpenGLFramebufferObject(width, height, picture_format)
+            if not target.isValid():
+                return None
+            target.bind()
+            GL.glViewport(0, 0, width, height)
+            self._draw_scene(width, height, False)
+            target.release()
+            return target.toImage().convertToFormat(QImage.Format.Format_RGB32)  # (the right way up)
+        finally:
+            GL.glViewport(0, 0, self.width(), self.height())
+            self.doneCurrent()
+
+    def _draw_scene(self, w: int, h: int, grid: bool) -> None:
         if self._needs_upload and self._gl_ready:
             self._upload_mesh_data()
         if self._env_dirty and self._gl_ready:
@@ -893,8 +923,6 @@ class Model3DViewportWidget(QOpenGLWidget):
         GL.glClearColor(0.08, 0.09, 0.11, 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
 
-        w = self.width()
-        h = self.height()
         aspect = float(w) / float(max(h, 1))
 
         # Matrices
@@ -915,7 +943,7 @@ class Model3DViewportWidget(QOpenGLWidget):
             self._draw_backdrop(aspect)
 
         # 1. Draw Ground Plane Grid
-        if self.show_grid and self.grid_vao is not None and self.grid_program is not None:
+        if grid and self.grid_vao is not None and self.grid_program is not None:
             self.grid_program.bind()
             self.grid_program.setUniformValue("uMVP", mvp)
             GL.glBindVertexArray(self.grid_vao)
@@ -982,9 +1010,6 @@ class Model3DViewportWidget(QOpenGLWidget):
             GL.glBindVertexArray(0)
             GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
             self.mesh_program.release()
-
-        # 3. 2D HUD & Orientation Gizmo Overlay via QPainter
-        self._draw_hud_and_gizmo(w, h)
 
     def _draw_hud_and_gizmo(self, w: int, h: int) -> None:
         """Render miniature coordinate orientation gizmo, the lights' direction and the statistics badge."""
@@ -1484,6 +1509,7 @@ class AssetViewerDialog(QDialog):
         }
         self.btn_tile: Optional[QPushButton] = None  # (an image's tools: _add_image_tools)
         self.btn_uv: Optional[QPushButton] = None  # (a model's UVs: _add_uv_controls)
+        self.btn_render: Optional[QPushButton] = None  # (a model from a file can be rendered)
         self._btn_open_app = self._app_status = None
         member = self.asset.archive
         if member is not None:
@@ -1644,6 +1670,7 @@ class AssetViewerDialog(QDialog):
             viewport.set_mesh(mesh)
             self._metadata.update(mesh.metadata)
             self._refresh_inspector()
+            self._update_render_button()
 
         def failed(message: str) -> None:
             if token == self._load_token and shiboken6.isValid(viewport):
@@ -1739,27 +1766,63 @@ class AssetViewerDialog(QDialog):
         tools.addWidget(btn_reset)
 
         details = QHBoxLayout(self._look_details)
-        details.setContentsMargins(8, 0, 0, 0)
+        details.setContentsMargins(0, 0, 0, 0)
         details.setSpacing(16)
         self.roughness_bar = RoughnessBar(viewport, self._look_details)  # (shows on metal)
         details.addWidget(self.roughness_bar)
         details.addWidget(self.lighting_controls.bar)  # (shows while an HDRI is in use)
-        tools.addWidget(self._look_details)
+        details.addStretch(1)
         tools.addStretch(1)
+        rows.addWidget(self._look_details)  # (a row of its own: with the tools, it squeezes the details panel beside it)
         material_combo = self.cmb_material
 
         def material_picked(_index: int) -> None:
             viewport.set_material(material_combo.currentData())
             self.roughness_bar.show_for_material()
+            self._update_render_button()
 
         material_combo.currentIndexChanged.connect(material_picked)
         self.roughness_bar.show_for_material()
 
-        self.btn_uv = None
+        self.btn_uv = self.btn_render = None
         if has_uvs:
+            self.btn_render = QPushButton("Render")
+            set_icon(self.btn_render, "render")
+            self.btn_render.clicked.connect(self._open_render_window)
+            tools.insertWidget(0, self.btn_render)
             self._add_uv_controls(tools, btn_reset, v_toolbar,
-                                  [cb_mode, material_combo, self.btn_model_color, self.cmb_lighting, self.btn_drag_lights, btn_grid, btn_turntable])
+                                  [cb_mode, material_combo, self.btn_model_color, self.cmb_lighting, self.btn_drag_lights, btn_grid, btn_turntable,
+                                   self.btn_render])
+            self._update_render_button()
         return v_toolbar
+
+    # ------------------------------------------------------------------
+    # Rendering (ui.render_window)
+    # ------------------------------------------------------------------
+    def _render_refusal(self) -> str:
+        """Why the model can't be rendered as it's shown now ("": it can)."""
+        viewport = self.viewport
+        if viewport is None or viewport.mesh is None or viewport.face_count == 0:
+            return "Once the model has loaded, you can render it"
+        if viewport.mesh.stand_in:
+            return "This model couldn't be read"
+        unrenderable = UNRENDERABLE.get(viewport.material_id)
+        return f"{unrenderable} isn't a real-world material, so it can't be rendered: pick another" if unrenderable else ""
+
+    def _update_render_button(self) -> None:
+        if self.btn_render is None:
+            return
+        refusal = self._render_refusal()
+        uv_shown = self.btn_uv is not None and self.btn_uv.isChecked()
+        self.btn_render.setEnabled(not refusal and not uv_shown)
+        self.btn_render.setToolTip(refusal or "Render what's in the viewer, with real light and cast shadows (F12)")
+
+    def _open_render_window(self) -> None:
+        if self._render_refusal() or self.viewport is None or self._file_path() is None:
+            return
+        window = RenderWindow(self.viewport, self._file_path(), self.asset.name, self)
+        window.exec()
+        window.deleteLater()
 
     # ------------------------------------------------------------------
     # A model's UVs (core.model_uvs): read the first time they're asked for
@@ -1798,6 +1861,7 @@ class AssetViewerDialog(QDialog):
             self._model_stack.setCurrentWidget(self.viewport)
             self.viewport.setFocus()
         self.cmb_uv_set.setVisible(on and len(self._uv_set_names) > 1)
+        self._update_render_button()
 
     def _fit_uvs(self) -> None:
         if self.uv_view is not None:
@@ -2194,6 +2258,8 @@ class AssetViewerDialog(QDialog):
             self._btn_open_app.click()
         elif shortcuts.matches("viewer3d.uv", event) and self.btn_uv is not None:
             self.btn_uv.toggle()
+        elif shortcuts.matches("viewer3d.render", event) and self.btn_render is not None and self.btn_render.isEnabled():
+            self._open_render_window()
         else:
             super().keyPressEvent(event)
 

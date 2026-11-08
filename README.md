@@ -106,6 +106,15 @@ the app starts from that copy and notes it in the crash log.
 - **Sidebar:** the menu button (or **Ctrl+B**) slides it in and out, and dragging its right edge resizes it. With the pin button it stays
   docked beside the grid. Unpinned, it floats over the grid on frosted glass and slides away after you pick a
   category (or press Esc, or click beside it).
+- **Profiles:** separate libraries for separate work, such as a ZBrush profile and a Substance Painter one. Each
+  has its own library folders, file types, categories and collections, so only that work's files show. Tags,
+  favorites and ratings belong to the files and are shared by every profile, as are the theme, apps, viewer and
+  Artbook. Switch with the profile button at the top left (**Ctrl+Shift+P**). Its menu has **New Profile...**,
+  which starts as a copy of the current profile or empty (no folders or categories). **Settings > Profiles** renames, duplicates and
+  deletes them, and **Desktop Shortcut** puts an icon on the desktop that opens the app in that profile
+  (`AssetManager.exe --profile <name>` works too). The app starts in the last profile used, and switching shows
+  the profile's last scan at once while it rescans. Right-click a collection to show it in every profile or move
+  it to another one.
 - **Looks:** **Settings > Appearance** has the themes and a background texture (grain, dots, grid, lines,
   hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
   their colors from the theme, and so do the windows' title bars (on Windows 11, the theme's own colour).
@@ -337,6 +346,11 @@ Tags let you find groups of files without relying on file names. They're stored 
     Backspace removes the last chip; Esc or ✕ clears everything.
 - **Collections:** click the star in the search box to save the search in the sidebar. Right-click one to rename or
   delete it. Renaming a tag updates the collections that use it.
+- **Categories by tag:** in **Settings > Categories**, a category's **Tags** list adds the files with any (or all)
+  of the ticked tags to what its file types show. A "Main Project" category with FBX and the tag Main shows every
+  FBX file plus anything tagged Main, images and videos included. Right-click a tag in **Settings > Tags** and
+  choose **Add as Sidebar Category** to make one in a click. Renaming a tag renames it in categories too, and
+  deleting one takes it out of them; **Uncategorized** shows the files no category shows.
 - **Backups:** the database is backed up automatically once a day (the last 7 are kept) and before upgrades and app
   updates (the last 10). If it's ever damaged, the app offers to restore the newest good backup, keeping the
   damaged file in the backups folder. **Tools** also has Back Up Library Now, Restore Library Backup..., and

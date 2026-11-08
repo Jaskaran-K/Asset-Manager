@@ -119,6 +119,20 @@ MIGRATIONS: list[str] = [
     UPDATE assets SET meta_key = NULL WHERE extension IN
         ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.tga', '.bmp', '.webp', '.psd', '.psb', '.exr', '.dds');
     """,
+    # v7: collections belong to a profile (core.profiles; NULL: shown in every profile). The ones
+    # saved before profiles belong to Default. Names are unique among those shown together, which
+    # the code checks (two profiles can each have a "Heroes").
+    """
+    CREATE TABLE saved_searches_v7 (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE,
+        query TEXT NOT NULL,
+        profile TEXT
+    );
+    INSERT INTO saved_searches_v7 (id, name, query, profile) SELECT id, name, query, 'default' FROM saved_searches;
+    DROP TABLE saved_searches;
+    ALTER TABLE saved_searches_v7 RENAME TO saved_searches;
+    """,
 ]
 
 
@@ -185,6 +199,10 @@ class SavedSearch:
     id: int
     name: str
     query: str
+    profile: Optional[str] = None  # the profile it belongs to (core.profiles); None: every profile
+
+
+EVERY_PROFILE = None  # (a collection's profile: shown in all of them)
 
 
 def default_tag_name(extension: str) -> str:
@@ -395,8 +413,9 @@ class TagRepository:
     # ------------------------------------------------------------------
     # Export / import (JSON)
     # ------------------------------------------------------------------
-    def export_tags(self, target: Path | str) -> int:
-        """Write custom tags and the files they're on to a JSON file. Returns the number of files."""
+    def export_tags(self, target: Path | str, profile_names: Optional[dict[str, str]] = None) -> int:
+        """Write custom tags and the files they're on to a JSON file. Returns the number of files.
+        profile_names: {profile id: name}, so collections keep their profile (by name) on import."""
         conn = self._conn()
         tags = [
             {"name": row["name"], "color": row["color"]}
@@ -417,15 +436,21 @@ class TagRepository:
             "exported": datetime.now().isoformat(timespec="seconds"),
             "tags": tags,
             "files": list(files.values()),
-            "searches": [{"name": s.name, "query": s.query} for s in self.list_saved_searches()],
+            "searches": [
+                {"name": s.name, "query": s.query, "profile": (profile_names or {}).get(s.profile, s.profile) if s.profile else None}
+                for s in self.list_saved_searches()
+            ],
         }
         Path(target).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         return len(files)
 
-    def import_tags(self, source: Path | str) -> dict[str, int]:
+    def import_tags(
+        self, source: Path | str, profile_ids: Optional[dict[str, str]] = None, current_profile: Optional[str] = None,
+    ) -> dict[str, int]:
         """Merge an export into the library: missing tags are created and added to the listed files,
-        and saved searches with new names are added (nothing is removed).
-        Returns counts: tags_created, files, skipped_tags, searches."""
+        and saved searches with new names are added (nothing is removed). A collection goes to the
+        profile of its name (profile_ids: {folded name: id}), else to current_profile; one shown in
+        every profile stays so. Returns counts: tags_created, files, skipped_tags, searches."""
         try:
             data = json.loads(Path(source).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
@@ -482,14 +507,21 @@ class TagRepository:
                     )
                 files += 1
 
-            saved_names = {s.name.casefold() for s in self.list_saved_searches()}
+            saved = self.list_saved_searches()
             searches = 0
             for entry in data.get("searches", []):
                 name = " ".join(str(entry.get("name", "")).split())[:MAX_TAG_NAME_LENGTH]
                 query = str(entry.get("query", "")).strip()
-                if name and query and name.casefold() not in saved_names:
-                    conn.execute("INSERT INTO saved_searches (name, query) VALUES (?, ?)", (name, query))
-                    saved_names.add(name.casefold())
+                if "profile" in entry and entry["profile"] is None:
+                    profile = EVERY_PROFILE
+                else:
+                    wanted = " ".join(str(entry.get("profile") or "").split()).casefold()
+                    profile = (profile_ids or {}).get(wanted, current_profile)
+                if name and query and not _name_clash(saved, name, profile):
+                    search_id = conn.execute(
+                        "INSERT INTO saved_searches (name, query, profile) VALUES (?, ?, ?)", (name, query, profile)
+                    ).lastrowid
+                    saved.append(SavedSearch(search_id, name, query, profile))
                     searches += 1
         return {"tags_created": created, "files": files, "skipped_tags": skipped, "searches": searches}
 
@@ -625,12 +657,26 @@ class TagRepository:
                 )
         return len(moves)
 
-    def forget_unscanned_assets(self, assets: Iterable[AssetItem]) -> int:
+    def forget_unscanned_assets(
+        self, assets: Iterable[AssetItem], keep_folders: Sequence[Path | str] = (),
+        scanned_folders: Sequence[Path | str] = (),
+    ) -> int:
         """Delete the rows of files that a full library scan (assets) didn't find, e.g. files in
         folders opened with Open Folder, or deleted ones, unless they have custom tags, a favorite
-        or a rating to keep. Files on a drive that's offline are kept. Returns how many were removed."""
+        or a rating to keep. Files on a drive that's offline are kept, and so are files in
+        keep_folders (other profiles' library folders: their details aren't read again on
+        switching back) unless they're in scanned_folders too, where the scan found them gone.
+        Returns how many were removed."""
         scanned = {path_key(a.path) for a in assets}
         drives: dict[str, bool] = {}
+
+        def within(folders: Sequence[Path | str]) -> tuple[str, ...]:
+            return tuple(path_key(f).rstrip("\\/") + os.sep for f in folders)
+
+        keep, looked = within(keep_folders), within(scanned_folders)
+
+        def kept(key: str) -> bool:
+            return key.startswith(keep) and not key.startswith(looked) if keep else False
 
         def drive_online(path: str) -> bool:
             anchor = Path(path).anchor or "."
@@ -643,7 +689,7 @@ class TagRepository:
                 row["id"] for row in conn.execute(
                     f"SELECT a.id, a.path_key, a.path FROM assets a WHERE NOT {self._CUSTOM_TAGGED}"
                 )
-                if row["path_key"] not in scanned and drive_online(row["path"])
+                if row["path_key"] not in scanned and not kept(row["path_key"]) and drive_online(row["path"])
             ]
             for chunk in _chunks(gone):
                 conn.execute(f"DELETE FROM assets WHERE id IN ({_placeholders(len(chunk))})", chunk)
@@ -978,38 +1024,76 @@ class TagRepository:
     # Saved searches (sidebar collections)
     # ------------------------------------------------------------------
     def list_saved_searches(self) -> list[SavedSearch]:
+        """Every collection, of every profile."""
         return [
-            SavedSearch(row["id"], row["name"], row["query"])
-            for row in self._conn().execute("SELECT id, name, query FROM saved_searches ORDER BY name COLLATE NOCASE")
+            SavedSearch(row["id"], row["name"], row["query"], row["profile"])
+            for row in self._conn().execute(
+                "SELECT id, name, query, profile FROM saved_searches ORDER BY name COLLATE NOCASE"
+            )
         ]
 
-    def _clean_search_name(self, name: str, exclude_id: Optional[int] = None) -> str:
+    def collections_for(self, profile: Optional[str]) -> list[SavedSearch]:
+        """The collections a profile shows: its own, and those shown in every profile."""
+        return [s for s in self.list_saved_searches() if s.profile in (profile, EVERY_PROFILE)]
+
+    def _clean_search_name(self, name: str, profile: Optional[str] = EVERY_PROFILE, exclude_id: Optional[int] = None) -> str:
         name = " ".join((name or "").split())
         if not name:
             raise TagError("Collection names can't be empty.")
         if len(name) > MAX_TAG_NAME_LENGTH:
             raise TagError(f"Collection names can be at most {MAX_TAG_NAME_LENGTH} characters.")
-        for saved in self.list_saved_searches():
-            if saved.id != exclude_id and saved.name.casefold() == name.casefold():
-                raise TagError(f'A collection named "{saved.name}" already exists.')
+        clash = _name_clash([s for s in self.list_saved_searches() if s.id != exclude_id], name, profile)
+        if clash is not None:
+            raise TagError(f'A collection named "{clash.name}" already exists.')
         return name
 
-    def save_search(self, name: str, query: str) -> SavedSearch:
-        name = self._clean_search_name(name)
+    def save_search(self, name: str, query: str, profile: Optional[str] = EVERY_PROFILE) -> SavedSearch:
+        """Save a collection in a profile (EVERY_PROFILE: shown in all of them)."""
+        name = self._clean_search_name(name, profile)
         if not query.strip():
             raise TagError("There's nothing to save: the search is empty.")
         with self._transaction() as conn:
-            search_id = conn.execute("INSERT INTO saved_searches (name, query) VALUES (?, ?)", (name, query.strip())).lastrowid
-        return SavedSearch(search_id, name, query.strip())
+            search_id = conn.execute(
+                "INSERT INTO saved_searches (name, query, profile) VALUES (?, ?, ?)", (name, query.strip(), profile)
+            ).lastrowid
+        return SavedSearch(search_id, name, query.strip(), profile)
+
+    def _saved_search(self, search_id: int) -> SavedSearch:
+        saved = next((s for s in self.list_saved_searches() if s.id == search_id), None)
+        if saved is None:
+            raise TagError("That collection no longer exists.")
+        return saved
 
     def rename_saved_search(self, search_id: int, name: str) -> None:
-        name = self._clean_search_name(name, exclude_id=search_id)
+        name = self._clean_search_name(name, self._saved_search(search_id).profile, exclude_id=search_id)
         with self._transaction() as conn:
             conn.execute("UPDATE saved_searches SET name = ? WHERE id = ?", (name, search_id))
+
+    def move_saved_search(self, search_id: int, profile: Optional[str]) -> None:
+        """Give a collection to another profile, or (EVERY_PROFILE) show it in all of them."""
+        saved = self._saved_search(search_id)
+        self._clean_search_name(saved.name, profile, exclude_id=search_id)
+        with self._transaction() as conn:
+            conn.execute("UPDATE saved_searches SET profile = ? WHERE id = ?", (profile, search_id))
+
+    def delete_profile_searches(self, profile: str) -> int:
+        """Delete a deleted profile's own collections. Returns how many."""
+        with self._transaction() as conn:
+            return conn.execute("DELETE FROM saved_searches WHERE profile = ?", (profile,)).rowcount
 
     def delete_saved_search(self, search_id: int) -> None:
         with self._transaction() as conn:
             conn.execute("DELETE FROM saved_searches WHERE id = ?", (search_id,))
+
+
+def _name_clash(saved: Sequence[SavedSearch], name: str, profile: Optional[str]) -> Optional[SavedSearch]:
+    """A collection that would be shown beside one named name in profile, with the same name."""
+    folded = name.casefold()
+    for other in saved:
+        together = profile is EVERY_PROFILE or other.profile in (profile, EVERY_PROFILE)
+        if together and other.name.casefold() == folded:
+            return other
+    return None
 
 
 _repository: Optional[TagRepository] = None

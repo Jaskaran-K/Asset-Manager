@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QWidget
 
-from core import crash_log
+from core import crash_log, profiles
 from core.scanner import AssetItem
 from core.tag_repository import TagError, TagRepository
 from ui.duplicates_dialog import DuplicatesDialog
@@ -71,7 +71,7 @@ class LibraryTools(QObject):
         if not target:
             return
         try:
-            files = self.repo.export_tags(target)
+            files = self.repo.export_tags(target, {p.id: p.name for p in profiles.list_profiles()})
         except OSError as exc:
             QMessageBox.warning(self._window, "Export Failed", f"The file couldn't be saved:\n{exc}")
             return
@@ -84,7 +84,9 @@ class LibraryTools(QObject):
         if not source:
             return
         try:
-            result = self.repo.import_tags(source)
+            result = self.repo.import_tags(
+                source, {p.name.casefold(): p.id for p in profiles.list_profiles()}, profiles.current_profile().id,
+            )
         except TagError as exc:
             QMessageBox.warning(self._window, "Import Failed", str(exc))
             return

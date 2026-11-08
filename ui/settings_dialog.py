@@ -3,7 +3,9 @@
 Pages:
 - General > Folders:     library folders scanned for assets
 - General > Files:       file extensions the scanner picks up
-- General > Categories:  sidebar main categories / subcategories and their file types
+- General > Categories:  sidebar main categories / subcategories and their file types and tags
+- General > Profiles:    make, rename, duplicate and delete profiles (core.profiles); Folders, Files and
+                         Categories edit the profile in use
 - General > Appearance:  theme, grid size, category colors & icons
 - General > Video:       ffmpeg location, playback backend, preview cache
 - General > Archives:    files inside archives in the library, 7-Zip's location, unpacked copies
@@ -18,6 +20,7 @@ Pages:
 from __future__ import annotations
 
 import copy
+import html
 import os
 import re
 import sys
@@ -45,6 +48,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QTextBrowser,
@@ -62,6 +66,8 @@ from PySide6.QtWidgets import (
 
 from core import app_helpers, apps, archives, artbook_store, crash_log
 from core.scanner import AssetItem
+from core import category_rules, profiles
+from core.profiles import Profile, ProfileError
 from core.settings import (
     DEFAULT_CATEGORIES,
     DEFAULT_FILE_EXTENSIONS,
@@ -141,6 +147,8 @@ from ui.themes import THEMES, apply_theme_soon, current_theme_id, parse_color, t
 EXTENSIONS_ROLE = Qt.ItemDataRole.UserRole
 COLOR_ROLE = Qt.ItemDataRole.UserRole + 1
 ICON_ROLE = Qt.ItemDataRole.UserRole + 2
+TAGS_ROLE = Qt.ItemDataRole.UserRole + 3  # tag names (core.category_rules)
+MATCH_ALL_ROLE = Qt.ItemDataRole.UserRole + 4  # True: files need every tag; False: any of them
 
 
 def _page_header(title: str, hint: str) -> QWidget:
@@ -323,19 +331,28 @@ class FilesPage(QWidget):
 # General > Categories
 # ----------------------------------------------------------------------
 class CategoriesPage(QWidget):
-    """Edit sidebar main categories, subcategories, and the file types each shows."""
+    """Edit sidebar main categories, subcategories, and the file types and tags each shows."""
 
-    def __init__(self, categories: list[dict[str, Any]], extensions: list[str], parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        categories: list[dict[str, Any]],
+        extensions: list[str],
+        tags: Optional[list[str]] = None,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self._available: list[str] = list(extensions)
+        self._tags: list[str] = list(tags or [])  # custom tag names, to pick from
         self._updating_checks = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.addWidget(_page_header(
             "Categories",
-            "Main categories and subcategories appear in the sidebar. A main category shows its own "
-            "file types plus everything in its subcategories. Double-click a name to rename it.",
+            "Main categories and subcategories appear in the sidebar. A category shows the files of its "
+            "file types and the files with its tags (the FBX type and a Main tag: every FBX file, plus "
+            "anything tagged Main). A main category also shows everything in its subcategories. "
+            "Double-click a name to rename it.",
         ))
 
         body = QSplitter(Qt.Orientation.Horizontal)
@@ -389,18 +406,70 @@ class CategoriesPage(QWidget):
         row2.addWidget(btn_reset)
         left_layout.addLayout(row2)
 
-        # Right: file-type checklist for the selected category
+        # Right: the selected category's file types and tags
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 0, 0, 0)
 
         self.lbl_types_title = QLabel("File types")
         self.lbl_types_title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.lbl_types_title.setWordWrap(True)
         right_layout.addWidget(self.lbl_types_title)
 
+        switch_row = QHBoxLayout()
+        self.btn_show_types = QPushButton("File Types")
+        self.btn_show_types.setToolTip("Choose the file types this category shows")
+        self.btn_show_tags = QPushButton("Tags")
+        self.btn_show_tags.setToolTip("Choose tags: files with them show in this category too, whatever their type")
+        self._switch_group = QButtonGroup(self)
+        self._switch_group.setExclusive(True)
+        for button in (self.btn_show_types, self.btn_show_tags):
+            button.setCheckable(True)
+            self._switch_group.addButton(button)
+            switch_row.addWidget(button)
+        switch_row.addStretch(1)
+        right_layout.addLayout(switch_row)
+        self.btn_show_types.setChecked(True)
+
+        self.right_stack = QStackedWidget()
+        types_panel = QWidget()
+        types_layout = QVBoxLayout(types_panel)
+        types_layout.setContentsMargins(0, 0, 0, 0)
         self.list_types = QListWidget()
         self.list_types.itemChanged.connect(self._on_type_toggled)
-        right_layout.addWidget(self.list_types, 1)
+        types_layout.addWidget(self.list_types, 1)
+
+        tags_panel = QWidget()
+        tags_layout = QVBoxLayout(tags_panel)
+        tags_layout.setContentsMargins(0, 0, 0, 0)
+        match_row = QHBoxLayout()
+        match_row.addWidget(QLabel("Show files with"))
+        self.btn_any_tag = QPushButton("Any of These Tags")
+        self.btn_any_tag.setToolTip("Files with at least one of the ticked tags show in this category")
+        self.btn_all_tags = QPushButton("All of Them")
+        self.btn_all_tags.setToolTip("Only files with every ticked tag show in this category")
+        self._match_group = QButtonGroup(self)
+        self._match_group.setExclusive(True)
+        for button in (self.btn_any_tag, self.btn_all_tags):
+            button.setCheckable(True)
+            self._match_group.addButton(button)
+            match_row.addWidget(button)
+        match_row.addStretch(1)
+        self.btn_any_tag.setChecked(True)
+        self.btn_all_tags.toggled.connect(self._on_match_toggled)
+        tags_layout.addLayout(match_row)
+        self.list_tags = QListWidget()
+        self.list_tags.itemChanged.connect(self._on_tag_toggled)
+        tags_layout.addWidget(self.list_tags, 1)
+        self.lbl_no_tags = QLabel("No custom tags yet. Make them on the Tags page.")
+        self.lbl_no_tags.setObjectName("noteLabel")
+        self.lbl_no_tags.setWordWrap(True)
+        tags_layout.addWidget(self.lbl_no_tags)
+
+        self.right_stack.addWidget(types_panel)
+        self.right_stack.addWidget(tags_panel)
+        self.btn_show_tags.toggled.connect(self._on_switch_toggled)
+        right_layout.addWidget(self.right_stack, 1)
 
         self.lbl_unassigned = QLabel()
         self.lbl_unassigned.setObjectName("noteLabel")
@@ -423,6 +492,8 @@ class CategoriesPage(QWidget):
         item = QTreeWidgetItem([entry["name"]])
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
         item.setData(0, EXTENSIONS_ROLE, list(entry.get("extensions", [])))
+        item.setData(0, TAGS_ROLE, list(entry.get("tags", [])))
+        item.setData(0, MATCH_ALL_ROLE, entry.get("tag_match") == "all")
         item.setData(0, COLOR_ROLE, entry["color"])
         item.setData(0, ICON_ROLE, entry.get("icon"))
         if parent is None:
@@ -473,6 +544,10 @@ class CategoriesPage(QWidget):
             }
             if item.data(0, ICON_ROLE):
                 data["icon"] = item.data(0, ICON_ROLE)
+            if item.data(0, TAGS_ROLE):
+                data["tags"] = list(item.data(0, TAGS_ROLE))
+            if item.data(0, MATCH_ALL_ROLE):
+                data["tag_match"] = "all"
             return data
 
         result = []
@@ -497,6 +572,40 @@ class CategoriesPage(QWidget):
         self._populate_types(self.tree.currentItem())
         self._update_unassigned()
 
+    # ------------------ tags (Settings > Tags edits them while this page is open) ------------------
+    def set_available_tags(self, tags: list[str]) -> None:
+        """The custom tags to pick from (a tag was made, renamed or deleted on the Tags page)."""
+        self._tags = list(tags)
+        self._populate_tags(self.tree.currentItem())
+
+    def _entries(self) -> list[QTreeWidgetItem]:
+        items = []
+        for i in range(self.tree.topLevelItemCount()):
+            main_item = self.tree.topLevelItem(i)
+            items += [main_item, *(main_item.child(j) for j in range(main_item.childCount()))]
+        return items
+
+    def rename_tag(self, old: str, new: str) -> None:
+        """A tag was renamed: categories that use it follow."""
+        for item in self._entries():
+            item.setData(0, TAGS_ROLE, category_rules.renamed(item.data(0, TAGS_ROLE), old, new))
+        self._populate_tags(self.tree.currentItem())
+
+    def remove_tag(self, name: str) -> None:
+        """A tag was deleted: it leaves every category (the categories stay)."""
+        for item in self._entries():
+            item.setData(0, TAGS_ROLE, category_rules.without(item.data(0, TAGS_ROLE), name))
+        self._populate_tags(self.tree.currentItem())
+        self._update_unassigned()
+
+    def add_tag_category(self, tag: str) -> None:
+        """A new main category named after a tag that shows the files with it (Tags page > right-click)."""
+        item = self._make_item({"name": tag, "color": self._next_color(True), "tags": [tag]})
+        self.tree.addTopLevelItem(item)
+        self.tree.setCurrentItem(item)
+        self.btn_show_tags.setChecked(True)
+        self._update_unassigned()
+
     # ------------------ checklist ------------------
     def _on_current_changed(self, current: Optional[QTreeWidgetItem], _previous) -> None:
         is_item = current is not None
@@ -508,10 +617,68 @@ class CategoriesPage(QWidget):
         self.btn_add_sub.setToolTip("Add a subcategory under the selected main category")
         if is_item:
             kind = "category" if is_main else "subcategory"
-            self.lbl_types_title.setText(f"File types shown in {kind} '{current.text(0)}'")
+            self.lbl_types_title.setText(f"Shown in {kind} '{current.text(0)}'")
         else:
-            self.lbl_types_title.setText("Select a category to choose its file types")
+            self.lbl_types_title.setText("Select a category to choose its file types and tags")
         self._populate_types(current)
+        self._populate_tags(current)
+
+    def _on_switch_toggled(self, tags: bool) -> None:
+        self.right_stack.setCurrentIndex(1 if tags else 0)
+
+    def _update_switch_counts(self, current: Optional[QTreeWidgetItem]) -> None:
+        types = len(current.data(0, EXTENSIONS_ROLE)) if current is not None else 0
+        tags = len(current.data(0, TAGS_ROLE)) if current is not None else 0
+        self.btn_show_types.setText(f"File Types ({types})" if types else "File Types")
+        self.btn_show_tags.setText(f"Tags ({tags})" if tags else "Tags")
+
+    def _populate_tags(self, current: Optional[QTreeWidgetItem]) -> None:
+        self._updating_checks = True
+        self.list_tags.clear()
+        chosen = list(current.data(0, TAGS_ROLE)) if current is not None else []
+        folded = {category_rules.fold(t) for t in chosen}
+        known = {category_rules.fold(t) for t in self._tags}
+        for name in self._tags:
+            item = QListWidgetItem(name)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if category_rules.fold(name) in folded else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.list_tags.addItem(item)
+        for name in chosen:  # (kept, but no tag has this name now: untick it to drop it)
+            if category_rules.fold(name) not in known:
+                item = QListWidgetItem(f"{name}   (no tag has this name)")
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked)
+                item.setForeground(Qt.GlobalColor.gray)
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                self.list_tags.addItem(item)
+        self.lbl_no_tags.setVisible(not self._tags)
+        has_item = current is not None
+        for widget in (self.list_tags, self.btn_any_tag, self.btn_all_tags):
+            widget.setEnabled(has_item)
+        (self.btn_all_tags if has_item and current.data(0, MATCH_ALL_ROLE) else self.btn_any_tag).setChecked(True)
+        self._update_switch_counts(current)
+        self._updating_checks = False
+
+    def _on_tag_toggled(self, _item: QListWidgetItem) -> None:
+        if self._updating_checks:
+            return
+        current = self.tree.currentItem()
+        if current is None:
+            return
+        current.setData(0, TAGS_ROLE, [
+            self.list_tags.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.list_tags.count())
+            if self.list_tags.item(i).checkState() == Qt.CheckState.Checked
+        ])
+        self._update_switch_counts(current)
+        self._update_unassigned()
+
+    def _on_match_toggled(self, match_all: bool) -> None:
+        current = self.tree.currentItem()
+        if self._updating_checks or current is None:
+            return
+        current.setData(0, MATCH_ALL_ROLE, match_all)
 
     def _populate_types(self, current: Optional[QTreeWidgetItem]) -> None:
         self._updating_checks = True
@@ -553,6 +720,7 @@ class CategoriesPage(QWidget):
         # Preserve any stored extensions no longer in the Files list (dropped on save)
         stale = [e for e in current.data(0, EXTENSIONS_ROLE) if e not in self._available]
         current.setData(0, EXTENSIONS_ROLE, checked + stale)
+        self._update_switch_counts(current)
         self._update_unassigned()
 
     def _update_unassigned(self) -> None:
@@ -561,9 +729,9 @@ class CategoriesPage(QWidget):
             assigned |= category_extensions(main)
         unassigned = [e for e in self._available if e not in assigned]
         if unassigned:
-            self.lbl_unassigned.setText(
-                "Not in any category (shown under 'Uncategorized'): " + ", ".join(unassigned)
-            )
+            by_tag = any(item.data(0, TAGS_ROLE) for item in self._entries())
+            where = "under 'Uncategorized', unless a category's tags pick them up" if by_tag else "under 'Uncategorized'"
+            self.lbl_unassigned.setText(f"File types in no category (shown {where}): " + ", ".join(unassigned))
             self.lbl_unassigned.show()
         else:
             self.lbl_unassigned.hide()
@@ -1902,6 +2070,11 @@ class TagsPage(QWidget):
     how to undo it; Cancel on the Settings dialog calls revert() to undo them all.
     """
 
+    tags_changed = Signal()  # a tag was made, renamed or deleted (Categories lists them)
+    tag_renamed = Signal(str, str)  # old name, new name
+    tag_deleted = Signal(str)
+    category_requested = Signal(str)  # right-click > Add as Sidebar Category: the tag's name
+
     def __init__(self, repo: TagRepository, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.repo = repo
@@ -1926,6 +2099,8 @@ class TagsPage(QWidget):
         self.tree.header().setSectionResizeMode(1, self.tree.header().ResizeMode.ResizeToContents)
         self.tree.currentItemChanged.connect(self._update_buttons)
         self.tree.itemDoubleClicked.connect(lambda *_: self._on_rename())
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_menu)
         layout.addWidget(self.tree, 1)
 
         buttons = QHBoxLayout()
@@ -1985,6 +2160,30 @@ class TagsPage(QWidget):
             self.tree.setCurrentItem(selected)
         self._update_buttons()
 
+    def custom_tag_names(self) -> list[str]:
+        return [t.name for t in self.repo.list_tags(kind="custom")]
+
+    def _show_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+        tag = self._current_custom()
+        if tag is None:
+            return
+        menu = QMenu(self)
+        action_category = menu.addAction("Add as Sidebar Category")
+        action_category.setToolTip("Make a sidebar category that shows the files with this tag")
+        action_rename = menu.addAction("Rename...")
+        action_delete = menu.addAction("Delete")
+        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+        if chosen is action_category:
+            self.category_requested.emit(tag.name)
+        elif chosen is action_rename:
+            self._on_rename()
+        elif chosen is action_delete:
+            self._on_delete()
+
     def _current_custom(self) -> Optional[Tag]:
         item = self.tree.currentItem()
         tag = item.data(0, Qt.ItemDataRole.UserRole) if item else None
@@ -2011,6 +2210,7 @@ class TagsPage(QWidget):
             self._undo.append(lambda tag_id=tag.id: self.repo.delete_custom_tag(tag_id))
             self.changed = True
             self.refresh(select_id=tag.id)
+            self.tags_changed.emit()
             return
 
     def _on_rename(self) -> None:
@@ -2028,6 +2228,8 @@ class TagsPage(QWidget):
             self._undo.append(lambda tag_id=tag.id, old=tag.name: self.repo.rename_custom_tag(tag_id, old))
             self.changed = True
             self.refresh(select_id=tag.id)
+            self.tag_renamed.emit(tag.name, self.repo.get_tag(tag.id).name)
+            self.tags_changed.emit()
             return
 
     def _on_color(self) -> None:
@@ -2058,6 +2260,223 @@ class TagsPage(QWidget):
             self._undo.append(lambda: self.repo.restore_custom_tag(*snapshot))
             self.changed = True
             self.refresh()
+            self.tag_deleted.emit(tag.name)
+            self.tags_changed.emit()
+
+
+# ----------------------------------------------------------------------
+# General > Profiles
+# ----------------------------------------------------------------------
+class ProfilesPage(QWidget):
+    """Make, rename, duplicate and delete profiles. Changes are made on Save (apply()); a desktop
+    shortcut is made straight away (it changes no settings)."""
+
+    def __init__(self, repo: TagRepository, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.repo = repo
+        self._current = profiles.current_profile().id
+        # Each row: {"id", "name", "new": made here (with its "lists")}
+        self._rows: list[dict[str, Any]] = [{"id": p.id, "name": p.name, "new": False} for p in profiles.list_profiles()]
+        self._saved_names = {p.id: p.name for p in profiles.list_profiles()}
+        self._deleted: list[str] = []
+        self._new_count = 0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.addWidget(_page_header(
+            "Profiles",
+            "Each profile has its own library folders, file types, categories and collections, so a ZBrush "
+            "profile only shows your ZBrush files. Tags, favorites and ratings are shared by every profile. "
+            "Switch profile with the profile button at the top left of the window (Ctrl+Shift+P). "
+            "Changes made here happen when you click Save.",
+        ))
+        self.list_profiles = QListWidget()
+        self.list_profiles.currentRowChanged.connect(self._update_buttons)
+        self.list_profiles.itemDoubleClicked.connect(lambda *_: self._on_rename())
+        layout.addWidget(self.list_profiles, 1)
+
+        buttons = QHBoxLayout()
+        self.btn_new = QPushButton("+ New Profile...")
+        self.btn_new.setObjectName("primaryBtn")
+        self.btn_new.setToolTip("Make a profile, as a copy of the selected one or with no folders")
+        self.btn_new.clicked.connect(self._on_new)
+        self.btn_rename = QPushButton("Rename...")
+        self.btn_rename.setToolTip("Rename the selected profile (or double-click it)")
+        self.btn_rename.clicked.connect(self._on_rename)
+        self.btn_delete = QPushButton("Delete")
+        self.btn_delete.setToolTip("Delete the selected profile and its collections (not your files, tags or ratings)")
+        self.btn_delete.clicked.connect(self._on_delete)
+        self.btn_shortcut = QPushButton("Desktop Shortcut")
+        set_icon(self.btn_shortcut, "open_in", size=14)
+        self.btn_shortcut.setToolTip("Put a shortcut on the desktop that opens the app in the selected profile")
+        self.btn_shortcut.clicked.connect(self._on_shortcut)
+        for button in (self.btn_new, self.btn_rename, self.btn_delete, self.btn_shortcut):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.lbl_note = QLabel()
+        self.lbl_note.setObjectName("noteLabel")
+        self.lbl_note.setWordWrap(True)
+        self.lbl_note.hide()
+        layout.addWidget(self.lbl_note)
+        self._fill()
+
+    # ------------------ the list ------------------
+    def pending(self) -> list[Profile]:
+        """The profiles as they'll be after Save (for checking names)."""
+        return [Profile(row["id"], row["name"]) for row in self._rows]
+
+    def _fill(self, select: Optional[str] = None) -> None:
+        select = select or self._selected_id() or self._current
+        self.list_profiles.clear()
+        for row in self._rows:
+            text = row["name"]
+            if row["id"] == self._current:
+                text += "   (in use)"
+            elif row["new"]:
+                text += "   (new: made when you click Save)"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, row["id"])
+            if row["id"] == self._current:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.list_profiles.addItem(item)
+            if row["id"] == select:
+                self.list_profiles.setCurrentItem(item)
+        self._update_buttons()
+
+    def _selected_id(self) -> Optional[str]:
+        item = self.list_profiles.currentItem() if hasattr(self, "list_profiles") else None
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _row(self, profile_id: Optional[str]) -> Optional[dict[str, Any]]:
+        return next((r for r in self._rows if r["id"] == profile_id), None)
+
+    def _update_buttons(self, *_args) -> None:
+        row = self._row(self._selected_id())
+        self.btn_rename.setEnabled(row is not None)
+        in_use = row is not None and row["id"] == self._current
+        self.btn_delete.setEnabled(row is not None and not in_use)
+        self.btn_delete.setToolTip(
+            "The profile in use can't be deleted: switch to another one first" if in_use
+            else "Delete the selected profile and its collections (not your files, tags or ratings)"
+        )
+        self.btn_shortcut.setEnabled(row is not None and not row["new"])
+        self.btn_shortcut.setToolTip(
+            "Click Save first: the profile is made then" if row is not None and row["new"]
+            else "Put a shortcut on the desktop that opens the app in the selected profile"
+        )
+
+    def _lists_for(self, profile_id: str) -> dict[str, Any]:
+        row = self._row(profile_id)
+        if row is not None and row["new"]:
+            return copy.deepcopy(row["lists"])
+        return profiles.new_lists(profile_id)
+
+    # ------------------ editing ------------------
+    def _on_new(self) -> None:
+        from ui.profile_dialogs import NewProfileDialog
+
+        source = self._row(self._selected_id()) or self._row(self._current)
+        dialog = NewProfileDialog(Profile(source["id"], source["name"]), self, taken=self.pending())
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            copy_of = dialog.copy_of()
+            lists = self._lists_for(copy_of) if copy_of is not None else profiles.new_lists(None)
+            self._new_count += 1
+            new_id = f"new-{self._new_count}"
+            self._rows.append({"id": new_id, "name": dialog.name(), "new": True, "lists": lists})
+            self._fill(select=new_id)
+        finally:
+            dialog.deleteLater()
+
+    def _on_rename(self) -> None:
+        row = self._row(self._selected_id())
+        if row is None:
+            return
+        name, ok = QInputDialog.getText(self, "Rename Profile", f"Name (up to {profiles.MAX_NAME_LENGTH} characters):", text=row["name"])
+        while ok:
+            try:
+                row["name"] = profiles.validate_name(name, exclude_id=row["id"], taken=self.pending())
+            except ProfileError as exc:
+                QMessageBox.warning(self, "Can't Rename Profile", str(exc))
+                name, ok = QInputDialog.getText(self, "Rename Profile", "Name:", text=name)
+                continue
+            self._fill(select=row["id"])
+            return
+
+    def _on_delete(self) -> None:
+        row = self._row(self._selected_id())
+        if row is None or row["id"] == self._current:
+            return
+        if not row["new"]:
+            own = sum(1 for saved in self.repo.list_saved_searches() if saved.profile == row["id"])
+            collections = f" and its {own} collection{'s' if own != 1 else ''}" if own else ""
+            answer = QMessageBox.question(
+                self, "Delete Profile",
+                f'Delete the profile "{row["name"]}"{collections}?\n\nIts folders, file types and categories go '
+                "with it. Your files, tags, favorites and ratings aren't touched. (Cancel in Settings keeps it.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._deleted.append(row["id"])
+        self._rows.remove(row)
+        self._fill(select=self._current)
+
+    def _on_shortcut(self) -> None:
+        row = self._row(self._selected_id())
+        if row is None or row["new"]:
+            return
+        profile = Profile(row["id"], row["name"])
+        self.btn_shortcut.setEnabled(False)
+        self.lbl_note.setText("Making the shortcut...")
+        self.lbl_note.show()
+        run_job(lambda: profiles.create_desktop_shortcut(profile), self._on_shortcut_made, self._on_shortcut_failed)
+
+    def _on_shortcut_made(self, path: Path) -> None:
+        if not shiboken6.isValid(self):
+            return
+        self.lbl_note.setText(f'Made "{path.name}" on the desktop: it opens the app in that profile.')
+        self._update_buttons()
+
+    def _on_shortcut_failed(self, error: str) -> None:
+        if not shiboken6.isValid(self):
+            return
+        self.lbl_note.setText(f"The shortcut couldn't be made: {error}")
+        self._update_buttons()
+
+    # ------------------ Save ------------------
+    def changed(self) -> bool:
+        return bool(self._deleted) or any(
+            row["new"] or row["name"] != self._saved_names.get(row["id"]) for row in self._rows
+        )
+
+    def apply(self) -> list[str]:
+        """Make the changes (on Save). Returns the problems, if any (each change is tried)."""
+        problems = []
+        for profile_id in self._deleted:
+            try:
+                profiles.delete_profile(profile_id)
+                self.repo.delete_profile_searches(profile_id)
+            except (ProfileError, Exception) as exc:  # pylint: disable=broad-except
+                problems.append(str(exc))
+        for row in self._rows:
+            if not row["new"] and row["name"] != self._saved_names.get(row["id"]):
+                try:
+                    profiles.rename_profile(row["id"], row["name"])
+                except ProfileError as exc:
+                    problems.append(str(exc))
+        for row in self._rows:
+            if row["new"]:
+                try:
+                    profiles.create_profile(row["name"], lists=row["lists"])
+                except ProfileError as exc:
+                    problems.append(str(exc))
+        return problems
 
 
 # ----------------------------------------------------------------------
@@ -2321,10 +2740,13 @@ class SettingsDialog(QDialog):
         self.alpha_relief_changed = False
         self.archives_changed = False  # 7-Zip's location, or whether files inside archives are shown
         self.apps_changed = False  # the apps in use (Settings > Apps)
+        self.profiles_changed = False  # made, renamed or deleted (Settings > Profiles)
+        self._tag_edits: list[Callable[[list[str]], list[str]]] = []  # for other profiles' categories
 
         self.page_folders = FoldersPage(self._orig_folders)
         self.page_files = FilesPage(self._orig_extensions)
-        self.page_categories = CategoriesPage(self._orig_categories, self._orig_extensions)
+        self.page_tags = TagsPage(get_repository())
+        self.page_categories = CategoriesPage(self._orig_categories, self._orig_extensions, self.page_tags.custom_tag_names())
         self.page_appearance = AppearancePage(
             self.page_categories, self._orig_theme, self._orig_thumbnail_size, self._orig_texture
         )
@@ -2334,11 +2756,27 @@ class SettingsDialog(QDialog):
         self.page_archives = ArchivesPage(self._orig_seven_zip_path, self._orig_archive_contents)
         self.page_apps = AppsPage(get_found_apps(), get_app_choices(), get_custom_apps(), get_app_types())
         self.page_artbook = ArtbookPage(artbook)
-        self.page_tags = TagsPage(get_repository())
+        self.page_profiles = ProfilesPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
         self.page_about = AboutPage()
 
         self.page_files.validity_changed.connect(self._on_files_validity_changed)
+        self.page_tags.tags_changed.connect(self._on_tags_changed)
+        self.page_tags.tag_renamed.connect(self.page_categories.rename_tag)
+        self.page_tags.tag_deleted.connect(self.page_categories.remove_tag)
+        self.page_tags.category_requested.connect(self._on_tag_category_requested)
+        self.page_tags.tag_renamed.connect(self._on_tag_renamed)
+        self.page_tags.tag_deleted.connect(self._on_tag_deleted)
+        # (Folders, Files and Categories belong to the profile in use: they say which)
+        in_use = profiles.current_profile().name
+        for page in (self.page_folders, self.page_files, self.page_categories):
+            note = QLabel(
+                f"Profile: <b>{html.escape(in_use)}</b>. Each profile has its own folders, file types and "
+                "categories (Settings > Profiles)."
+            )
+            note.setObjectName("mutedLabel")
+            note.setWordWrap(True)
+            page.layout().insertWidget(1, note)
         self.page_files.txt_extensions.textChanged.connect(self._sync_category_extensions)
 
         root = QVBoxLayout(self)
@@ -2364,6 +2802,7 @@ class SettingsDialog(QDialog):
             ("Folders", self.page_folders),
             ("Files", self.page_files),
             ("Categories", self.page_categories),
+            ("Profiles", self.page_profiles),
             ("Appearance", self.page_appearance),
             ("Video", self.page_video),
             ("Archives", self.page_archives),
@@ -2466,6 +2905,20 @@ class SettingsDialog(QDialog):
         self.page_tags.revert()
         super().reject()
 
+    def _on_tag_renamed(self, old: str, new: str) -> None:
+        self._tag_edits.append(lambda tags, old=old, new=new: category_rules.renamed(tags, old, new))
+
+    def _on_tag_deleted(self, name: str) -> None:
+        self._tag_edits.append(lambda tags, name=name: category_rules.without(tags, name))
+
+    def _on_tags_changed(self) -> None:
+        self.page_categories.set_available_tags(self.page_tags.custom_tag_names())
+
+    def _on_tag_category_requested(self, tag: str) -> None:
+        """Tags page > right-click > Add as Sidebar Category: make it, and show it on the Categories page."""
+        self.page_categories.add_tag_category(tag)
+        self.show_page("Categories")
+
     def _sync_category_extensions(self) -> None:
         if self.page_files.is_valid():
             self.page_categories.set_available_extensions(self.page_files.extensions())
@@ -2506,6 +2959,13 @@ class SettingsDialog(QDialog):
         if self.categories_changed or self.extensions_changed:
             # Re-save categories so file types removed on the Files page are dropped
             set_categories(categories)
+        for edit in self._tag_edits:  # (tags renamed or deleted: other profiles' categories follow)
+            profiles.edit_other_profiles_categories(edit)
+        if self.page_profiles.changed():
+            self.profiles_changed = True
+            problems = self.page_profiles.apply()
+            if problems:
+                QMessageBox.warning(self, "Profiles", "Some profile changes couldn't be made:\n\n" + "\n".join(problems))
         remove_unused_category_icons(categories)
         if self.theme_changed:
             set_theme(theme_id)

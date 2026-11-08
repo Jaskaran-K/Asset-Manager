@@ -14,15 +14,17 @@ import time
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import shiboken6
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
 
 from core import archives
+from core.category_rules import tag_names_by_id
 from core.library_snapshot import save_snapshot
 from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
 from core.metadata import read_cost, read_details
+from core.profiles import current_profile, other_profiles_folders
 from core.scanner import AssetItem, AssetScanner, asset_sort_key
 from core.settings import get_archive_contents, get_file_extensions
 from core.tag_repository import NO_MARKS, AssetMeta, Marks, Tag, TagRepository, get_repository
@@ -36,14 +38,21 @@ class ScanWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, folders: list[Path], extensions: list[str], save_snapshot: bool = False, archive_contents: bool = False):
+    def __init__(
+        self, folders: list[Path], extensions: list[str], save_snapshot: bool = False, archive_contents: bool = False,
+        profile_id: Optional[str] = None, keep_folders: Optional[list[Path]] = None,
+    ):
         """folders: folders to scan with their subfolders, or an archive (its files are listed).
-        archive_contents: also list the files inside the archives found."""
+        archive_contents: also list the files inside the archives found. profile_id: the profile a
+        library scan (save_snapshot) is for; keep_folders: the other profiles' library folders, whose
+        files the database keeps (core.profiles)."""
         super().__init__()
         self.folders = folders
         self.extensions = extensions
         self.save_snapshot = save_snapshot  # library scans are remembered for an instant next launch
         self.archive_contents = archive_contents
+        self.profile_id = profile_id
+        self.keep_folders = list(keep_folders or [])
         self._stop = threading.Event()
 
     def cancel(self) -> None:
@@ -74,10 +83,13 @@ class ScanWorker(QObject):
                 return
             assets.sort(key=asset_sort_key)
             # A library scan also drops database rows of files it didn't find (folders browsed before)
-            info = self._sync_tags(assets, forget_others=self.save_snapshot, should_stop=self._stop.is_set)
+            info = self._sync_tags(
+                assets, forget_others=self.save_snapshot, should_stop=self._stop.is_set,
+                keep_folders=self.keep_folders, scanned_folders=self.folders,
+            )
             info["dirs"] = directories
             if self.save_snapshot and info["error"] is None:
-                save_snapshot(self.folders, self.extensions, assets, info["ids"], self.archive_contents)
+                save_snapshot(self.folders, self.extensions, assets, info["ids"], self.archive_contents, self.profile_id)
             self.finished.emit(assets, info)
         except Exception as exc:  # pylint: disable=broad-except
             self.failed.emit(str(exc))
@@ -89,16 +101,18 @@ class ScanWorker(QObject):
 
     @staticmethod
     def _sync_tags(
-        assets: list[AssetItem], forget_others: bool = False, should_stop: Optional[Callable[[], bool]] = None
+        assets: list[AssetItem], forget_others: bool = False, should_stop: Optional[Callable[[], bool]] = None,
+        keep_folders: Sequence[Path] = (), scanned_folders: Sequence[Path] = (),
     ) -> dict:
         """Record the assets and their default file type tags (also backfills older libraries).
-        forget_others: remove rows of files not in assets that have nothing worth keeping."""
+        forget_others: remove rows of files not in assets that have nothing worth keeping (but not
+        those in keep_folders, other profiles' folders, unless also in scanned_folders)."""
         repo = get_repository()
         try:
             relinked = repo.relink_moved_assets(assets)  # before sync, so moved files keep their rows
             ids = repo.sync_assets(assets)
             if forget_others and not (should_stop and should_stop()):  # (a replaced scan leaves them alone)
-                repo.forget_unscanned_assets(assets)
+                repo.forget_unscanned_assets(assets, keep_folders, scanned_folders)
             repo.fill_missing_hashes()
             asset_ids = list(ids.values())
             return {
@@ -160,11 +174,13 @@ class LibraryState(QObject):
         self.repo = repo or get_repository()
         self.assets: list[AssetItem] = []
         self.ids: dict[str, int] = {}  # database ids by str(asset.path)
-        self.tags: dict[int, list[Tag]] = {}
+        self._tags: dict[int, list[Tag]] = {}
+        self._tag_names: Optional[dict[int, frozenset[str]]] = None  # (tag_names(), built when needed)
         self.marks: dict[int, Marks] = {}  # favorites / ratings (unmarked files are left out)
         self.meta: dict[int, AssetMeta] = {}  # resolution / duration / faces, read in the background
         self.meta_todo = 0  # files whose details are still to be read
         self._meta_generation = 0
+        self._view_generation = 0  # (reset(): results for what was shown before are dropped)
         self.scan_done_once = False  # a real scan has finished (snapshot data is outdated then)
 
         # Background scan worker thread
@@ -214,8 +230,25 @@ class LibraryState(QObject):
         """Read every file's favorite and rating from the database again (after an import)."""
         self.marks = self.repo.marks_by_asset(list(self.ids.values()))
 
+    @property
+    def tags(self) -> dict[int, list[Tag]]:
+        """{database id: the file's tags}. Change it with update_tags() or by setting it."""
+        return self._tags
+
+    @tags.setter
+    def tags(self, tags: dict[int, list[Tag]]) -> None:
+        self._tags = tags
+        self._tag_names = None
+
     def update_tags(self, tags_by_asset: dict[int, list[Tag]]) -> None:
-        self.tags.update(tags_by_asset)
+        self._tags.update(tags_by_asset)
+        self._tag_names = None
+
+    def tag_names(self) -> dict[int, frozenset[str]]:
+        """{database id: the file's tag names, folded}, for sidebar categories with tags."""
+        if self._tag_names is None:
+            self._tag_names = tag_names_by_id(self._tags)
+        return self._tag_names
 
     # ------------------------------------------------------------------
     # The snapshot (last session's library, shown while the first scan runs)
@@ -226,13 +259,13 @@ class LibraryState(QObject):
         run_in_background(
             self.repo,
             lambda repo: (repo.tags_by_asset(asset_ids), repo.marks_by_asset(asset_ids)),
-            self._on_snapshot_details,
+            partial(self._on_snapshot_details, self._view_generation),
             _ignore_result,
         )
 
-    def _on_snapshot_details(self, result) -> None:
-        if self.scan_done_once:
-            return  # the real scan already delivered newer data
+    def _on_snapshot_details(self, generation: int, result) -> None:
+        if self.scan_done_once or generation != self._view_generation:
+            return  # the real scan already delivered newer data (or another profile is shown)
         self.tags, self.marks = result
         self.snapshot_details.emit()
 
@@ -245,7 +278,11 @@ class LibraryState(QObject):
         self._retire_scan()
 
         self.scan_thread = QThread(self)
-        self.scan_worker = ScanWorker(folders, extensions, save_snapshot=save_snapshot, archive_contents=get_archive_contents())
+        profile, keep = (current_profile().id, other_profiles_folders()) if save_snapshot else (None, [])
+        self.scan_worker = ScanWorker(
+            folders, extensions, save_snapshot=save_snapshot, archive_contents=get_archive_contents(),
+            profile_id=profile, keep_folders=keep,
+        )
         self.scan_worker.moveToThread(self.scan_thread)
 
         self.scan_thread.started.connect(self.scan_worker.run)
@@ -312,6 +349,20 @@ class LibraryState(QObject):
         """No folders to show (none set up)."""
         self.assets = []
 
+    def reset(self) -> None:
+        """Forget everything shown (another profile is shown next): its scan, folder rescans,
+        snapshot details and file details still being read are dropped when they arrive."""
+        self._retire_scan()
+        self._view_generation += 1
+        self._meta_generation += 1
+        self.meta_todo = 0
+        self._rescan_busy = False
+        self._queued_folders.clear()
+        self.watcher.clear()
+        self.scan_done_once = False
+        self.assets, self.ids, self.marks, self.meta = [], {}, {}, {}
+        self.tags = {}
+
     def save_view(self) -> "SavedView":
         """What's shown now, to come back to (leaving an opened archive) without waiting for a scan."""
         return SavedView(list(self.assets), dict(self.ids), dict(self.tags), dict(self.marks), dict(self.meta))
@@ -340,11 +391,13 @@ class LibraryState(QObject):
         run_in_background(
             self.repo,
             lambda repo: rescan_folders(folders, extensions, watched, repo, archive_contents=archive_contents),
-            self._on_folders_rescanned,
-            self._on_folders_rescan_failed,
+            partial(self._on_folders_rescanned, self._view_generation),
+            partial(self._on_folders_rescan_failed, self._view_generation),
         )
 
-    def _on_folders_rescanned(self, result: FolderRescan) -> None:
+    def _on_folders_rescanned(self, generation: int, result: FolderRescan) -> None:
+        if generation != self._view_generation:
+            return  # (folders of the profile shown before)
         self._rescan_busy = False
         for tree in result.removed_trees:
             self.watcher.remove_tree(tree)
@@ -360,7 +413,7 @@ class LibraryState(QObject):
         if edited:
             self.files_edited.emit(edited)  # edited: redraw their thumbnails
         self.ids.update(result.ids)
-        self.tags.update(result.tags)
+        self.update_tags(result.tags)
         self.marks.update(result.marks)
 
         added, removed = len(after - before.keys()), len(before.keys() - after)
@@ -375,7 +428,9 @@ class LibraryState(QObject):
             folders, self._queued_folders = self._queued_folders, []
             self._on_folders_changed(folders)
 
-    def _on_folders_rescan_failed(self, error: str) -> None:
+    def _on_folders_rescan_failed(self, generation: int, error: str) -> None:
+        if generation != self._view_generation:
+            return
         self._rescan_busy = False
         self._queued_folders.clear()
         self.live_update_failed.emit(error)

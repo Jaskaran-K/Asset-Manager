@@ -3,7 +3,7 @@
 Persists user preferences to ~/.3d_asset_manager_config.json:
 - scan_folders:     library folders scanned on startup / refresh
 - file_extensions:  file types the scanner picks up
-- categories:       sidebar main categories, their subcategories, file types, colors and icons
+- categories:       sidebar main categories, their subcategories, file types, tags, colors and icons
 - theme:            UI theme id ("dark", "light", "dark_purple", "neon_cyan")
 - thumbnail_size:   grid thumbnail size in pixels
 - ffmpeg_path:      ffmpeg executable for video proxies / poster frames (blank = search PATH)
@@ -404,6 +404,14 @@ def _sanitize_category_entry(raw: dict[str, Any]) -> dict[str, Any]:
     icon = raw.get("icon")
     if isinstance(icon, str) and icon:
         entry["icon"] = icon
+    # Tags (core.category_rules): files with any (or, with tag_match "all", every one) of them show too
+    tags = raw.get("tags")
+    if isinstance(tags, list):
+        names = list(dict.fromkeys(" ".join(t.split()) for t in tags if isinstance(t, str) and t.strip()))
+        if names:
+            entry["tags"] = names
+    if raw.get("tag_match") == "all":
+        entry["tag_match"] = "all"
     return entry
 
 
@@ -545,11 +553,14 @@ def import_category_icon(source: Path | str) -> Path:
 
 
 def remove_unused_category_icons(categories: list[dict[str, Any]]) -> None:
-    """Delete copied icon files that no category references any more."""
+    """Delete copied icon files that no category references any more (categories: the ones being
+    saved; every profile's saved ones are kept too)."""
     if not CATEGORY_ICONS_DIR.is_dir():
         return
     used = set()
-    for main in categories:
+    from .profiles import every_profiles_categories  # (it imports this module)
+
+    for main in [*categories, *(c for listed in every_profiles_categories() for c in listed)]:
         for entry in [main, *main.get("subcategories", [])]:
             if entry.get("icon"):
                 used.add(Path(entry["icon"]).resolve())

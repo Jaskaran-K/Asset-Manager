@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
+    QEvent,
     QItemSelection,
     QItemSelectionModel,
     QSize,
@@ -56,8 +57,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import apps, archives, crash_log, environment
+from core import apps, archives, crash_log, environment, profiles
 from core.asset_filter import filter_assets
+from core.category_rules import RowFilter
 from core.library_snapshot import load_snapshot
 from core.scanner import AssetItem
 from core import artbook_store
@@ -99,6 +101,7 @@ from ui.icons import app_icon
 from ui.library_sidebar import LibrarySidebar
 from ui.library_tools import LibraryTools
 from ui.library_state import LibraryState, LiveUpdate, SavedView, ScanReport
+from ui.profile_dialogs import ask_new_profile
 from ui import main_thread_gc, scroll_bar_watch
 from ui import shortcuts
 from ui.settings_dialog import SettingsDialog
@@ -144,9 +147,9 @@ class MainWindow(QMainWindow):
         self.archive_return: Optional[ArchiveReturn] = None
         self._opening_archive = False  # its files are being read (the grid says so meanwhile)
 
-        # Sidebar filter: ("all", None), ("exts", frozenset of extensions), ("uncategorized", None)
+        # Sidebar filter: ("all", None), ("category", RowFilter: file types and tags), ("uncategorized", None)
         self.filter_mode: str = "all"
-        self.filter_value: Optional[frozenset[str]] = None
+        self.filter_value: Optional[RowFilter] = None
         # The files and what's known about them (tags, favorites, details), kept up to date in the
         # background: scans, live updates, the snapshot (ui.library_state)
         self.repo = get_repository()
@@ -254,12 +257,15 @@ class MainWindow(QMainWindow):
         self.asset_toolbar = CompactToolbar(
             self.asset_panel, self.control_bar,
             [
-                (self.btn_open_folder, "Open Folder"), (self.btn_library, "Library"), (self.btn_back, "Back"),
+                (self.btn_profile, ""), (self.btn_open_folder, "Open Folder"), (self.btn_library, "Library"),
+                (self.btn_back, "Back"),
                 (self.btn_refresh, "Refresh"),
                 (self.btn_view_asset, "Preview"), (self.btn_tag, "Tag"), (self.btn_tools, "Tools"),
             ],
             on_change=self._on_toolbar_compact,
         )
+        self._profile_id = profiles.current_profile().id
+        self._show_profile()
         self.asset_panel.installEventFilter(self)  # its resizes: see eventFilter
         # The shared View / Settings buttons moving in or out changes what the toolbar needs
         self.view_modes.mode_changed.connect(self._on_view_mode_changed)
@@ -337,6 +343,20 @@ class MainWindow(QMainWindow):
         self.btn_sidebar.setToolTip("Show / hide the sidebar (Ctrl+B)")
         self.btn_sidebar.clicked.connect(lambda: self.sidebar.toggle())
         layout.addWidget(self.btn_sidebar)
+
+        # Profile: which library (folders, file types, categories, collections) is shown (core.profiles)
+        self.btn_profile = QPushButton()
+        set_icon(self.btn_profile, "profile")
+        self.btn_profile.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.profile_menu = QMenu(self.btn_profile)
+        self.profile_menu.setToolTipsVisible(True)
+        self.profile_menu.aboutToShow.connect(self._fill_profile_menu)
+        self.btn_profile.setMenu(self.profile_menu)
+        layout.addWidget(self.btn_profile)
+        self.action_profiles = QAction("Switch Profile", self)
+        self.action_profiles.setShortcut(shortcuts.sequence("main.profiles"))
+        self.action_profiles.triggered.connect(self.btn_profile.showMenu)
+        self.addAction(self.action_profiles)
 
         # "Open Folder" button: browse a single folder outside the library
         self.btn_open_folder = QPushButton("Open Folder")
@@ -527,14 +547,24 @@ class MainWindow(QMainWindow):
         if name:
             self.status_label.setText(f'Saved the collection "{name}".')
 
-    def _rebuild_sidebar(self) -> None:
-        """Recreate the sidebar rows (the categories changed) and show All Assets."""
-        self.sidebar_tree.rebuild()
+    def _rebuild_sidebar(self, collapse: bool = False) -> None:
+        """Recreate the sidebar rows (the categories changed) and show All Assets. collapse: close
+        the categories the user had opened too (another profile's sidebar)."""
+        self.sidebar_tree.rebuild(collapse)
         self.filter_mode, self.filter_value = "all", None
         self._update_sidebar_counts()
 
     def _update_sidebar_counts(self) -> None:
-        self.sidebar_tree.update_counts(self.library.assets, lambda asset: self._marks_of(asset).favorite)
+        tag_names = self.library.tag_names() if self.sidebar_tree.uses_tags else {}
+        self.sidebar_tree.update_counts(
+            self.library.assets, lambda asset: self._marks_of(asset).favorite, self.library.ids, tag_names,
+        )
+
+    def _sidebar_row_uses_tags(self) -> bool:
+        """The grid shows a sidebar row that picks files by tag (so tagging changes what it shows)."""
+        if self.filter_mode == "category":
+            return self.filter_value is not None and self.filter_value.uses_tags
+        return self.filter_mode == "uncategorized" and self.sidebar_tree.uses_tags
 
     def _build_grid_view(self) -> QWidget:
         """Build thumbnail grid widget and empty placeholder state."""
@@ -690,6 +720,81 @@ class MainWindow(QMainWindow):
             self._refresh_grid_display()
             self.status_label.setText("No library folders set. Add folders in Settings > Folders.")
 
+    # ------------------------------------------------------------------
+    # Profiles (core.profiles): each has its own folders, file types, categories and collections
+    # ------------------------------------------------------------------
+    def _show_profile(self) -> None:
+        """The profile button and the window title name the profile in use."""
+        name = profiles.current_profile().name
+        self.btn_profile.setToolTip(
+            f"Profile: {name}. Switch profile: each has its own folders, file types, categories and "
+            "collections (Ctrl+Shift+P)"
+        )
+        several = len(profiles.list_profiles()) > 1
+        self.setWindowTitle(f"{APP_NAME} - {name}" if several else APP_NAME)
+        self.asset_toolbar.set_text(self.btn_profile, name)
+
+    def _fill_profile_menu(self) -> None:
+        menu = self.profile_menu
+        menu.clear()
+        current = profiles.current_profile().id
+        for profile in profiles.list_profiles():
+            action = menu.addAction(profile.name)
+            action.setCheckable(True)
+            action.setChecked(profile.id == current)
+            action.setToolTip("The profile in use" if profile.id == current else f"Show the {profile.name} profile's library")
+            action.triggered.connect(lambda _checked=False, chosen=profile.id: self.switch_profile(chosen))
+        menu.addSeparator()
+        action_new = menu.addAction("New Profile...")
+        set_icon(action_new, "profile")
+        action_new.setToolTip("Make a profile: its own folders, file types, categories and collections")
+        action_new.triggered.connect(self._new_profile)
+        action_manage = menu.addAction("Manage Profiles...")
+        set_icon(action_manage, "settings")
+        action_manage.setToolTip("Rename, duplicate or delete profiles, or put one on the desktop (Settings > Profiles)")
+        action_manage.triggered.connect(self._manage_profiles)
+
+    def _new_profile(self) -> None:
+        profile = ask_new_profile(self)
+        if profile is not None:
+            self.switch_profile(profile.id)
+            if not get_scan_folders():
+                self.status_label.setText(f'Made the profile "{profile.name}". Add its folders in Settings > Folders.')
+
+    def _manage_profiles(self) -> None:
+        self._open_settings(page="Profiles")
+
+    def switch_profile(self, profile_id: str) -> None:
+        """Show another profile's library: its folders, categories and collections."""
+        if profile_id == profiles.current_profile().id and profile_id == self._profile_id:
+            return
+        try:
+            profile = profiles.switch_profile(profile_id)
+        except profiles.ProfileError as exc:
+            QMessageBox.warning(self, "Can't Switch Profile", str(exc))
+            return
+        self._follow_profile()
+        self.status_label.setText(f'Switched to the profile "{profile.name}".')
+
+    def _follow_profile(self) -> None:
+        """Show the profile in use now (switched here, or in another copy of the app)."""
+        self._profile_id = profiles.current_profile().id
+        self._show_profile()
+        self.library.reset()
+        self.search_bar.set_query_text("")
+        self._tag_match_ids = None
+        self._query = parse_query("")
+        self._rebuild_sidebar(collapse=True)
+        self._refresh_grid_display()
+        self._load_library()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            # Another copy of the app switched profile meanwhile: they share the settings file
+            if profiles.current_profile().id != self._profile_id:
+                self._follow_profile()
+
     def _update_library_controls(self) -> None:
         """Update the path field and library buttons for the current mode."""
         in_library_mode = self.browse_folder is None
@@ -755,9 +860,11 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Added '{self.browse_folder}' to the library.")
         self._update_library_controls()
 
-    def _open_settings(self) -> None:
-        """Open the settings dialog and apply any saved changes."""
+    def _open_settings(self, page: str = "") -> None:
+        """Open the settings dialog (at a page, if given) and apply any saved changes."""
         dialog = SettingsDialog(self, artbook=self.artbook_panel)
+        if page:
+            dialog.show_page(page)
         accepted = dialog.exec() == SettingsDialog.DialogCode.Accepted
         # Free it (a child of the window): each one kept would be restyled on every theme change
         dialog.deleteLater()  # (it can't close while moving pages or updating, so nothing is left running)
@@ -765,6 +872,9 @@ class MainWindow(QMainWindow):
             self._after_tags_changed()
         if not accepted:
             return
+        if dialog.profiles_changed:
+            self._show_profile()
+            self.sidebar_tree.reload_collections()  # (a deleted profile's are gone)
 
         if dialog.thumbnail_size_changed:
             self.thumbnail_size = get_thumbnail_size()
@@ -832,7 +942,10 @@ class MainWindow(QMainWindow):
     def _on_snapshot_details(self) -> None:
         self._update_sidebar_counts()
         self._reload_tag_suggestions()
-        self.list_grid.viewport().update()
+        if self._sidebar_row_uses_tags():
+            self._refresh_grid_display(keep_view=True)  # (the tags it picks files by just arrived)
+        else:
+            self.list_grid.viewport().update()
 
     def _start_scan(self, folders: list[Path], save_snapshot: bool = False) -> None:
         """Scan directories in a background thread to keep UI snappy."""
@@ -926,9 +1039,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Filtering & Grid Rendering
     # ------------------------------------------------------------------
-    def _on_sidebar_row(self, mode: str, extensions: Optional[frozenset[str]]) -> None:
+    def _on_sidebar_row(self, mode: str, shows: Optional[RowFilter]) -> None:
         """A sidebar category or group was clicked: show its files."""
-        self.filter_mode, self.filter_value = mode, extensions
+        self.filter_mode, self.filter_value = mode, shows
         self._refresh_grid_display()
         self.sidebar.close_if_floating()
 
@@ -975,7 +1088,8 @@ class MainWindow(QMainWindow):
         """The files to show: the sidebar row, tag matches (found in SQL by _run_tag_search), name words
         and detail filters (core.asset_filter)."""
         return filter_assets(
-            self.library.assets, mode=self.filter_mode, extensions=self.filter_value, categorized=self.sidebar_tree.categorized,
+            self.library.assets, mode=self.filter_mode, row=self.filter_value, categorized=self.sidebar_tree.categorized,
+            tag_names=self.library.tag_names() if self._sidebar_row_uses_tags() else {},
             tag_matches=self._tag_match_ids, query=self._query,
             ids=self.library.ids, marks=self.library.marks, meta=self.library.meta,
         )
@@ -1589,8 +1703,12 @@ class MainWindow(QMainWindow):
 
     def _apply_tag_cache(self, tags_by_asset: dict[int, list[Tag]]) -> None:
         self.library.update_tags(tags_by_asset)  # tooltips are built on hover, so they pick this up
+        if self.sidebar_tree.uses_tags:
+            self._update_sidebar_counts()  # (categories that show files by tag)
         if self.search_bar.has_tag_filters():
             self._run_tag_search()
+        elif self._sidebar_row_uses_tags():
+            self._refresh_grid_display(keep_view=True)
 
     def _reload_tag_suggestions(self) -> None:
         try:
@@ -1677,6 +1795,18 @@ def main() -> None:
 
     cleanup_after_update()
     apply_new_defaults()  # new file types (zip, rar, 7z) reach the user's own lists once
+    profile_note = ""
+    if "--profile" in sys.argv:  # (a profile's desktop shortcut: Settings > Profiles)
+        index = sys.argv.index("--profile")
+        wanted = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+        found = profiles.find_profile(wanted) if wanted else None
+        if found is not None:
+            profiles.switch_profile(found.id)
+        else:
+            profile_note = (
+                f'There is no profile "{wanted}" any more, so the app opened in "{profiles.current_profile().name}". '
+                "Make a new shortcut in Settings > Profiles."
+            )
     archives.configure_seven_zip(get_seven_zip_path())
     previous_session_crashed = crash_log.start_session(APP_NAME, APP_VERSION)
     qInstallMessageHandler(_qt_message_handler)
@@ -1716,6 +1846,8 @@ def main() -> None:
     window.show()
     if previous_session_crashed:
         QTimer.singleShot(400, window.show_crash_notice)
+    if profile_note:
+        QTimer.singleShot(400, lambda: QMessageBox.information(window, "Profile Not Found", profile_note))
 
     sys.exit(app.exec())
 

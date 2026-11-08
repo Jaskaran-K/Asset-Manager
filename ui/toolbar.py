@@ -78,6 +78,14 @@ class CompactToolbar:
         if self.on_change is not None:
             self.on_change(compact)
 
+    def set_text(self, button: QAbstractButton, text: str) -> None:
+        """Change a button's text at full size (the profile button shows the profile's name)."""
+        self.buttons = [(b, text if b is button else t) for b, t in self.buttons]
+        self._text_width = None  # (the full toolbar's width changed)
+        if not self.compact:
+            button.setText(text)
+        self.update()
+
     def update(self) -> None:
         """Re-check: call on the panel's resize, and when the toolbar's contents change."""
         if self._text_width is None:

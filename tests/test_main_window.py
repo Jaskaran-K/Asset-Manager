@@ -170,7 +170,7 @@ def test_sidebar_toggles_and_the_floating_one_closes_after_a_pick(library, qapp)
         assert not window.sidebar.is_open() and not window.btn_sidebar.isChecked()
         window.btn_sidebar.click()
         window.sidebar.set_pinned(False)
-        png = next(row for row, _name, exts in window.sidebar_tree.rows() if exts == frozenset({".png"}))
+        png = next(row for row, _name, shows in window.sidebar_tree.rows() if shows.extensions == frozenset({".png"}))
         window.sidebar_tree._on_item_clicked(png)
         assert names_in_grid(window) == ["big_wall.png", "small_brick.png"]
         assert not window.sidebar.is_open()  # floating: slides away after picking

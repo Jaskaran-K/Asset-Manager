@@ -63,6 +63,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("main.open", MAIN, "Double-click", "Open an asset in the viewer"),
     Shortcut("main.tag", MAIN, "Ctrl+T", "Tag the selected files", "Ctrl+T"),
     Shortcut("main.settings", MAIN, "Ctrl+,", "Open Settings", "Ctrl+,"),
+    Shortcut("main.profiles", MAIN, "Ctrl+Shift+P", "Switch profile (each has its own folders, file types, categories and collections)", "Ctrl+Shift+P"),
     Shortcut("main.undo", MAIN, "Ctrl+Z", "Undo the last tag, favorite or rating change", "Ctrl+Z"),
     Shortcut("main.redo", MAIN, "Ctrl+Y", "Redo it", "Ctrl+Y"),
     Shortcut("main.favorite", MAIN, "F", "Add / remove the selected files from Favorites", "F"),

@@ -592,6 +592,19 @@ def _render(p, primary, secondary):
     p.fillPath(_circle(12, 13.5, 3.4), primary)  # the lens
 
 
+def _profile(p, primary, secondary):
+    """A profile card: a person beside two lines."""
+    _body(p, _rounded(2.5, 4.5, 19, 15, 2.6), secondary)
+    p.fillPath(_circle(8.4, 10, 2.3), primary)  # the head
+    shoulders = QPainterPath()
+    shoulders.moveTo(4.6, 16.8)
+    shoulders.cubicTo(5.2, 13.4, 11.6, 13.4, 12.2, 16.8)
+    shoulders.closeSubpath()
+    p.fillPath(shoulders, primary)
+    _line(p, primary, 1.8, (14.6, 9.6), (18.6, 9.6))
+    _line(p, primary, 1.8, (14.6, 13.6), (17.4, 13.6))
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -632,7 +645,7 @@ ICONS: dict[str, IconPainter] = {
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
-    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render,
+    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile,
 }
 
 

@@ -1,7 +1,8 @@
 """The library as of the last full scan, so the grid can be shown instantly on the next launch.
 
 Saved after every full library scan (on the scan thread) to
-%LOCALAPPDATA%\\AssetManager\\library_snapshot.json. It's only used when the library
+%LOCALAPPDATA%\\AssetManager\\library_snapshot.json (library_snapshot_<id>.json for profiles other than
+Default: each has its own, core.profiles). It's only used when the library
 folders and file types are the same as when it was saved; the app still rescans in
 the background right away, so the snapshot is just a head start.
 """
@@ -19,10 +20,16 @@ from .scanner import AssetItem, determine_asset_group, determine_category_name
 SNAPSHOT_VERSION = 2  # 2: files inside archives
 
 
-def snapshot_path() -> Path:
+def snapshot_path(profile_id: Optional[str] = None) -> Path:
+    """A profile's snapshot (default: the profile in use)."""
     from .tag_repository import DB_PATH  # same folder as the library database (patched in tests)
 
-    return Path(DB_PATH).parent / "library_snapshot.json"
+    if profile_id is None:
+        from .profiles import current_profile
+
+        profile_id = current_profile().id
+    name = "library_snapshot.json" if profile_id == "default" else f"library_snapshot_{profile_id}.json"
+    return Path(DB_PATH).parent / name
 
 
 def _signature(folders: Sequence[Path], extensions: Sequence[str], archive_contents: bool) -> str:
@@ -47,14 +54,16 @@ def _row(asset: AssetItem, asset_id: Optional[int]) -> list:
 
 def save_snapshot(
     folders: Sequence[Path], extensions: Sequence[str], assets: Sequence[AssetItem], ids: dict[str, int],
-    archive_contents: bool = False,
+    archive_contents: bool = False, profile_id: Optional[str] = None,
 ) -> None:
+    """Remember a library scan for the profile (default: the one in use; a scan thread passes the
+    one it scanned for, in case the profile was switched meanwhile)."""
     data = {
         "version": SNAPSHOT_VERSION,
         "signature": _signature(folders, extensions, archive_contents),
         "assets": [_row(a, ids.get(str(a.path))) for a in assets],
     }
-    target = snapshot_path()
+    target = snapshot_path(profile_id)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_suffix(".partial")

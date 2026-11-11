@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import shutil
 import threading
 import time
@@ -54,6 +55,8 @@ MAX_NAME = 120
 PAGE_FILE = "page.json"
 BACKUP_FILE = "page.json.bak"
 DAMAGED_FILE = "page.json.damaged"  # (a damaged page.json, set aside rather than overwritten)
+HISTORY_DIR = "history"  # earlier versions of a page (see _keep_version)
+MAX_VERSIONS = 10
 
 IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".tga",
@@ -187,11 +190,163 @@ def save_page(page: dict[str, Any]) -> None:
         folder = page_dir(page_id)
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / PAGE_FILE
+        _keep_version(page_id, page)
         temp = json_files.write_temp(target, page)
         written = _written.get(page_id)  # (the page.json this session saved: if untouched since, it's good)
         json_files.replace(temp, target, _is_page, trusted=written is not None and _stamp(target) == written)
         _written[page_id] = _stamp(target)
         _saved_at[page_id] = modified
+
+
+# ----------------------------------------------------------------------
+# Earlier versions: <page>/history/<date_time>.json (+ .png, its thumbnail then)
+# ----------------------------------------------------------------------
+def history_dir(page_id: str) -> Path:
+    return page_dir(page_id) / HISTORY_DIR
+
+
+def _content(page: dict[str, Any]) -> Any:
+    """What makes a page what it is (not where it's scrolled to, or when it was saved)."""
+    return {key: value for key, value in page.items() if key not in ("view", "modified", "created")}
+
+
+def _version_stamp(when: float) -> str:
+    return time.strftime("%Y-%m-%d_%H%M%S", time.localtime(when))
+
+
+def _keep_version(page_id: str, page: dict[str, Any], force: bool = False) -> Optional[str]:
+    """Before a page is written: keep a copy of it as it is on disk, if this is its first change of
+    the day (or force). Holds _save_lock. Returns the copy's stamp, or None if none was made."""
+    current = page_dir(page_id) / PAGE_FILE
+    if not current.is_file():
+        return None
+    history = history_dir(page_id)
+    today = time.strftime("%Y-%m-%d")
+    stamps = _version_stamps(page_id)
+    if not force and stamps and stamps[0].startswith(today):
+        return None
+    on_disk = json_files.read(current, _is_page)
+    if on_disk is None or (not force and _content(on_disk) == _content(page)):
+        return None  # (unreadable: its backup is the safety net; unchanged: nothing to keep)
+    stamp = _version_stamp(time.time())
+    while stamp in stamps:  # (two in the same second: a restore straight after a change)
+        stamp = _version_stamp(time.time() + 1 + len(stamps))
+    try:
+        history.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(current, history / f"{stamp}.json")
+        thumb = thumbnail_path(page_id)
+        if thumb.is_file():
+            shutil.copy2(thumb, history / f"{stamp}.png")
+    except OSError:
+        return None  # (a version is a nice-to-have: never stops a save)
+    for old in [stamp, *stamps][MAX_VERSIONS:]:
+        for suffix in (".json", ".png"):
+            (history / f"{old}{suffix}").unlink(missing_ok=True)
+    return stamp
+
+
+def _version_stamps(page_id: str) -> list[str]:
+    """The page's versions, newest first."""
+    try:
+        return sorted((p.stem for p in history_dir(page_id).glob("*.json")), reverse=True)
+    except OSError:
+        return []
+
+
+def list_versions(page_id: str) -> list[dict[str, Any]]:
+    """The page's earlier versions, newest first: {"stamp", "time", "name", "images", "notes",
+    "thumbnail" (a path, or None)}. Unreadable ones are left out."""
+    versions = []
+    for stamp in _version_stamps(page_id):
+        path = history_dir(page_id) / f"{stamp}.json"
+        page = json_files.read(path, _is_page)
+        if page is None:
+            continue
+        try:
+            when = time.mktime(time.strptime(stamp, "%Y-%m-%d_%H%M%S"))
+        except ValueError:
+            when = path.stat().st_mtime
+        kinds = [item.get("kind") for item in page["items"] if isinstance(item, dict)]
+        thumb = path.with_suffix(".png")
+        versions.append({
+            "stamp": stamp, "time": when, "name": page.get("name") or "Untitled",
+            "images": kinds.count("image"), "notes": kinds.count("note"),
+            "thumbnail": thumb if thumb.is_file() else None,
+        })
+    return versions
+
+
+def _version(page_id: str, stamp: str) -> dict[str, Any]:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{6}", stamp):
+        raise PageError("That version doesn't exist.")
+    page = json_files.read(history_dir(page_id) / f"{stamp}.json", _is_page)
+    if page is None:
+        raise PageError("That version couldn't be read.")
+    return page
+
+
+def restore_version(page_id: str, stamp: str) -> dict[str, Any]:
+    """Make the page as it was in a version. How it is now is kept as a version first, so this can
+    be undone the same way. Returns the page as now saved."""
+    with _save_lock:
+        old = _version(page_id, stamp)
+        current = load_page(page_id)
+        restored = {**old, "id": page_id, "modified": max(time.time(), _saved_at.get(page_id, 0.0) + 0.001)}
+        _keep_version(page_id, current, force=True)
+        thumb = history_dir(page_id) / f"{stamp}.png"
+        save_page_now(restored)
+        try:
+            if thumb.is_file():
+                shutil.copy2(thumb, thumbnail_path(page_id))
+        except OSError:
+            pass
+        _summaries.pop(page_id, None)
+        return restored
+
+
+def restore_version_as_new(page_id: str, stamp: str) -> dict[str, Any]:
+    """A new page from a version (with the images it uses), placed right after the page."""
+    old = _version(page_id, stamp)
+    copy = duplicate_page(page_id)
+    when = time.strftime("%d %b %Y", time.strptime(stamp, "%Y-%m-%d_%H%M%S")).lstrip("0")
+    name = f"{old.get('name') or 'Untitled'} ({when})"
+    page = {**old, "id": copy["id"], "name": name[:MAX_NAME], "created": copy["created"], "modified": time.time()}
+    with _save_lock:
+        target = page_dir(copy["id"]) / PAGE_FILE
+        json_files.write(target, page, _is_page)  # (over the duplicate's page.json: not a change to keep)
+        _written[copy["id"]] = _stamp(target)
+        _saved_at[copy["id"]] = page["modified"]
+        thumb = history_dir(page_id) / f"{stamp}.png"
+        try:
+            if thumb.is_file():
+                shutil.copy2(thumb, thumbnail_path(copy["id"]))
+        except OSError:
+            pass
+    _summaries.pop(copy["id"], None)
+    return page
+
+
+def save_page_now(page: dict[str, Any]) -> None:
+    """save_page without keeping a version of what it replaces (a restore keeps its own)."""
+    with _save_lock:
+        page_id = page["id"]
+        target = page_dir(page_id) / PAGE_FILE
+        temp = json_files.write_temp(target, page)
+        written = _written.get(page_id)
+        json_files.replace(temp, target, _is_page, trusted=written is not None and _stamp(target) == written)
+        _written[page_id] = _stamp(target)
+        _saved_at[page_id] = float(page.get("modified") or 0)
+
+
+def history_bytes() -> int:
+    """What every page's versions take on disk (their images aside: those are shared)."""
+    total = 0
+    try:
+        for history in pages_dir().glob(f"*/{HISTORY_DIR}"):
+            total += sum(f.stat().st_size for f in history.iterdir() if f.is_file())
+    except OSError:
+        pass
+    return total
 
 
 def _stamp(path: Path) -> Optional[tuple[int, int]]:
@@ -299,6 +454,11 @@ def remove_unused_images(page: dict[str, Any]) -> int:
     backup = json_files.read(page_dir(page_id) / BACKUP_FILE, _is_page)
     if backup is not None:
         used.update(_strings(backup))
+    for stamp in _version_stamps(page_id):  # (earlier versions keep their images)
+        version = json_files.read(history_dir(page_id) / f"{stamp}.json", _is_page)
+        if version is None:
+            return 0  # (one can't be read: it may need anything, so nothing goes)
+        used.update(_strings(version))
     removed = 0
     with _save_lock:  # (store_blob marks a file it reuses as new under the same lock)
         cutoff = time.time() - UNUSED_IMAGE_AGE
@@ -394,7 +554,8 @@ def duplicate_page(page_id: str) -> dict[str, Any]:
     copy.update(id=uuid.uuid4().hex, name=name[:MAX_NAME], created=now, modified=now)
     target = page_dir(copy["id"])
     try:
-        shutil.copytree(page_dir(page_id), target, ignore=shutil.ignore_patterns("*.tmp", BACKUP_FILE, DAMAGED_FILE))
+        # (not its page.json: saved below, as a new page with no versions of its own)
+        shutil.copytree(page_dir(page_id), target, ignore=shutil.ignore_patterns("*.tmp", PAGE_FILE, BACKUP_FILE, DAMAGED_FILE, HISTORY_DIR))
     except OSError as exc:
         shutil.rmtree(target, ignore_errors=True)
         raise PageError(f"Couldn't copy the page: {exc}") from exc

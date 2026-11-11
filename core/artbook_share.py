@@ -79,6 +79,7 @@ def export_page(page_id: str, target: Path) -> int:
             if name is None:
                 missing += 1
             item["source"] = {"path": None, "blob": name}
+            item.pop("original", None)  # (an upscaled image travels as it looks: its original stays here)
         items.append(item)
     shared = {k: v for k, v in page.items() if k not in ("id", "items")}
     shared["items"] = items

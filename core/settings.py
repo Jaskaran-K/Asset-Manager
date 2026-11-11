@@ -794,6 +794,18 @@ def set_render_settings(**changes: Any) -> None:
     _update_config("render", state)
 
 
+def get_unpacked_limit_gb() -> int:
+    """How many GB the copies unpacked from archives may take (Settings > Storage)."""
+    from core.storage import DEFAULT_UNPACKED_LIMIT_GB, UNPACKED_LIMITS_GB
+
+    value = _load_raw_config().get("unpacked_limit_gb")
+    return value if value in UNPACKED_LIMITS_GB else DEFAULT_UNPACKED_LIMIT_GB
+
+
+def set_unpacked_limit_gb(gb: int) -> None:
+    _update_config("unpacked_limit_gb", int(gb))
+
+
 def get_upscale_settings() -> dict[str, Any]:
     """The Artbook's Upscale choices: "model" (core.upscaler.MODELS) and "factor" (2 or 4)."""
     from core.upscaler import DEFAULT_FACTOR, DEFAULT_MODEL, FACTORS, MODELS

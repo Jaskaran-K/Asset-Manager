@@ -86,7 +86,7 @@ the app starts from that copy and notes it in the crash log.
   - Images inside get real thumbnails, read straight from the zip, and their resolution is searchable
     (`res:`). Tags, favourites and ratings work on them like on any file.
   - Opening a model, PDF, video or anything over 100 MB unpacks it first, with progress and a Cancel button.
-    Unpacked copies are kept (`%LOCALAPPDATA%\AssetManager\archive-files`, up to 20 GB, the oldest go first),
+    Unpacked copies are kept (`%LOCALAPPDATA%\AssetManager\archive-files`, up to 5 GB unless you change it in **Settings > Storage**; the oldest go first),
     so opening it again is instant and its thumbnail can be made. A course video plays like any other once
     unpacked.
   - **Right-click > Extract To...** unpacks a whole archive into a folder named after it. **Extract...** saves
@@ -227,6 +227,11 @@ making your first board. The list below is the full reference.
   stored in the page. Images you've deleted from a page are cleared from its folder the next time it opens.
   Each page keeps its previous save as `page.json.bak`. If its file is ever damaged (a disk error, a sync tool),
   the page opens from that copy and says so. A page with no good copy stays in the list, in its folder, to delete.
+- **Earlier versions:** the first time a page changes on a day, how it was before is kept (the last 10 versions,
+  in the page's `history` folder). Right-click a page in the Pages sidebar (or the board > Pages) >
+  **Earlier Versions...** lists them with a picture of each: **Restore This Version** (how the page is now is kept
+  as a version first, so you can go back) or **Restore as a New Page**. Duplicating or exporting a page leaves
+  its versions behind.
 - **Where pages are kept:** one folder per page, in `%LOCALAPPDATA%\AssetManager\artbook` unless you choose
   another folder in Settings > General > **Artbook** (a synced OneDrive or Dropbox folder keeps them backed up).
   **Change...** moves your pages there: they're copied first and only then removed from the old folder. A folder
@@ -324,7 +329,7 @@ No extra Python packages are needed.
   - read video lengths for `dur:` searches
 
   The app finds ffmpeg on the PATH, or you can point it at `ffmpeg.exe` in **Settings > Video**.
-- **The cache** for proxies and thumbnails is in `%LOCALAPPDATA%\AssetManager`. You can clear it in **Settings > Video**.
+- **The cache** for proxies and thumbnails is in `%LOCALAPPDATA%\AssetManager`. You can clear it in **Settings > Storage**.
 - **Playback backend:** the default is FFmpeg. If videos play incorrectly, switch to Windows Media Foundation in
   **Settings > Video** and restart the app. Setting `QT_MEDIA_BACKEND=windows` (or `ffmpeg`) before launch also works.
 - **Testing the player on its own:** `python -m ui.video_player "path\to\clip.mp4"`
@@ -380,7 +385,15 @@ Known limitations:
 
 Crashes, freezes (the window not responding for 20 seconds) and errors are written to
 `%LOCALAPPDATA%\AssetManager\crash.log`. After a crash the app says so on the next launch, and
-**Settings > About > Open Crash Log** opens the log. Please attach it to bug reports.
+**Settings > About > Open Crash Log** opens the log. **Report a Problem...** next to it makes a zip for a bug
+report: the crash and session logs, the app's and Windows' versions, your processor, memory and graphics card,
+and how big the library is (counts only). Your settings go in only if you tick it (they have your folders'
+paths), and nothing is uploaded; **Open a GitHub Issue** opens the form to attach it to.
+
+**Settings > Storage** shows what the app keeps on disk, with the total: files unpacked from archives (with
+their limit), thumbnails and previews, the Artbook's small copies (each can be cleared: they're made again),
+LuxCore and Real-ESRGAN (each can be removed: they download again when needed), and the library's backups
+and your Artbook pages (only opened from here, never cleared).
 
 ## Shortcuts
 

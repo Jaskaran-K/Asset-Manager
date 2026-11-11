@@ -570,6 +570,7 @@ class PagesPanel(QWidget):
                 rename.setShortcut(shortcuts.sequence("pages.rename"))  # a hint: the tree handles the key
                 rename.triggered.connect(lambda: self.tree.editItem(item, 0))
                 menu.addAction("Duplicate").triggered.connect(lambda: self._duplicate(item_id))
+                menu.addAction("Earlier Versions...").triggered.connect(lambda: self.artbook.show_versions(item_id))
                 menu.addAction("Export Page...").triggered.connect(lambda: self.artbook.export_page(item_id))
                 self._add_move_menu(menu, kind, item_id, item)
                 menu.addSeparator()

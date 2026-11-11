@@ -24,6 +24,7 @@ import html
 import os
 import re
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -66,7 +67,7 @@ from PySide6.QtWidgets import (
 
 from core import app_helpers, apps, archives, artbook_store, crash_log
 from core.scanner import AssetItem
-from core import category_rules, profiles
+from core import category_rules, profiles, storage
 from core.profiles import Profile, ProfileError
 from core.settings import (
     DEFAULT_CATEGORIES,
@@ -90,6 +91,7 @@ from core.settings import (
     get_motion,
     get_scan_folders,
     get_seven_zip_path,
+    get_unpacked_limit_gb,
     get_theme,
     get_model_view,
     get_thumbnail_size,
@@ -111,6 +113,7 @@ from core.settings import (
     set_motion,
     set_scan_folders,
     set_seven_zip_path,
+    set_unpacked_limit_gb,
     set_theme,
     set_model_view,
     set_thumbnail_size,
@@ -126,7 +129,7 @@ from core.updater import (
     restart_application,
 )
 from core.version import APP_NAME, APP_VERSION, GITHUB_URL
-from core.video_tools import CACHE_ROOT, cache_size_bytes, clear_video_cache, find_ffmpeg
+from core.video_tools import find_ffmpeg
 from ui.animations import set_motion_mode
 from ui.backgrounds import TEXTURES, render_tile
 from ui.duotone import IconLabel, set_icon
@@ -1339,28 +1342,13 @@ class VideoPage(QWidget):
         layout.addWidget(lbl_backend)
 
         layout.addSpacing(10)
-        layout.addWidget(self._section_label("Preview cache"))
-        self.lbl_cache = QLabel()
-        self.lbl_cache.setObjectName("pageHint")
-        self.lbl_cache.setWordWrap(True)
-        layout.addWidget(self.lbl_cache)
-        cache_row = QHBoxLayout()
-        btn_open_cache = QPushButton("Open Cache Folder")
-        btn_open_cache.setToolTip("Open the folder with cached video previews and thumbnails")
-        btn_open_cache.clicked.connect(self._on_open_cache)
-        btn_clear_cache = QPushButton("Clear Cache")
-        btn_clear_cache.setToolTip(
-            "Delete cached previews, thumbnails and files unpacked from archives; they're made again when needed"
-        )
-        btn_clear_cache.clicked.connect(self._on_clear_cache)
-        cache_row.addWidget(btn_open_cache)
-        cache_row.addWidget(btn_clear_cache)
-        cache_row.addStretch(1)
-        layout.addLayout(cache_row)
+        storage = QLabel("Video posters and preview copies are listed, and can be cleared, in Settings > Storage.")
+        storage.setObjectName("pageHint")
+        storage.setWordWrap(True)
+        layout.addWidget(storage)
         layout.addStretch(1)
 
         self._update_ffmpeg_status()
-        self._update_cache_label()
 
     @staticmethod
     def _section_label(text: str) -> QLabel:
@@ -1394,24 +1382,6 @@ class VideoPage(QWidget):
                 "ffmpeg isn't on the system PATH. Install it (for example: winget install ffmpeg) "
                 "or browse to ffmpeg.exe. Videos still play; only thumbnails and preview copies need it."
             )
-
-    def _update_cache_label(self) -> None:
-        size_mb = cache_size_bytes() / (1024 * 1024)
-        unpacked_gb = archives.extracted_bytes() / (1024 ** 3)
-        limit_gb = archives.EXTRACT_CACHE_BYTES // (1024 ** 3)
-        self.lbl_cache.setText(
-            f"{size_mb:.1f} MB of preview copies and thumbnails, and {unpacked_gb:.1f} GB of files unpacked from "
-            f"archives to be opened (up to {limit_gb} GB; the oldest go first), in {CACHE_ROOT}"
-        )
-
-    def _on_open_cache(self) -> None:
-        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CACHE_ROOT)))
-
-    def _on_clear_cache(self) -> None:
-        clear_video_cache()
-        archives.clear_extracted()
-        self._update_cache_label()
 
 
 # ----------------------------------------------------------------------
@@ -1456,19 +1426,16 @@ class ArchivesPage(QWidget):
         layout.addWidget(self.lbl_status)
 
         layout.addSpacing(10)
-        layout.addWidget(VideoPage._section_label("Unpacked files"))
-        self.lbl_unpacked = QLabel()
-        self.lbl_unpacked.setObjectName("pageHint")
-        self.lbl_unpacked.setWordWrap(True)
-        layout.addWidget(self.lbl_unpacked)
-        btn_clear = QPushButton("Clear Unpacked Files")
-        btn_clear.setToolTip("Delete the copies unpacked to be opened; they're unpacked again when needed")
-        btn_clear.clicked.connect(self._on_clear)
-        layout.addWidget(btn_clear, 0, Qt.AlignmentFlag.AlignLeft)
+        unpacked = QLabel(
+            "Models, PDFs and videos inside archives are unpacked to be opened, and the copies kept so they open at "
+            "once next time. How much they may take, and clearing them: Settings > Storage."
+        )
+        unpacked.setObjectName("pageHint")
+        unpacked.setWordWrap(True)
+        layout.addWidget(unpacked)
         layout.addStretch(1)
 
         self._update_status()
-        self._update_unpacked()
 
     def seven_zip_path(self) -> str:
         return self.txt_seven_zip.text().strip()
@@ -1497,17 +1464,126 @@ class ArchivesPage(QWidget):
                 "ZIPs work without it; RAR and 7z cards say \"Install 7-Zip to look inside\"."
             )
 
-    def _update_unpacked(self) -> None:
-        used = archives.extracted_bytes() / (1024 ** 3)
-        limit = archives.EXTRACT_CACHE_BYTES // (1024 ** 3)
-        self.lbl_unpacked.setText(
-            f"Models, PDFs, videos and big files inside archives are unpacked to be opened, and the copies kept "
-            f"so they open instantly next time: {used:.1f} GB now, up to {limit} GB (the oldest go first)."
-        )
 
-    def _on_clear(self) -> None:
-        archives.clear_extracted()
-        self._update_unpacked()
+# ----------------------------------------------------------------------
+# General > Storage
+# ----------------------------------------------------------------------
+class StoragePage(QWidget):
+    """What the app keeps on disk (core.storage): each area's size, with Clear / Remove / Open Folder,
+    and how much the files unpacked from archives may take (saved with Save)."""
+
+    def __init__(self, unpacked_limit_gb: int, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        layout.addWidget(_page_header(
+            "Storage",
+            "What the app keeps on disk. Caches can be cleared and the downloaded tools removed: they're made or "
+            "downloaded again when needed. Your Artbook pages and the library's backups are only shown here.",
+        ))
+        self.lbl_total = QLabel("Adding up...", self)
+        self.lbl_total.setObjectName("toolbarLabel")
+        layout.addWidget(self.lbl_total)
+        self.sizes: dict[str, int] = {}
+        self.size_labels: dict[str, QLabel] = {}
+        self.buttons: dict[str, QPushButton] = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(0, 1)
+        row = 0
+        for area in storage.AREAS:
+            name = QLabel(area.name, self)
+            name.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+            size = QLabel("...", self)
+            size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            size.setMinimumWidth(80)
+            self.size_labels[area.key] = size
+            grid.addWidget(name, row, 0)
+            grid.addWidget(size, row, 1)
+            actions = QHBoxLayout()
+            actions.setSpacing(6)
+            if area.key == "unpacked":
+                self.cb_limit = QComboBox(self)
+                for gb in storage.UNPACKED_LIMITS_GB:
+                    self.cb_limit.addItem(f"Up to {gb} GB", gb)
+                self.cb_limit.setCurrentIndex(max(0, self.cb_limit.findData(unpacked_limit_gb)))
+                self.cb_limit.setToolTip("How much the unpacked copies may take: the oldest go first past it (applied on Save)")
+                actions.addWidget(self.cb_limit)
+            text = {"clear": "Clear", "remove": "Remove", "open": "Open Folder"}[area.action]
+            button = QPushButton(text, self)
+            button.setToolTip({
+                "clear": "Delete these: they're made again when needed",
+                "remove": "Delete the download: it's downloaded again when needed",
+                "open": "Open the folder in Explorer",
+            }[area.action])
+            button.clicked.connect(lambda _checked=False, key=area.key: self._on_action(key))
+            self.buttons[area.key] = button
+            actions.addWidget(button)
+            grid.addLayout(actions, row, 2, Qt.AlignmentFlag.AlignRight)
+            about = QLabel(area.about, self)
+            about.setObjectName("pageHint")
+            about.setWordWrap(True)
+            grid.addWidget(about, row + 1, 0, 1, 3)
+            grid.setRowMinimumHeight(row + 2, 8)
+            row += 3
+        layout.addLayout(grid)
+        self.lbl_status = QLabel("", self)
+        self.lbl_status.setObjectName("pageHint")
+        layout.addWidget(self.lbl_status)
+        layout.addStretch(1)
+        self._measuring = False
+        self._measured_once = False
+
+    def unpacked_limit_gb(self) -> int:
+        return int(self.cb_limit.currentData())
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._measured_once:
+            self.refresh()
+
+    def refresh(self) -> None:
+        """Add up every area again, in the background."""
+        if self._measuring:
+            return
+        self._measuring = True
+        self._measured_once = True
+        run_job(storage.measure, self._on_measured, self._on_measure_failed)
+
+    def _on_measured(self, sizes: dict[str, int]) -> None:
+        self._measuring = False
+        if not shiboken6.isValid(self):
+            return
+        self.sizes = sizes
+        for key, label in self.size_labels.items():
+            label.setText(storage.size_text(sizes.get(key)))
+        if sizes.get("versions"):
+            self.size_labels["pages"].setToolTip(f"Earlier versions of pages: {storage.size_text(sizes['versions'])} of it")
+        for area in storage.AREAS:
+            if area.action != "open":
+                self.buttons[area.key].setEnabled(bool(sizes.get(area.key)))
+        total = sum(sizes.get(area.key, 0) for area in storage.AREAS) + sizes.get("logs", 0)
+        self.lbl_total.setText(f"{storage.size_text(total)} in all")
+
+    def _on_measure_failed(self, error: str) -> None:
+        self._measuring = False
+        if shiboken6.isValid(self):
+            self.lbl_total.setText(f"Couldn't add it up: {error}")
+
+    def _on_action(self, key: str) -> None:
+        area = next(a for a in storage.AREAS if a.key == key)
+        if area.action == "open":
+            folder = storage.folder_of(key)
+            folder.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+            return
+        before = self.sizes.get(key, 0)
+        storage.free(key)
+        verb = "Removed" if area.action == "remove" else "Cleared"
+        self.lbl_status.setText(f"{verb} {area.name.split(' (')[0]} ({storage.size_text(before)}).")
+        self.refresh()
 
 
 # ----------------------------------------------------------------------
@@ -2573,6 +2649,10 @@ class AboutPage(QWidget):
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(crash_log.crash_log_path())))
         )
         row.addWidget(self.btn_crash_log)
+        self.btn_report = QPushButton("Report a Problem...")
+        self.btn_report.setToolTip("Make a zip of the logs and this computer's details, for a bug report (nothing is uploaded)")
+        self.btn_report.clicked.connect(self._on_report)
+        row.addWidget(self.btn_report)
         row.addStretch(1)
         layout.addLayout(row)
         layout.addSpacing(8)
@@ -2583,6 +2663,14 @@ class AboutPage(QWidget):
         self.lbl_update_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.lbl_update_status)
         layout.addStretch(1)
+
+    def _on_report(self) -> None:
+        from ui.report_dialog import ReportDialog
+
+        dialog = ReportDialog(self)
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+        self.report_dialog = dialog
 
     # ------------------ background work ------------------
     def _run_in_thread(self, worker: _UpdateWorker, start: Callable[[], None]) -> None:
@@ -2728,6 +2816,7 @@ class SettingsDialog(QDialog):
         self._orig_ffmpeg_path = get_ffmpeg_path()
         self._orig_media_backend = get_media_backend()
         self._orig_seven_zip_path = get_seven_zip_path()
+        self._orig_unpacked_limit = get_unpacked_limit_gb()
         self._orig_archive_contents = get_archive_contents()
 
         # Set after Save so the main window knows what to refresh
@@ -2758,6 +2847,7 @@ class SettingsDialog(QDialog):
         self.page_artbook = ArtbookPage(artbook)
         self.page_profiles = ProfilesPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
+        self.page_storage = StoragePage(self._orig_unpacked_limit)
         self.page_about = AboutPage()
 
         self.page_files.validity_changed.connect(self._on_files_validity_changed)
@@ -2810,6 +2900,7 @@ class SettingsDialog(QDialog):
             ("Artbook", self.page_artbook),
             ("Tags", self.page_tags),
             ("Shortcuts", self.page_shortcuts),
+            ("Storage", self.page_storage),
         ):
             item = QTreeWidgetItem(general, [name])
             item.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(page))
@@ -2992,6 +3083,10 @@ class SettingsDialog(QDialog):
         if self.page_archives.archive_contents() != self._orig_archive_contents:
             set_archive_contents(self.page_archives.archive_contents())
             self.archives_changed = True
+        if self.page_storage.unpacked_limit_gb() != self._orig_unpacked_limit:
+            set_unpacked_limit_gb(self.page_storage.unpacked_limit_gb())
+            # (down to the new limit now, not at the next start: a big folder takes a moment)
+            threading.Thread(target=archives.prune_extracted, name="prune-unpacked", daemon=True).start()
         page = self.page_apps
         if (
             page.found() != get_found_apps() or page.choices() != get_app_choices()

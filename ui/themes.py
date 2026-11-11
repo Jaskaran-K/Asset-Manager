@@ -273,13 +273,21 @@ QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border: 1px solid $acce
 QLineEdit:disabled, QComboBox:disabled { color: $text_faint; }
 /* Renaming in a list (ui.views.RowHighlightDelegate): as tall as the row, so no padding to clip the text */
 QLineEdit#inlineEditor { padding: 0px 6px; border-radius: 5px; border: 1px solid $accent_border; }
+/* Dropdowns open under the button (not over it, centred on the chosen item), at most 10 rows, then they
+   scroll (combobox-popup: 0 is Qt's list popup: it keeps maxVisibleItems; ui.animations slides it down) */
+QComboBox { combobox-popup: 0; }
 QComboBox QAbstractItemView {
     background-color: $input_bg;
     color: $text;
     border: 1px solid $border;
+    padding: 4px;
+    outline: 0;
     selection-background-color: $accent;
     selection-color: #ffffff;
 }
+QComboBox QAbstractItemView::item { min-height: 26px; padding: 0px 8px; border-radius: 4px; }
+QComboBox QAbstractItemView::item:hover { background-color: $hover; }
+QComboBox QAbstractItemView::item:selected { background-color: $accent; color: #ffffff; }
 QPlainTextEdit {
     background-color: $input_bg;
     border: 1px solid $input_border;

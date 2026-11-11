@@ -20,12 +20,14 @@ from typing import Callable, Optional
 from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
+    QModelIndex,
     QObject,
     QParallelAnimationGroup,
     QPoint,
     QPointF,
     QPropertyAnimation,
     QRectF,
+    QSize,
     Qt,
     Property,
 )
@@ -37,6 +39,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStyle,
     QStyleOptionButton,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QStylePainter,
     QWidget,
 )
@@ -47,6 +51,7 @@ RELEASE_MS = 360
 MORPH_MS = 220
 POPUP_MS = 150
 POPUP_SLIDE_PX = 8
+DROPDOWN_GAP = 3  # pixels between a dropdown's list and its button
 
 
 _motion_enabled = True
@@ -326,13 +331,46 @@ def _is_combo_dropdown(widget: QWidget) -> bool:
     return widget.isWindow() and isinstance(widget.parentWidget(), QComboBox)
 
 
+SEPARATOR_HEIGHT = 9
+
+
+class ComboRowDelegate(QStyledItemDelegate):
+    """A dropdown's rows as the theme styles them, and its separators (QComboBox.insertSeparator) as a thin
+    line: with the theme's row styling, Qt's own delegate draws nothing for them."""
+
+    @staticmethod
+    def is_separator(index: QModelIndex) -> bool:
+        return index.data(Qt.ItemDataRole.AccessibleDescriptionRole) == "separator"
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        if not self.is_separator(index):
+            super().paint(painter, option, index)
+            return
+        from ui.themes import theme_color  # (themes doesn't import this module: no cycle at load)
+
+        y = option.rect.center().y()
+        painter.fillRect(option.rect.left() + 8, y, option.rect.width() - 16, 1, theme_color("border"))
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        if self.is_separator(index):
+            return QSize(option.rect.width(), SEPARATOR_HEIGHT)
+        return super().sizeHint(option, index)
+
+
 class _PopupAnimator(QObject):
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Polish and isinstance(obj, QComboBox) and not obj.property("rowDelegate"):
+            obj.setProperty("rowDelegate", True)
+            # (only over Qt's own: a font box draws each font in itself, and keeps doing so)
+            if obj.view().itemDelegate().metaObject().className() in ("QComboBoxDelegate", "QComboMenuDelegate"):
+                obj.view().setItemDelegate(ComboRowDelegate(obj.view()))
         if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
             if isinstance(obj, QMenu) or _is_combo_dropdown(obj) or obj.property("animatePopup") is True:
                 if _is_combo_dropdown(obj):
                     combo = obj.parentWidget()
-                    obj.setProperty("popupOpensUp", obj.y() < combo.mapToGlobal(QPoint(0, 0)).y())
+                    above = obj.y() < combo.mapToGlobal(QPoint(0, 0)).y()
+                    obj.setProperty("popupOpensUp", above)
+                    obj.move(obj.pos() + QPoint(0, -DROPDOWN_GAP if above else DROPDOWN_GAP))  # (a little apart from the button)
                 animate_popup(obj)
         return False
 

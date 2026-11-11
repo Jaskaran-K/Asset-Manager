@@ -71,6 +71,7 @@ class ArtbookPanel(QWidget):
         self.page: Optional[dict[str, Any]] = None
         self._saving = False
         self._save_again = False
+        self.versions_dialog = None  # the Earlier Versions window, while it's open
         self._dirty = False  # changed since the last thumbnail
         self._imports: list[tuple[Path, Optional[str]]] = []  # boards waiting to be imported (file, folder)
         self._importing: Optional[tuple[Path, Optional[str]]] = None
@@ -256,12 +257,54 @@ class ArtbookPanel(QWidget):
         rest = [p for p in order if p != page_id]
         self.open_page(rest[min(position, len(rest) - 1)] if rest else "")
 
+    def show_versions(self, page_id: Optional[str] = None) -> None:
+        """The Earlier Versions window for a page (default: the open one)."""
+        from ui.artbook_versions import VersionsDialog
+
+        page_id = page_id or self.current_page_id()
+        if page_id is None:
+            return
+        if page_id == self.current_page_id():
+            self.save_now()  # (today's first change keeps its version now, not in a few seconds)
+            name = self.page.get("name") or "Untitled"
+        else:
+            name = (store.page_summary(page_id) or {}).get("name") or "Untitled"
+        dialog = VersionsDialog(self, page_id, name)
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+        self.versions_dialog = dialog
+
+    def restore_version(self, page_id: str, stamp: str, as_new: bool = False) -> bool:
+        """Restore one of a page's earlier versions in place (it reopens if it's the open page), or as
+        a new page that opens. False (and says why) if it couldn't."""
+        current = page_id == self.current_page_id()
+        if current:
+            self.save_now()
+        try:
+            if as_new:
+                page = store.restore_version_as_new(page_id, stamp)
+                self.open_page(page["id"])
+                return True
+            store.restore_version(page_id, stamp)
+        except (store.PageError, OSError) as exc:
+            self.board.show_message(f"Couldn't restore that version: {exc}")
+            return False
+        if current:
+            self._save_timer.stop()
+            self.page = None  # (what's on the board is now a version: reopen without saving it)
+            self.open_page(page_id)
+        else:
+            self.pages.rebuild()
+        self.page_saved.emit(page_id)
+        return True
+
     def _page_menu(self) -> list:
         """The board's right-click Pages submenu (entries as BoardView._fill_menu takes them)."""
         return [
             ("New Page", None, self._menu_new_page, True),
             ("Duplicate Page", None, self._menu_duplicate_page, self.page is not None),
             ("Rename Page...", None, self._menu_rename_page, self.page is not None),
+            ("Earlier Versions...", None, self.show_versions, self.page is not None),
             None,
             ("Export Page (.artbook)...", None, self._on_export_page_requested, self.page is not None),
         ]

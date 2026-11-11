@@ -46,7 +46,6 @@ LIST_TIMEOUT = 120  # seconds for 7-Zip to list an archive  # between the archiv
 MAX_PREVIEW_BYTES = 100 * 1024 * 1024  # bigger members get a thumbnail once they've been opened (unpacked)
 MAX_CARD_PICTURE_BYTES = 20 * 1024 * 1024  # an archive's card picture: an image inside up to this size
 MAX_DRAG_BYTES = 50 * 1024 * 1024  # dragging out unpacks first: bigger ones go through Extract
-EXTRACT_CACHE_BYTES = 20 * 1024 * 1024 * 1024  # unpacked copies kept (course videos are big)
 
 _CHUNK = 1024 * 1024
 _DEFLATE64_CHUNK = 64 * 1024  # (inflate64 has no output limit: small inputs keep each output small)
@@ -690,7 +689,7 @@ def materialize(
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> Path:
     """A real file with the member's content, in the unpacked-copies cache (unpacked once; the
-    oldest copies are deleted beyond EXTRACT_CACHE_BYTES). Keeps the member's file name, so other
+    oldest copies are deleted beyond extract_limit_bytes()). Keeps the member's file name, so other
     apps and the video player see the right name and type. Raises ArchiveError, Cancelled."""
     target = _cached_copy_path(member)
     existing = cached_copy(member)
@@ -744,8 +743,18 @@ def extracted_bytes() -> int:
     return total
 
 
-def prune_extracted(max_bytes: int = EXTRACT_CACHE_BYTES, keep: Optional[Path] = None) -> int:
-    """Delete the least recently used unpacked copies beyond max_bytes (never keep). Returns how many."""
+def extract_limit_bytes() -> int:
+    """How much the unpacked copies may take (Settings > Storage)."""
+    from .settings import get_unpacked_limit_gb
+
+    return get_unpacked_limit_gb() * 1024 ** 3
+
+
+def prune_extracted(max_bytes: Optional[int] = None, keep: Optional[Path] = None) -> int:
+    """Delete the least recently used unpacked copies beyond max_bytes (default: the limit set in
+    Settings > Storage; never keep). Returns how many."""
+    if max_bytes is None:
+        max_bytes = extract_limit_bytes()
     copies = []
     for root, _dirs, files in os.walk(extract_dir()):
         for name in files:

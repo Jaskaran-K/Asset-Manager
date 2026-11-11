@@ -439,7 +439,7 @@ def test_menu_layout(qapp, panel):
         "  Match Size >", "    Same Height", "    Same Width",
         "  File >", "    Show in Explorer", "    Open Source File", "    ---", "    Replace Image...",
         "    Relink Missing Images...",
-        "Pages >", "  New Page", "  Duplicate Page", "  Rename Page...", "  ---", "  Export Page (.artbook)...",
+        "Pages >", "  New Page", "  Duplicate Page", "  Rename Page...", "  Earlier Versions...", "  ---", "  Export Page (.artbook)...",
     ]
     submenus = [a for a in all_actions(menu) if a.menu()]
     assert submenus and all(a.isEnabled() for a in submenus)  # always open: greyed items show what's there

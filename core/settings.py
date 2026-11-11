@@ -794,6 +794,24 @@ def set_render_settings(**changes: Any) -> None:
     _update_config("render", state)
 
 
+def get_upscale_settings() -> dict[str, Any]:
+    """The Artbook's Upscale choices: "model" (core.upscaler.MODELS) and "factor" (2 or 4)."""
+    from core.upscaler import DEFAULT_FACTOR, DEFAULT_MODEL, FACTORS, MODELS
+
+    raw = _load_raw_config().get("upscale")
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "model": raw.get("model") if raw.get("model") in MODELS else DEFAULT_MODEL,
+        "factor": raw.get("factor") if raw.get("factor") in FACTORS else DEFAULT_FACTOR,
+    }
+
+
+def set_upscale_settings(**changes: Any) -> None:
+    state = get_upscale_settings()
+    state.update({k: v for k, v in changes.items() if k in state})
+    _update_config("upscale", state)
+
+
 def set_sidebar_state(key: str = "sidebar", **changes: Any) -> None:
     """Update some of open / pinned / width."""
     state = get_sidebar_state(key)

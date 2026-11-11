@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtCore import QPoint
-from PySide6.QtGui import QColor, QFont, QImage, QKeyEvent, QMouseEvent, QPainter, QTextCursor
+from PySide6.QtGui import QColor, QFont, QImage, QKeyEvent, QMouseEvent, QPainter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QStyleOptionGraphicsItem
 from PySide6.QtTest import QTest
 
@@ -172,6 +172,90 @@ def test_while_typing_formatting_goes_to_the_selected_text_and_ctrl_b_bolds(qapp
     assert board.undo_stack.count() == steps + 1  # the whole typing session: one step
 
 
+# As text pasted from a web page saves it: a background on the whole paragraph (and one on a word)
+PASTED_HTML = (
+    '<p style="margin:0px; background-color:#250a00;">The novel <span style="background-color:#111111;">describes</span> it</p>'
+    '<p style="margin:0px; background-color:#250a00;">Second line</p>'
+)
+
+
+def paragraph_backgrounds(note):
+    found, block = [], note.document().begin()
+    while block.isValid():
+        fmt = block.blockFormat()
+        found.append(fmt.background().color().name() if fmt.hasProperty(fmt.Property.BackgroundBrush) else None)
+        block = block.next()
+    return found
+
+
+def press(board, shortcut_id):
+    combo = shortcuts.sequence(shortcut_id)[0]
+    board.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, combo.key(), combo.keyboardModifiers()))
+
+
+def test_no_highlight_removes_backgrounds_pasted_with_the_text(qapp, panel):
+    board = panel.board
+    note = make_note(board)
+    note.set_content((PASTED_HTML, None))
+    select_only(board, note)
+    assert board.note_formats()["highlight"] == QColor("#250a00")  # the bar shows where the brown comes from
+    assert [a.text() for a in board.note_bar.btn_highlight.menu().actions()][0] == "No Highlight"
+    steps = board.undo_stack.count()
+    board.set_note_highlight(None)
+    assert paragraph_backgrounds(note) == [None, None] and board.note_formats()["highlight"] is None
+    assert not char_format_at(note, 11).hasProperty(QTextCharFormat.Property.BackgroundBrush)  # "describes" too
+    assert board.undo_stack.count() == steps + 1
+    board.undo_stack.undo()
+    assert paragraph_backgrounds(note) == ["#250a00", "#250a00"]
+    board.set_note_highlight("#facc15")  # a colour replaces the paragraph's
+    assert paragraph_backgrounds(note) == [None, None] and char_format_at(note, 1).background().color() == QColor("#facc15")
+    panel.save_now()
+    assert "#250a00" not in note.toHtml()
+
+
+def test_highlighting_part_of_the_text_clears_only_its_paragraphs(qapp, panel):
+    board = panel.board
+    note = make_note(board)
+    note.set_content((PASTED_HTML, None))
+    board.edit_note(note)
+    cursor = note.textCursor()
+    cursor.setPosition(0)
+    cursor.setPosition(3, QTextCursor.MoveMode.KeepAnchor)  # "The"
+    note.setTextCursor(cursor)
+    board.set_note_highlight(None)
+    assert paragraph_backgrounds(note) == [None, "#250a00"]
+    board.finish_note_edit()
+
+
+def test_pasting_into_a_note_drops_paragraph_backgrounds_and_ctrl_shift_v_pastes_plain_text(qapp, panel):
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtWidgets import QApplication
+
+    def paste(shortcut_id):
+        mime = QMimeData()
+        mime.setHtml('<p style="background-color:#250a00;"><b>Bold</b> words</p>')
+        mime.setText("Bold words")
+        QApplication.clipboard().setMimeData(mime)
+        try:
+            press(board, shortcut_id)
+        finally:
+            QApplication.clipboard().clear()  # (left there, Qt frees it at exit after Python has: a crash)
+
+    board = panel.board
+    note = make_note(board, "Start ")
+    board.edit_note(note)
+    paste("artbook.paste")
+    assert note.toPlainText() == "Start Bold words" and len(board.items_list()) == 2  # (into the note, not the board)
+    assert paragraph_backgrounds(note) == [None]
+    assert char_format_at(note, 7).fontWeight() >= QFont.Weight.Bold.value  # the rest of the formatting stays
+    paste("artbook.note_paste_plain")
+    assert note.toPlainText() == "Start Bold wordsBold words"
+    assert char_format_at(note, 18).fontWeight() < QFont.Weight.Bold.value
+    steps = board.undo_stack.count()
+    board.finish_note_edit()
+    assert board.undo_stack.count() == steps + 1
+
+
 def test_ctrl_b_is_the_pages_sidebar_when_not_typing(qapp, panel):
     board = panel.board
     combo = shortcuts.sequence("pages.sidebar")[0]
@@ -270,7 +354,8 @@ def test_colour_menus_offer_theme_default_white_black_and_custom(qapp, panel):
     bar = panel.board.note_bar
     for button in (bar.btn_color, bar.btn_highlight, bar.btn_fill):
         names = [a.text() for a in button.menu().actions() if not a.isSeparator()]
-        assert names == ["Theme Default", "White", "Black", "Custom..."]
+        default = "No Highlight" if button is bar.btn_highlight else "Theme Default"
+        assert names == [default, "White", "Black", "Custom..."]
 
 
 def test_custom_colour_changes_live_and_is_one_undo_step(qapp, panel):

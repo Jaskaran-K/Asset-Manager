@@ -174,6 +174,14 @@ making your first board. The list below is the full reference.
 - **Files:** right-click > Copy > **File Path**, and Images > File > **Show in Explorer**, **Open Source File**,
   **Replace Image...** (a new picture that keeps the old one's place, size on the board, crop and adjustments) and
   **Relink Missing Images...** (pick the folder the files are in now: they're found by name, in its folders too).
+- **Upscale:** right-click > Images > **Upscale...** makes small images 2 or 4 times bigger with
+  [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (free; it downloads once, 45 MB, and runs on the graphics
+  card: a second or three a picture). **Photo** suits photos, renders, sculpts and paintings; **Illustration** suits
+  line art, manga and anime. Drag the line to compare each one with its original (the wheel zooms), untick any you
+  don't want, then **Use Upscaled Pictures**: they keep their place and size on the board, as one Ctrl+Z. It invents
+  believable detail rather than recovering it (small text and fine material detail can come out wrong), so every
+  image keeps its original: Images > **Revert to Original**, even after the page is reopened. Your files are never
+  changed; the bigger picture is kept in the page. Results are at most 6000 px.
 - **Draw:** **D** draws freehand strokes, with a bar at the top for the pen's colour (the theme's, white, black or
   custom), its size, **smoothing** (on to start with: steadies lines drawn with a mouse, as with a pen; the button
   turns it off) and the **eraser** (**E**: drag over strokes to remove them). D again, Esc or Done stops.
@@ -181,12 +189,15 @@ making your first board. The list below is the full reference.
 - **Notes:** **T** adds a note at the cursor (its text centered) and you type straight away; Esc or clicking elsewhere finishes,
   and double-clicking a note edits it. Notes take the theme's colours. Select one and a format bar appears
   above it: text colour, highlight, note colour, bold / italic / underline (Ctrl+B / I / U while typing), size,
-  font, and alignment / clear formatting under the chevron. Each colour offers Theme Default, White, Black or
+  font, and alignment / clear formatting under the chevron. Each colour offers Theme Default (No Highlight for highlights), White, Black or
   **Custom...**: a floating picker (opens beside the note; drag its title to move it) with a colour square,
   hue and opacity sliders, a screen dropper, HEX / RGB / HSL text and ready-made colours. The note changes as
   you pick, and the whole pick is one Ctrl+Z. Highlights have rounded corners, like the notes. With text selected while typing, the bar changes
   that text; otherwise the whole note. Notes move, scale, rotate, arrange and align like images; drag a note's
   left / right handle to make it wider or narrower. An emptied note is removed; Ctrl+Z brings it back.
+  Text pasted into a note (Ctrl+V while typing) keeps its formatting but not a web page's paragraph backgrounds;
+  **Ctrl+Shift+V** pastes plain text in the note's own style. Highlight > **No Highlight** removes every
+  background behind the text, including ones pasted before.
 - **Colour picker:** **I**, then click anywhere on the board to copy that colour's hex code (e.g. `#F59E0B`).
   It stays on for more picks; Esc, I again or a right-click turns it off.
 - **Keys shared with other windows** (G is also the 3D viewer's grid) act on the window you're working in.

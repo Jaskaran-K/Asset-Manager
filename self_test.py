@@ -105,6 +105,25 @@ def run_self_test(log_path: Optional[str]) -> int:
             render_worker.write_ply(ply, np.zeros((3, 3), np.float32), np.array([[0, 1, 2]], np.uint32), np.zeros((3, 3), np.float32))
         return f"LuxCore {render_engine.ENGINE_VERSION} fits this Python; the worker reports back"
 
+    def check_upscale():
+        # The Artbook's Upscale: its modules are in the build, and a picture goes through it (the model
+        # stood in by a resize: Real-ESRGAN is downloaded by the user, not shipped)
+        from unittest import mock
+        from PIL import Image
+        from core import upscaler
+        from ui import artbook_upscale  # noqa: F401 (the window: it must be in the build)
+
+        def model(source, result, _model, _progress, _stop):
+            with Image.open(source) as im:
+                im.resize((im.width * 4, im.height * 4)).save(result)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(upscaler, "_root", lambda: Path(tmp)), \
+                mock.patch.object(upscaler, "is_installed", lambda: True), mock.patch.object(upscaler, "_run_model", model):
+            made = upscaler.upscale(Image.new("RGBA", (40, 20)), "photo", 2)
+        if made.size != (80, 40):
+            raise RuntimeError(f"an upscaled picture came out {made.size}")
+        return f"Real-ESRGAN {upscaler.VERSION} downloads on first use; a picture goes through"
+
     def check_images():
         from PIL import Image
         from core.thumbnail_manager import load_texture_thumbnail_image
@@ -221,6 +240,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("3D model loading", check_models)
     step("HDRI lighting and UVs", check_viewer_lighting_and_uvs)
     step("rendering", check_render)
+    step("upscaling", check_upscale)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
     step("app files", check_app_files)

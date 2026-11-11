@@ -53,6 +53,7 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
+    QTextDocumentFragment,
     QTextFormat,
     QTransform,
     QUndoCommand,
@@ -232,6 +233,20 @@ def _clean_crop(value: Any, natural: tuple[int, int]) -> Optional[Crop]:
     return (left, top, right, bottom)
 
 
+def _clean_original(value: Any) -> Optional[dict[str, Any]]:
+    """An upscaled image's original picture as saved, or None if it isn't a usable one."""
+    if not isinstance(value, dict) or not isinstance(value.get("source"), dict):
+        return None
+    source = {key: value["source"].get(key) for key in ("path", "blob")}
+    if not all(v is None or isinstance(v, str) for v in source.values()) or not any(source.values()):
+        return None
+    size = value.get("size")
+    if not (isinstance(size, (list, tuple)) and len(size) == 2 and all(isinstance(v, int) and v > 0 for v in size)):
+        return None
+    name = value.get("name")
+    return {"source": source, "size": [size[0], size[1]], "name": name[:MAX_NAME] if isinstance(name, str) else ""}
+
+
 class ImageItem(QGraphicsItem):
     """One reference image. Its origin is the center of the whole image; size is the image's full
     pixel size. A crop only hides part of it (the whole image is kept), so it can be undone any time."""
@@ -257,6 +272,8 @@ class ImageItem(QGraphicsItem):
         self.caption = ""
         self.pixelated = False
         self.name = ""  # what the image list calls it (empty: its file's name)
+        # Upscaled: the picture it was before ({"source", "size", "name"}), for Revert to Original
+        self.original: Optional[dict[str, Any]] = None
         self.load_failed = False  # its picture couldn't be read (shown as a placeholder)
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
 
@@ -294,6 +311,7 @@ class ImageItem(QGraphicsItem):
             "flip_h": s.flip_h, "flip_v": s.flip_v, "z": s.z,
             "crop": list(s.crop) if s.crop else None, "opacity": s.opacity, "gray": s.gray,
             "group": s.group, "caption": s.caption, "pixelated": s.pixelated, "name": self.name,
+            **({"original": self.original} if self.original else {}),
         }
 
     @classmethod
@@ -314,6 +332,7 @@ class ImageItem(QGraphicsItem):
         ))
         name = data.get("name")
         item.name = name[:MAX_NAME] if isinstance(name, str) else ""
+        item.original = _clean_original(data.get("original"))
         return item
 
     # ------------------ its file ------------------
@@ -564,6 +583,33 @@ def highlight_boxes(document: QTextDocument) -> list[tuple[QRectF, QColor]]:
                     boxes.append((box, color))
         block = block.next()
     return boxes
+
+
+def clear_paragraph_backgrounds(document: QTextDocument, start: int = 0, end: Optional[int] = None) -> bool:
+    """Remove the backgrounds of whole paragraphs (web pages' text brings them when pasted) from
+    the paragraphs between start and end; True if there were any."""
+    last = document.characterCount() - 1 if end is None else end
+    stop = document.findBlock(max(start, last - 1))
+    block = document.findBlock(start)
+    found = False
+    while block.isValid():
+        fmt = block.blockFormat()
+        if fmt.hasProperty(QTextFormat.Property.BackgroundBrush):
+            fmt.clearProperty(QTextFormat.Property.BackgroundBrush)
+            QTextCursor(block).setBlockFormat(fmt)
+            found = True
+        if block == stop:
+            break
+        block = block.next()
+    return found
+
+
+def pasted_html(html: str) -> QTextDocumentFragment:
+    """Text pasted into a note: its formatting, without paragraph backgrounds or pictures."""
+    document = QTextDocument()
+    document.setHtml(_IMG_TAG.sub("", html))
+    clear_paragraph_backgrounds(document)
+    return QTextDocumentFragment(document)
 
 
 class NoteItem(QGraphicsTextItem):
@@ -949,16 +995,18 @@ class _TextCommand(QUndoCommand):
 
 class _ReplaceCommand(QUndoCommand):
     """An image's picture swapped for another (its place, size, crop and adjustments kept).
-    before / after: {"source", "natural", "name", "pictures" (ImageItem.pictures), "state"}."""
+    before / after: {"source", "natural", "name", "pictures" (ImageItem.pictures), "state",
+    "original" (ImageItem.original)}."""
 
-    def __init__(self, item: "ImageItem", before: dict[str, Any], after: dict[str, Any]):
-        super().__init__("replace image")
+    def __init__(self, item: "ImageItem", before: dict[str, Any], after: dict[str, Any], text: str = "replace image"):
+        super().__init__(text)
         self.item, self.before, self.after = item, before, after
 
     @staticmethod
     def _apply(item: "ImageItem", picture: dict[str, Any]) -> None:
         item.prepareGeometryChange()
         item.source, item.natural, item.name = dict(picture["source"]), picture["natural"], picture["name"]
+        item.original = picture.get("original")
         item.restore_pictures(picture["pictures"])
         item.load_failed = False
         item.crop = None  # (the state brings the crop that fits this picture)
@@ -970,6 +1018,23 @@ class _ReplaceCommand(QUndoCommand):
 
     def undo(self) -> None:
         self._apply(self.item, self.before)
+
+
+class _ReplaceManyCommand(QUndoCommand):
+    """Several images' pictures swapped as one step ([(item, before, after)], as _ReplaceCommand).
+    (Not child commands: Qt would keep those after Python had let go of them.)"""
+
+    def __init__(self, swaps: list[tuple["ImageItem", dict[str, Any], dict[str, Any]]], text: str):
+        super().__init__(text)
+        self.swaps = swaps
+
+    def redo(self) -> None:
+        for item, _before, after in self.swaps:
+            _ReplaceCommand._apply(item, after)  # pylint: disable=protected-access
+
+    def undo(self) -> None:
+        for item, before, _after in self.swaps:
+            _ReplaceCommand._apply(item, before)  # pylint: disable=protected-access
 
 
 class _SourcesCommand(QUndoCommand):
@@ -1371,6 +1436,7 @@ class BoardView(QGraphicsView):
         self._picking = False  # colour picker on
         self._readout = _ColorReadout(self)
         self._readout.hide()
+        self.upscale_dialog = None  # the Upscale window, while it's open (ui.artbook_upscale)
         self._note_bar: Optional[NoteBar] = None  # floats above the selected note (made when first needed:
         self._note_bar_queued = False  # listing the system's fonts for it is slow)
         self._live_merge: Optional[int] = None  # (see live_change)
@@ -2357,9 +2423,22 @@ class BoardView(QGraphicsView):
     def _on_replacement(self, item: ImageItem, result: dict[str, Any], generation: int) -> None:
         if generation != self._generation or item.item_id not in self._items:
             return
+        image = result["image"]
+        pictures = (QPixmap.fromImage(_base_image(image)), True, None if _fits_base(image) else QPixmap.fromImage(image))
+        before, after = self._picture_swap(item, result["source"], result["size"], "", pictures, None)
+        self.undo_stack.push(_ReplaceCommand(item, before, after))
+        self.viewport().update()
+
+    @staticmethod
+    def _picture_swap(
+        item: ImageItem, source: dict[str, Any], size: tuple[int, int], name: str, pictures: tuple,
+        original: Optional[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(before, after) for _ReplaceCommand: the item showing another picture in the same place,
+        at the same size on the board, with its crop (as a share of the picture) and adjustments."""
         state = item.state()
         old_w, old_h = item.natural
-        new_w, new_h = max(1, int(result["size"][0])), max(1, int(result["size"][1]))
+        new_w, new_h = max(1, int(size[0])), max(1, int(size[1]))
         crop = None
         if item.crop:
             left, top, right, bottom = item.crop
@@ -2378,14 +2457,63 @@ class BoardView(QGraphicsView):
             * QTransform().scale(scale, scale) * QTransform().rotate(state.rotation)
         )
         position = middle_now - shape.map(middle)
-        before = {"source": dict(item.source), "natural": item.natural, "name": item.name, "pictures": item.pictures(), "state": state}
-        image = result["image"]
-        after = {
-            "source": result["source"], "natural": (new_w, new_h), "name": "",
-            "pictures": (QPixmap.fromImage(_base_image(image)), True, None if _fits_base(image) else QPixmap.fromImage(image)),
-            "state": replace(state, x=position.x(), y=position.y(), scale=scale, crop=crop),
+        before = {
+            "source": dict(item.source), "natural": item.natural, "name": item.name, "pictures": item.pictures(),
+            "state": state, "original": item.original,
         }
-        self.undo_stack.push(_ReplaceCommand(item, before, after))
+        after = {
+            "source": dict(source), "natural": (new_w, new_h), "name": name, "pictures": pictures,
+            "state": replace(state, x=position.x(), y=position.y(), scale=scale, crop=crop), "original": original,
+        }
+        return before, after
+
+    # ------------------ upscaling (ui.artbook_upscale) ------------------
+    def upscale_candidates(self) -> list[ImageItem]:
+        """The selected images that may be upscaled (not in a locked group)."""
+        return [item for item in self._images_in_order() if not self.is_locked(item)] if self.page_id else []
+
+    def upscale_selection(self) -> None:
+        """Open the Upscale window for the selected images."""
+        from ui.artbook_upscale import UpscaleDialog  # (it uses this module's picture loading)
+
+        items = self.upscale_candidates()
+        if not items:
+            return
+        dialog = UpscaleDialog(self, items)
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+        self.upscale_dialog = dialog
+
+    def apply_upscales(self, results: dict[str, dict[str, Any]]) -> int:
+        """Show upscaled pictures ({item id: {"source", "size", "base" (a small QImage)}}): one undo
+        step. Each image remembers the picture it had (Revert to Original). Returns how many changed."""
+        items = [(self._items.get(item_id), result) for item_id, result in results.items()]
+        items = [(item, result) for item, result in items if isinstance(item, ImageItem)]
+        if not items:
+            return 0
+        count = len(items)
+        swaps = []
+        for item, result in items:
+            original = item.original or {"source": dict(item.source), "size": list(item.natural), "name": item.name}
+            pictures = (QPixmap.fromImage(result["base"]), True, None)
+            swaps.append((item, *self._picture_swap(item, result["source"], result["size"], item.display_name(), pictures, original)))
+        self.undo_stack.push(_ReplaceManyCommand(swaps, f"upscale {count} image{'s' if count != 1 else ''}"))
+        self._schedule_detail()  # (the sharp copies load as usual)
+        self.viewport().update()
+        return count
+
+    def revert_upscales(self) -> None:
+        """The selected upscaled images back to their original pictures (one undo step)."""
+        items = [item for item in self._images_in_order() if item.original and not self.is_locked(item)]
+        if not items:
+            return
+        swaps = []
+        for item in items:
+            original = item.original
+            pictures = (item.base, False, None)  # (shows meanwhile: the same picture; the original's is read again)
+            swaps.append((item, *self._picture_swap(item, original["source"], tuple(original["size"]), original["name"], pictures, None)))
+        self.undo_stack.push(_ReplaceManyCommand(swaps, "revert to original"))
+        self._schedule_detail()
         self.viewport().update()
 
     def missing_images(self) -> list[ImageItem]:
@@ -2874,6 +3002,9 @@ class BoardView(QGraphicsView):
         font = fmt.font()
         color = fmt.foreground().color() if fmt.hasProperty(QTextCharFormat.Property.ForegroundBrush) else note.defaultTextColor()
         highlight = fmt.background().color() if fmt.hasProperty(QTextCharFormat.Property.BackgroundBrush) else None
+        block = cursor.blockFormat()
+        if highlight is None and block.hasProperty(QTextFormat.Property.BackgroundBrush):
+            highlight = block.background().color()  # a whole paragraph's (pasted with the text)
         return {
             "bold": fmt.fontWeight() >= QFont.Weight.DemiBold.value,
             "italic": fmt.fontItalic(),
@@ -2913,7 +3044,11 @@ class BoardView(QGraphicsView):
         self._format(change, "text colour")
 
     def set_note_highlight(self, color: Optional[str]) -> None:
+        """Highlight the text (None: no highlight). Either way, the paragraphs it touches lose any
+        background of their own (pasted text brings one), so this colour is the only one behind it."""
+
         def change(cursor: QTextCursor) -> None:
+            clear_paragraph_backgrounds(cursor.document(), cursor.selectionStart(), cursor.selectionEnd())
             if color:
                 fmt = QTextCharFormat()
                 fmt.setBackground(QColor(color))
@@ -3620,6 +3755,8 @@ class BoardView(QGraphicsView):
             ("Select All", "artbook.select_all", self.select_all, bool(self._items)),
             ("Image List", "artbook.image_list", self.toggle_image_list, True, self.image_list_open()),
             ("Selection", selection),
+            ("Upscale...", None, self.upscale_selection, bool(self.upscale_candidates())),
+            ("Revert to Original", None, self.revert_upscales, any(item.original and not self.is_locked(item) for item in images)),
             ("Arrange", arrange),
             ("Align", align),
             ("Match Size", match_size),
@@ -3726,7 +3863,29 @@ class BoardView(QGraphicsView):
         "artbook.note_bold": "toggle_note_bold",
         "artbook.note_italic": "toggle_note_italic",
         "artbook.note_underline": "toggle_note_underline",
+        "artbook.note_paste_plain": "paste_plain_into_note",
     }
+
+    def paste_into_note(self, plain: bool = False) -> None:
+        """Ctrl+V while typing: the clipboard's text at the cursor, with its formatting but no
+        paragraph backgrounds (a web page's would stay behind the text); plain: the text alone, in
+        the note's own style."""
+        note = self.editing_note()
+        mime = QApplication.clipboard().mimeData()
+        if note is None or mime is None:
+            return
+        cursor = note.textCursor()
+        if not plain and mime.hasHtml():
+            cursor.insertFragment(pasted_html(mime.html()))
+        elif mime.hasText():
+            cursor.insertText(mime.text().replace("\r\n", "\n"))
+        else:
+            return
+        note.setTextCursor(cursor)
+        self._sync_note_bar()
+
+    def paste_plain_into_note(self) -> None:
+        self.paste_into_note(plain=True)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         self.finish_moves()
@@ -3737,6 +3896,8 @@ class BoardView(QGraphicsView):
                 self.finish_note_edit()  # Esc: done typing
             elif typing_key is not None:
                 getattr(self, self.TYPING_KEYS[typing_key])()
+            elif key == "artbook.paste":
+                self.paste_into_note()
             else:
                 super().keyPressEvent(event)  # to the note
                 self._sync_note_bar()

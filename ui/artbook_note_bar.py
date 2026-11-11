@@ -1,7 +1,7 @@
 """The format bar that floats above the selected note on the Artbook board.
 
-Text colour, highlight and the note's fill colour (each: the theme default, white, black, or a
-custom one picked live in ui.color_popup), bold / italic / underline, font size and font, and a menu with alignment and
+Text colour, highlight and the note's fill colour (each: the theme default (no highlight), white,
+black, or a custom one picked live in ui.color_popup), bold / italic / underline, font size and font, and a menu with alignment and
 clearing the formatting. With text selected while typing, changes apply to that text; otherwise
 to the whole note. The board (ui.artbook_board) does the formatting and records it for undo.
 
@@ -59,7 +59,7 @@ class ColorButton(QToolButton):
     def __init__(
         self, icon: str, tooltip: str, on_pick: Callable[[Optional[str]], None],
         on_live: Optional[Callable[[bool], None]] = None, avoid: Optional[Callable[[], QRect]] = None,
-        parent: Optional[QWidget] = None,
+        parent: Optional[QWidget] = None, default_text: str = "Theme Default",
     ):
         super().__init__(parent)
         self.color: Optional[QColor] = None
@@ -74,7 +74,7 @@ class ColorButton(QToolButton):
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setFixedSize(30, 28)
         menu = QMenu(self)
-        default = menu.addAction(swatch_icon(None), "Theme Default")
+        default = menu.addAction(swatch_icon(None), default_text)
         default.triggered.connect(self._on_default)
         for name, hex_color in SWATCHES:
             action = menu.addAction(swatch_icon(hex_color), name)
@@ -145,7 +145,10 @@ class NoteBar(QFrame):
 
         live, avoid = board.live_change, self.avoid_rect
         self.btn_color = ColorButton("text_color", "Text colour", board.set_note_text_color, live, avoid)
-        self.btn_highlight = ColorButton("highlight", "Highlight colour (behind the text)", board.set_note_highlight, live, avoid)
+        self.btn_highlight = ColorButton(
+            "highlight", "Highlight colour (behind the text; No Highlight also removes backgrounds pasted with text)",
+            board.set_note_highlight, live, avoid, default_text="No Highlight",
+        )
         self.btn_fill = ColorButton("fill", "Note colour", board.set_note_fill, live, avoid)
         for button in (self.btn_color, self.btn_highlight, self.btn_fill):
             layout.addWidget(button)

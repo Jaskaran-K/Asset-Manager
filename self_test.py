@@ -124,6 +124,32 @@ def run_self_test(log_path: Optional[str]) -> int:
             raise RuntimeError(f"an upscaled picture came out {made.size}")
         return f"Real-ESRGAN {upscaler.VERSION} downloads on first use; a picture goes through"
 
+    def check_model_reader():
+        # 3D models are read in a helper program (this app again, with --model-reader): it must start, read a
+        # model and send it back, from the build as it ships
+        from unittest import mock
+
+        from core import model_reader
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {model_reader.READER_ENV: ""}), \
+                mock.patch.object(model_reader, "_unavailable", False):  # (the real helper, whatever reads models here)
+            cube = Path(tmp) / "cube.obj"
+            cube.write_text(
+                "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n"
+                "f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n", encoding="utf-8",
+            )
+            try:
+                faces = model_reader.read_faces(cube)
+                mesh = model_reader.read_mesh(cube)
+                pid = model_reader.reader("viewer").request({"op": "ping", "path": ""}, 30)["pong"]
+            finally:
+                model_reader.close_all()
+            if model_reader.in_process():
+                raise RuntimeError("the model reader didn't start: models would be read in the app")
+            if faces != 12 or mesh.face_count != 12 or pid == os.getpid():
+                raise RuntimeError(f"the model reader read {faces} / {mesh.face_count} triangles of a cube")
+        return f"a helper read a model (memory cap {model_reader.memory_limit() / 1024 ** 3:.0f} GB)"
+
     def check_images():
         from PIL import Image
         from core.thumbnail_manager import load_texture_thumbnail_image
@@ -241,6 +267,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("HDRI lighting and UVs", check_viewer_lighting_and_uvs)
     step("rendering", check_render)
     step("upscaling", check_upscale)
+    step("model reader", check_model_reader)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
     step("app files", check_app_files)

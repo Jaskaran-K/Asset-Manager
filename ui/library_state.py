@@ -23,7 +23,7 @@ from core import archives
 from core.category_rules import tag_names_by_id
 from core.library_snapshot import save_snapshot
 from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
-from core.metadata import read_cost, read_details
+from core.metadata import read_cost, read_details, read_order
 from core.profiles import current_profile, other_profiles_folders
 from core.scanner import AssetItem, AssetScanner, asset_sort_key
 from core.settings import get_archive_contents, get_file_extensions
@@ -445,7 +445,7 @@ class LibraryState(QObject):
         def load(repo):
             todo = repo.assets_needing_meta(ids)
             todo = [row for row in todo if read_cost(row[2]) < 3]
-            todo.sort(key=lambda row: read_cost(row[2]))  # images first: they take milliseconds
+            todo.sort(key=lambda row: read_order(row[1], row[2]))  # images first: they take milliseconds; big models last
             return repo.meta_by_asset(ids), todo
 
         run_in_background(self.repo, load, partial(self._on_meta_loaded, generation), _ignore_result, slow=True)

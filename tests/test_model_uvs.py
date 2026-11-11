@@ -284,13 +284,13 @@ def test_uvs_are_only_read_when_asked_for(qapp, tmp_path, monkeypatch):
     from ui import viewer
 
     calls = []
-    real = viewer.read_uvs
+    real = viewer.model_reader.read_uvs
 
     def counted(*args, **kwargs):
         calls.append(args)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(viewer, "read_uvs", counted)
+    monkeypatch.setattr(viewer.model_reader, "read_uvs", counted)
     dialog = open_viewer(qapp, obj_asset(tmp_path))
     assert pump(qapp, lambda: dialog.viewport.face_count > 0)
     assert calls == [] and dialog.uv_view is None
@@ -332,7 +332,7 @@ def test_uvs_that_cant_be_read_say_so(qapp, tmp_path, monkeypatch):
     def fail(*_args, **_kwargs):
         raise model_uvs.UvError("It's damaged.")
 
-    monkeypatch.setattr(viewer, "read_uvs", fail)
+    monkeypatch.setattr(viewer.model_reader, "read_uvs", fail)
     dialog = open_viewer(qapp, obj_asset(tmp_path))
     dialog.btn_uv.click()
     assert pump(qapp, lambda: "It's damaged." in dialog.uv_view.status_text)
@@ -370,13 +370,13 @@ def test_one_uv_set_needs_no_picker(qapp, tmp_path):
 def test_slow_uvs_dont_land_on_the_next_file(qapp, tmp_path, monkeypatch):
     from ui import viewer
 
-    real = viewer.read_uvs
+    real = viewer.model_reader.read_uvs
 
     def slow(*args, **kwargs):
         time.sleep(0.3)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(viewer, "read_uvs", slow)
+    monkeypatch.setattr(viewer.model_reader, "read_uvs", slow)
     dialog = open_viewer(qapp, obj_asset(tmp_path, name="first.obj"))
     dialog.btn_uv.click()
     old_view = dialog.uv_view

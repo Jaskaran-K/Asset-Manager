@@ -139,6 +139,8 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("artbook.color_dropper", ARTBOOK, "Click the dropper, then anywhere", "Custom colour: take it from anywhere on screen (Esc cancels)"),
     Shortcut("artbook.gray", ARTBOOK, "G", "Grayscale on / off for the selected images", "G"),
     Shortcut("artbook.gray_board", ARTBOOK, "Shift+G", "Show the whole board in grayscale, to judge values", "Shift+G"),
+    Shortcut("artbook.values_board", ARTBOOK, "Shift+V", "Values Board: the whole board as a few flat greys (2 to 5: Right-click > Canvas)", "Shift+V"),
+    Shortcut("artbook.mirror_board", ARTBOOK, "Shift+H", "Mirror Board: the whole board flipped left to right, to check proportions", "Shift+H"),
     Shortcut("artbook.group", ARTBOOK, "Ctrl+G", "Group the selection: it's selected, moved and arranged as one", "Ctrl+G"),
     Shortcut("artbook.ungroup", ARTBOOK, "Ctrl+Shift+G", "Ungroup the selected groups (everything stays put)", "Ctrl+Shift+G"),
     Shortcut("artbook.draw", ARTBOOK, "D", "Draw: freehand strokes on the board (D again or Esc to stop)", "D"),
@@ -255,6 +257,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("video.fullscreen_mouse", VIDEO, "Double-click video", "Toggle video full screen"),
     Shortcut("video.exit_fullscreen", VIDEO, "Esc", "Leave video full screen", "Esc"),
     Shortcut("video.seek", VIDEO, "Click / drag seek bar", "Jump to a point / scrub (hover shows a preview)"),
+    Shortcut("video.frame_menu", VIDEO, "Right-click the video", "The frame showing: Send Frame to Artbook, Copy Frame, Save Frame As PNG"),
 
     # Tag dialog
     Shortcut("tagdialog.create", TAG_DIALOG, "Enter (in the new tag box)", "Create the tag and tick it"),  # QLineEdit.returnPressed

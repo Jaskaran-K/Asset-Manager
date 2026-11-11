@@ -23,6 +23,12 @@ def isolated_user_data(tmp_path, monkeypatch):
     monkeypatch.setattr(video_tools, "PROXY_DIR", data / "cache" / "proxies")
     monkeypatch.setattr(video_tools, "POSTER_DIR", data / "cache" / "posters")
     monkeypatch.setattr(video_tools, "THUMB_DIR", data / "cache" / "thumbnails")
+    # Models are read in the test's own process (tests that replace the loader see their replacement);
+    # tests/test_model_reader.py starts the real helper program
+    from core import model_reader
+
+    monkeypatch.setenv(model_reader.READER_ENV, "inprocess")
+    monkeypatch.setattr(model_reader, "_failures", None)
     # "Show in Explorer" would open real Explorer windows on the desktop (tests replace this to check it)
     from ui import file_actions
 

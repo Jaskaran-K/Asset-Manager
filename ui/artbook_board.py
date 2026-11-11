@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QLineF, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -61,6 +61,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QGraphicsItem,
     QGraphicsPathItem,
     QGraphicsScene,
@@ -72,16 +75,19 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QSlider,
+    QSpinBox,
     QStyle,
     QStyleOptionGraphicsItem,
     QWidget,
     QWidgetAction,
 )
 
+import numpy as np
 from PIL import Image
 
 from core import artbook_store as store
 from core import artbook_share, pur_import, video_tools
+from core.settings import get_artbook_custom_grid, get_artbook_value_tones, set_artbook_custom_grid, set_artbook_value_tones
 from ui import animations, artbook_layout, file_actions, shortcuts
 from ui.artbook_note_bar import SWATCHES, NoteBar, swatch_icon
 from ui.artbook_draw_bar import DrawBar
@@ -202,6 +208,8 @@ class ItemState:
     group: Optional[str] = None  # the group it's in (selected, moved and arranged together)
     caption: str = ""  # images: a line of text under it
     pixelated: bool = False  # images: hard pixel edges when zoomed in (no smoothing)
+    values: int = 0  # images: shown as this many flat greys (0: off; VALUE_TONES)
+    guides: str = ""  # images: lines drawn over it (GUIDES, or a custom grid "grid:<columns>:<rows>")
 
 
 def _gray_image(image: QImage) -> QImage:
@@ -213,6 +221,96 @@ def _gray_image(image: QImage) -> QImage:
         painter.drawImage(0, 0, image)
         painter.end()
     return gray
+
+
+VALUE_TONES = (2, 3, 4, 5)  # Values: how many flat greys an image can be shown in
+GUIDES = {  # Guides: what's drawn over an image (a custom grid is "grid:<columns>:<rows>")
+    "thirds": "Thirds", "grid:4:4": "Grid 4x4", "grid:8:8": "Grid 8x8", "golden": "Golden Ratio",
+    "center": "Centre and Diagonals",
+}
+MAX_GRID = 32
+GOLDEN = 0.381966  # 1 - 1/phi: where golden-ratio lines cut a side, from either end
+
+
+def _values_image(image: QImage, tones: int) -> QImage:
+    """image as `tones` flat greys, black to white (brightness split into equal bands), keeping its
+    transparency: the light and shadow shapes without the detail."""
+    gray = image.convertToFormat(QImage.Format.Format_Grayscale8)
+    w, h, line = gray.width(), gray.height(), gray.bytesPerLine()
+    rows = np.frombuffer(gray.constBits(), np.uint8, gray.sizeInBytes()).reshape(h, line)[:, :w]
+    bands = (rows.astype(np.uint16) * tones) >> 8  # 0 .. tones - 1
+    levels = np.ascontiguousarray((bands * 255 // (tones - 1)).astype(np.uint8))
+    flat = QImage(levels.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+    flat = flat.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    if image.hasAlphaChannel():
+        painter = QPainter(flat)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, image)
+        painter.end()
+    return flat
+
+
+def _clean_values(value: Any) -> int:
+    return value if isinstance(value, int) and value in VALUE_TONES else 0
+
+
+def custom_grid(guides: str) -> Optional[tuple[int, int]]:
+    """(columns, rows) of a grid guide ("grid:6:4"), or None if it isn't one."""
+    parts = guides.split(":") if isinstance(guides, str) else []
+    if len(parts) == 3 and parts[0] == "grid" and all(p.isdigit() for p in parts[1:]):
+        columns, rows = int(parts[1]), int(parts[2])
+        if 1 <= columns <= MAX_GRID and 1 <= rows <= MAX_GRID:
+            return columns, rows
+    return None
+
+
+def _clean_guides(value: Any) -> str:
+    return value if isinstance(value, str) and (value in GUIDES or custom_grid(value)) else ""
+
+
+def guide_lines(guides: str, rect: QRectF) -> list[QLineF]:
+    """The lines of a guide over rect (an image's shown part)."""
+    left, top, w, h = rect.left(), rect.top(), rect.width(), rect.height()
+
+    def across(shares) -> list[QLineF]:  # vertical lines at these shares of the width, then horizontal
+        lines = [QLineF(left + w * s, top, left + w * s, top + h) for s in shares[0]]
+        return lines + [QLineF(left, top + h * s, left + w, top + h * s) for s in shares[1]]
+
+    grid = custom_grid(guides)
+    if guides == "thirds":
+        return across(((1 / 3, 2 / 3), (1 / 3, 2 / 3)))
+    if grid is not None:
+        columns, rows = grid
+        return across(([c / columns for c in range(1, columns)], [r / rows for r in range(1, rows)]))
+    if guides == "golden":
+        return across(((GOLDEN, 1 - GOLDEN), (GOLDEN, 1 - GOLDEN)))
+    if guides == "center":
+        return across(((0.5,), (0.5,))) + [QLineF(rect.topLeft(), rect.bottomRight()), QLineF(rect.topRight(), rect.bottomLeft())]
+    return []
+
+
+class CustomGridDialog(QDialog):
+    """Guides > Custom Grid...: how many columns and rows."""
+
+    def __init__(self, start: tuple[int, int], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Custom Grid")
+        form = QFormLayout(self)
+        self.spin_columns, self.spin_rows = QSpinBox(self), QSpinBox(self)
+        for spin, value, what in ((self.spin_columns, start[0], "Columns"), (self.spin_rows, start[1], "Rows")):
+            spin.setRange(1, MAX_GRID)
+            spin.setValue(value)
+            spin.setToolTip(f"{what}: how many the image is divided into (1 to {MAX_GRID})")
+            form.addRow(what, spin)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=self)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setToolTip("Draw this grid over the selected images")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setToolTip("Leave the guides as they are")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def grid(self) -> tuple[int, int]:
+        return self.spin_columns.value(), self.spin_rows.value()
 
 
 def _clean_group(value: Any) -> Optional[str]:
@@ -271,6 +369,8 @@ class ImageItem(QGraphicsItem):
         self.group: Optional[str] = None
         self.caption = ""
         self.pixelated = False
+        self.values = 0  # (see ItemState)
+        self.guides = ""
         self.name = ""  # what the image list calls it (empty: its file's name)
         # Upscaled: the picture it was before ({"source", "size", "name"}), for Revert to Original
         self.original: Optional[dict[str, Any]] = None
@@ -284,7 +384,7 @@ class ImageItem(QGraphicsItem):
             self.pos().x(), self.pos().y(), self.scale(), self.rotation(),
             flip.m11() < 0, flip.m22() < 0, self.zValue(),
             self.crop, round(self.opacity(), 4), self.gray,
-            group=self.group, caption=self.caption, pixelated=self.pixelated,
+            group=self.group, caption=self.caption, pixelated=self.pixelated, values=self.values, guides=self.guides,
         )
 
     def apply_state(self, state: ItemState) -> None:
@@ -299,8 +399,9 @@ class ImageItem(QGraphicsItem):
         self.set_crop(state.crop)
         self.setOpacity(state.opacity)
         self.group = state.group
-        if (state.gray, state.caption, state.pixelated) != (self.gray, self.caption, self.pixelated):
+        if (state.gray, state.caption, state.pixelated, state.values, state.guides) != (self.gray, self.caption, self.pixelated, self.values, self.guides):
             self.gray, self.caption, self.pixelated = state.gray, state.caption, state.pixelated
+            self.values, self.guides = state.values, state.guides
             self.update()
 
     def to_dict(self) -> dict[str, Any]:
@@ -311,6 +412,7 @@ class ImageItem(QGraphicsItem):
             "flip_h": s.flip_h, "flip_v": s.flip_v, "z": s.z,
             "crop": list(s.crop) if s.crop else None, "opacity": s.opacity, "gray": s.gray,
             "group": s.group, "caption": s.caption, "pixelated": s.pixelated, "name": self.name,
+            "values": s.values, "guides": s.guides,
             **({"original": self.original} if self.original else {}),
         }
 
@@ -329,6 +431,7 @@ class ImageItem(QGraphicsItem):
             group=_clean_group(data.get("group")),
             caption=caption[:MAX_CAPTION] if isinstance(caption, str) else "",
             pixelated=data.get("pixelated") is True,
+            values=_clean_values(data.get("values")), guides=_clean_guides(data.get("guides")),
         ))
         name = data.get("name")
         item.name = name[:MAX_NAME] if isinstance(name, str) else ""
@@ -471,9 +574,21 @@ class ImageItem(QGraphicsItem):
         caption = self.caption_layout()
         return rect.united(caption[0]) if caption else rect
 
+    def shown_values(self) -> int:
+        """How many flat greys it shows as (its own Values, else the board's; 0: none)."""
+        scene = self.scene()
+        return self.values or (getattr(scene, "values_all", 0) if scene is not None else 0)
+
     def _shown_pixmap(self) -> QPixmap:
         scene = self.scene()
         pixmap = self.pixmap
+        tones = self.shown_values()
+        if tones:  # (Values first: they're grey too)
+            key = (pixmap.cacheKey(), tones)
+            if self._gray_pixmap is None or self._gray_key != key:
+                self._gray_pixmap = QPixmap.fromImage(_values_image(pixmap.toImage(), tones))
+                self._gray_key = key
+            return self._gray_pixmap
         if self.gray or (scene is not None and getattr(scene, "gray_all", False)):
             if self._gray_pixmap is None or self._gray_key != pixmap.cacheKey():
                 self._gray_pixmap = QPixmap.fromImage(_gray_image(pixmap.toImage()))
@@ -481,6 +596,21 @@ class ImageItem(QGraphicsItem):
             return self._gray_pixmap
         self._gray_pixmap = None
         return pixmap
+
+    def _paint_guides(self, painter: QPainter, shown: QRectF) -> None:
+        """The guide lines over what shows: white on a dark edge (they show on any picture), one pixel
+        wide however far it's zoomed."""
+        lines = guide_lines(self.guides, shown)
+        if not lines:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for color, width in ((QColor(0, 0, 0, 150), 3.0), (QColor(255, 255, 255, 220), 1.0)):
+            pen = QPen(color, width)
+            pen.setCosmetic(True)  # (screen pixels, not the image's)
+            painter.setPen(pen)
+            painter.drawLines(lines)
+        painter.restore()
 
     def fade(self) -> float:
         """How far its picture has faded in (1: all the way)."""
@@ -514,6 +644,8 @@ class ImageItem(QGraphicsItem):
                 painter.restore()
             painter.drawPixmap(shown, pixmap, self._pixmap_rect(shown))
             painter.restore()
+        if self.guides:
+            self._paint_guides(painter, shown)
         caption = self.caption_layout()
         if caption:
             box, font, pad = caption
@@ -870,6 +1002,7 @@ class _BoardScene(QGraphicsScene):
     def __init__(self, *args):
         super().__init__(*args)
         self.gray_all = False  # the whole board in grayscale (read by ImageItem.paint)
+        self.values_all = 0  # the whole board as this many flat greys (0: off; ImageItem.shown_values)
         self.group_backdrops: Callable[[], list[tuple[QRectF, Optional[str]]]] = list
         self.active_area: Optional[tuple[QRectF, float]] = None  # (the panel, its corners' radius)
         self.show_area = True  # (off while exporting and making thumbnails)
@@ -1377,6 +1510,7 @@ class BoardView(QGraphicsView):
 
     changed = Signal()  # the page's content changed (autosave)
     zoom_changed = Signal(float)
+    mirrored_changed = Signal(bool)  # Mirror Board turned on or off
     boards_dropped = Signal(list)  # board files dropped on it (.artbook, PureRef .pur): to import as pages
     export_image_requested = Signal()  # Ctrl+E / the menu: the panel asks where, then calls export_image
     export_page_requested = Signal()  # the menu: share the page as an .artbook file
@@ -1388,7 +1522,7 @@ class BoardView(QGraphicsView):
         "artbook.paste", "artbook.copy", "artbook.fit", "artbook.zoom_100", "artbook.flip_h", "artbook.flip_v",
         "artbook.front", "artbook.back", "artbook.reset", "artbook.delete", "artbook.select_all",
         "artbook.deselect", "artbook.undo", "artbook.redo", "artbook.pan_key", "artbook.arrange",
-        "artbook.crop", "artbook.crop_apply", "artbook.gray", "artbook.gray_board", "artbook.note", "artbook.picker",
+        "artbook.crop", "artbook.crop_apply", "artbook.gray", "artbook.gray_board", "artbook.values_board", "artbook.mirror_board", "artbook.note", "artbook.picker",
         "artbook.export_png", "artbook.group", "artbook.ungroup", "artbook.image_list", "artbook.draw", "artbook.eraser",
     )
 
@@ -1437,6 +1571,7 @@ class BoardView(QGraphicsView):
         self._readout = _ColorReadout(self)
         self._readout.hide()
         self.upscale_dialog = None  # the Upscale window, while it's open (ui.artbook_upscale)
+        self.mirrored = False  # Mirror Board: the view flipped left to right (a check: nothing on the page changes)
         self._note_bar: Optional[NoteBar] = None  # floats above the selected note (made when first needed:
         self._note_bar_queued = False  # listing the system's fonts for it is slow)
         self._live_merge: Optional[int] = None  # (see live_change)
@@ -1557,6 +1692,7 @@ class BoardView(QGraphicsView):
         else:
             self.set_view(1.0, QPointF(0, 0))
         self.set_board_gray(isinstance(view, dict) and view.get("gray") is True)
+        self.set_board_values(_clean_values(view.get("values")) if isinstance(view, dict) else 0)
         self._update_hint()
 
     def page_items(self) -> list[dict[str, Any]]:
@@ -1587,11 +1723,13 @@ class BoardView(QGraphicsView):
         painter = QPainter(image)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         gray_all, self._scene.gray_all = self._scene.gray_all, False  # the list shows pages in colour
+        values_all, self._scene.values_all = self._scene.values_all, 0
         self._scene.show_area = False
         try:
             self._scene.render(painter, target, bounds)  # items only: the selection frame is the view's
         finally:
             self._scene.gray_all = gray_all
+            self._scene.values_all = values_all
             self._scene.show_area = True
         painter.end()
         return image
@@ -1665,7 +1803,7 @@ class BoardView(QGraphicsView):
 
     def view_state(self) -> dict[str, Any]:
         center = self.view_center()
-        return {"x": center.x(), "y": center.y(), "zoom": self.zoom(), "gray": self._scene.gray_all}
+        return {"x": center.x(), "y": center.y(), "zoom": self.zoom(), "gray": self._scene.gray_all, "values": self._scene.values_all}
 
     def items_list(self) -> list[ImageItem]:
         return list(self._items.values())
@@ -2117,14 +2255,17 @@ class BoardView(QGraphicsView):
 
     # ------------------ view: zoom and pan ------------------
     def zoom(self) -> float:
-        return self.transform().m11()
+        return self.transform().m22()  # (m11 is negative while the board is mirrored)
+
+    def _view_transform(self, zoom: float) -> QTransform:
+        return QTransform.fromScale(-zoom if self.mirrored else zoom, zoom)
 
     def view_center(self) -> QPointF:
         return self.mapToScene(self.viewport().rect().center())
 
     def set_view(self, zoom: float, center: QPointF) -> None:
         zoom = max(ZOOM_RANGE[0], min(ZOOM_RANGE[1], zoom))
-        self.setTransform(QTransform.fromScale(zoom, zoom))
+        self.setTransform(self._view_transform(zoom))
         self.centerOn(center)
         self.zoom_changed.emit(zoom)
         self._schedule_detail()
@@ -2133,7 +2274,7 @@ class BoardView(QGraphicsView):
         """Zoom keeping the board point under `anchor` (a viewport position) where it is."""
         zoom = max(ZOOM_RANGE[0], min(ZOOM_RANGE[1], zoom))
         fixed = self.mapToScene(anchor.toPoint())
-        self.setTransform(QTransform.fromScale(zoom, zoom))
+        self.setTransform(self._view_transform(zoom))
         moved = self.mapFromScene(fixed) - anchor.toPoint()
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + moved.x())
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + moved.y())
@@ -2883,6 +3024,81 @@ class BoardView(QGraphicsView):
 
     def toggle_board_gray(self) -> None:
         self.set_board_gray(not self._scene.gray_all)
+
+    # ------------------ values, guides, mirror ------------------
+    def set_values(self, tones: int) -> None:
+        """The selected images as `tones` flat greys (0: off). One undo step."""
+        tones = _clean_values(tones)
+        self._change_selection("values", lambda _item, s: replace(s, values=tones), self.selected_images())
+
+    def set_board_values(self, tones: int) -> None:
+        """Values Board: everything as `tones` flat greys (0: off; a view setting, saved with the page)."""
+        tones = _clean_values(tones)
+        if tones != self._scene.values_all:
+            self._scene.values_all = tones
+            self.viewport().update()
+
+    def toggle_board_values(self) -> None:
+        """Shift+V: Values Board on (with the remembered number of tones) or off."""
+        self.set_board_values(0 if self._scene.values_all else get_artbook_value_tones())
+
+    def pick_board_tones(self, tones: int) -> None:
+        set_artbook_value_tones(tones)
+        self.set_board_values(tones)
+
+    def set_guides(self, guides: str) -> None:
+        """Guide lines over the selected images ("": none). One undo step."""
+        guides = _clean_guides(guides)
+        self._change_selection("guides", lambda _item, s: replace(s, guides=guides), self.selected_images())
+
+    def ask_custom_grid(self) -> None:
+        """Custom grid: ask for columns and rows (the last ones asked for to start with)."""
+        dialog = CustomGridDialog(get_artbook_custom_grid(), self)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                columns, rows = dialog.grid()
+                set_artbook_custom_grid((columns, rows))
+                self.set_guides(f"grid:{columns}:{rows}")
+        finally:
+            dialog.deleteLater()
+
+    def set_mirrored(self, mirrored: bool) -> None:
+        """Mirror Board: the whole board shown flipped left to right, to check proportions with fresh eyes.
+        Only the view: the page, its images and undo stay as they are. The middle stays where it is."""
+        if mirrored == self.mirrored:
+            return
+        center = self.view_center()
+        self.mirrored = mirrored
+        self.set_view(self.zoom(), center)
+        self.show_message("Mirror Board: the board is shown flipped (nothing on it changed). Shift+H turns it back."
+                          if mirrored else "Mirror Board off.")
+        self.mirrored_changed.emit(mirrored)
+
+    def toggle_mirror(self) -> None:
+        self.set_mirrored(not self.mirrored)
+
+    def _values_menu(self, images: list) -> list:
+        current = {item.values for item in images}
+        entries = [("Off", None, lambda: self.set_values(0), bool(images), bool(images) and current == {0})]
+        for tones in VALUE_TONES:
+            entries.append((f"{tones} Tones", None, lambda t=tones: self.set_values(t), bool(images), bool(images) and current == {tones}))
+        return entries
+
+    def _guides_menu(self, images: list) -> list:
+        current = {item.guides for item in images}
+        entries = [("Off", None, lambda: self.set_guides(""), bool(images), bool(images) and current == {""})]
+        for key, name in GUIDES.items():
+            entries.append((name, None, lambda k=key: self.set_guides(k), bool(images), bool(images) and current == {key}))
+        shown = next(iter(current)) if len(current) == 1 else ""
+        custom = custom_grid(shown) if shown not in GUIDES else None  # (a grid of its own, not one of the above)
+        label = "Custom Grid..." if custom is None else f"Custom Grid ({custom[0]}x{custom[1]})..."
+        entries += [None, (label, None, self.ask_custom_grid, bool(images), bool(custom))]
+        return entries
+
+    def _board_tones_menu(self) -> list:
+        chosen = get_artbook_value_tones()
+        return [(f"{tones} Tones", None, lambda t=tones: self.pick_board_tones(t), True, self._scene.values_all == tones or
+                 (not self._scene.values_all and tones == chosen)) for tones in VALUE_TONES]
 
     def set_opacity(self, percent: int, before: Optional[dict[str, ItemState]] = None) -> None:
         """Opacity of the selection. With before (the states when dragging started): one undo step."""
@@ -3697,6 +3913,8 @@ class BoardView(QGraphicsView):
         selection = [
             ("Crop", "artbook.crop", self.start_crop, selected == 1 and len(images) == 1),
             ("Grayscale", "artbook.gray", self.toggle_gray, bool(images), bool(images) and all(item.gray for item in images)),
+            ("Values", self._values_menu(images)),
+            ("Guides", self._guides_menu(images)),
             ("Opacity", [self._opacity_action(menu, has_selection)]),
             ("Pixelated", None, self.toggle_pixelated, bool(images), bool(images) and all(item.pixelated for item in images)),
             ("Caption...", None, self.edit_caption, bool(images)),
@@ -3740,6 +3958,9 @@ class BoardView(QGraphicsView):
             ("Frame Selection" if has_selection else "Frame Everything", "artbook.fit", self.frame, bool(self._items)),
             ("Zoom to 100%", "artbook.zoom_100", lambda: self.animate_view(1.0, self.view_center()), True),
             ("Grayscale Board", "artbook.gray_board", self.toggle_board_gray, True, self._scene.gray_all),
+            ("Values Board", "artbook.values_board", self.toggle_board_values, True, bool(self._scene.values_all)),
+            ("Values Board Tones", self._board_tones_menu()),
+            ("Mirror Board", "artbook.mirror_board", self.toggle_mirror, True, self.mirrored),
             None,
             ("Export Selection as PNG..." if has_selection else "Export as PNG...", "artbook.export_png", self.request_export_image, bool(self._items)),
         ]
@@ -3951,6 +4172,8 @@ class BoardView(QGraphicsView):
             "artbook.note": self.add_note,
             "artbook.picker": self.start_picker,
             "artbook.gray_board": self.toggle_board_gray,
+            "artbook.values_board": self.toggle_board_values,
+            "artbook.mirror_board": self.toggle_mirror,
             "artbook.export_png": self.request_export_image,
             "artbook.group": self.group_selection,
             "artbook.ungroup": self.ungroup_selection,

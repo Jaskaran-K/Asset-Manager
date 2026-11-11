@@ -68,10 +68,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import alphas, app_icons, apps, archives, environment
+from core import alphas, app_icons, apps, archives, environment, model_reader
 from core.full_image import LoadedImage, load_full_image
-from core.model_loader import Mesh3D, load_3d_model
-from core.model_uvs import UvLayout, read_uvs, tiles_text
+from core.model_loader import Mesh3D
+from core.model_uvs import UvLayout, tiles_text
 from core.obj_fast import LoadCancelled
 from core.render_scene import UNRENDERABLE
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions, with_roughness
@@ -1600,6 +1600,7 @@ class AssetViewerDialog(QDialog):
         # Case D: Video Player
         elif self.asset.is_video:
             self.video_player = VideoPlayer()
+            self.video_player.artbook = self._artbook  # (right-click > Send Frame to Artbook)
             self.video_player.fullscreen_changed.connect(self._on_video_fullscreen)
             layout.addWidget(self.video_player, 1)
             self.video_player.load(path, autoplay=True)
@@ -1676,7 +1677,7 @@ class AssetViewerDialog(QDialog):
             if token == self._load_token and shiboken6.isValid(viewport):
                 viewport.set_status(f"This model couldn't be opened.\n{message}")
 
-        run_job(lambda: load_3d_model(path, should_stop=stop.is_set), done, failed)
+        run_job(lambda: model_reader.read_mesh(path, should_stop=stop.is_set), done, failed)  # (in the model reader)
 
     def _refresh_inspector(self) -> None:
         sizes = self._splitter.sizes()
@@ -1895,7 +1896,7 @@ class AssetViewerDialog(QDialog):
 
         def work() -> Optional[UvLayout]:
             try:
-                return read_uvs(path, set_index, stop.is_set)
+                return model_reader.read_uvs(path, set_index, stop.is_set)
             except LoadCancelled:
                 return None  # (nobody wants them any more: done() sees the token has moved on)
 

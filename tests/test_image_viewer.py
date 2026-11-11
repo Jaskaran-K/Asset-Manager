@@ -98,7 +98,7 @@ def test_closing_the_viewer_stops_a_model_being_read(qapp, tmp_path, monkeypatch
         stopped.append(should_stop())
         raise MemoryError("(stopped)")
 
-    monkeypatch.setattr(viewer, "load_3d_model", slow)
+    monkeypatch.setattr(viewer.model_reader, "read_mesh", slow)
     dialog = open_viewer(qapp, model_asset(tmp_path))
     started = time.monotonic()
     close(qapp, dialog)

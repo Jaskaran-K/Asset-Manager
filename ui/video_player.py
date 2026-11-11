@@ -39,16 +39,18 @@ from functools import partial
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -60,6 +62,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.settings import (
+    get_last_export_dir,
+    set_last_export_dir,
     VIDEO_SKIP_OPTIONS,
     get_video_position,
     get_video_skip_seconds,
@@ -500,6 +504,7 @@ class VideoPlayer(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._enable_proxy = enable_proxy_fallback
         self._source: Optional[Path] = None
+        self.artbook = None  # a ui.asset_menu.ArtbookSender: frames can be sent to the Artbook (right-click)
         self._using_proxy = False
         self._failed = False
         self._resume_position = 0
@@ -981,10 +986,84 @@ class VideoPlayer(QWidget):
             if self._cursor_over_video():
                 self.set_fullscreen(not self._fullscreen)
                 return True
+        elif etype == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
+            if self._cursor_over_video():  # (the video draws in a native window: its clicks come here)
+                self.show_frame_menu(QCursor.pos())
+                return True
         elif etype == QEvent.Type.KeyPress and self._is_video_window(obj):
             # Clicking the video gives its native window keyboard focus; keep the shortcuts working
             return self._handle_key(event)
         return False
+
+    # ------------------------------------------------------------------
+    # The frame on screen: to the Artbook, the clipboard or a file
+    # ------------------------------------------------------------------
+    def current_frame(self) -> Optional[QImage]:
+        """The frame showing now, at the video's own size (None before the first one)."""
+        frame = self.video_widget.videoSink().videoFrame()
+        if not frame.isValid():
+            return None
+        image = frame.toImage()
+        return None if image.isNull() else image
+
+    def frame_name(self) -> str:
+        """What a frame is called: the video's name and the time, e.g. "Creating The Head 12:41"."""
+        stem = self._source.stem if self._source is not None else "Video"
+        return f"{stem} {format_time(self.player.position())}"
+
+    def _proxy_note(self) -> str:
+        return f" (from the {PROXY_HEIGHT}p preview copy)" if self._using_proxy else ""
+
+    def show_frame_menu(self, at: QPoint) -> None:
+        """Right-click the video: Send Frame to Artbook (any page, or a new one), Copy Frame, Save Frame As PNG."""
+        has_frame = self.current_frame() is not None
+        menu = QMenu(self)
+        if self.artbook is not None:
+            send = menu.addMenu("Send Frame to Artbook")
+            self.artbook.fill_artbook_menu(send, self.send_frame)
+            send.setEnabled(has_frame)
+        copy = menu.addAction("Copy Frame")
+        copy.triggered.connect(self.copy_frame)
+        save = menu.addAction("Save Frame As PNG...")
+        save.triggered.connect(self.save_frame)
+        for action in (copy, save):
+            action.setEnabled(has_frame)
+        menu.exec(at)
+        menu.deleteLater()
+
+    def send_frame(self, page_id: Optional[str]) -> None:
+        """Add the frame showing to an Artbook page (None: a new one); playback carries on."""
+        image = self.current_frame()
+        if image is None or self.artbook is None:
+            return
+        message = self.artbook.send_image_to_artbook(image, self.frame_name(), page_id)
+        self._show_toast(message + self._proxy_note())
+
+    def copy_frame(self) -> None:
+        image = self.current_frame()
+        if image is not None:
+            QApplication.clipboard().setImage(image)
+            self._show_toast(f"Copied the frame ({image.width()} x {image.height()}){self._proxy_note()}.")
+
+    def save_frame(self, path: Optional[Path] = None) -> None:
+        """Save the frame showing as a PNG (asks where, unless path)."""
+        image = self.current_frame()
+        if image is None:
+            return
+        if path is None:
+            folder = get_last_export_dir() or QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+            name = "".join(c if c not in '<>:"/\\|?*' else "-" for c in self.frame_name())
+            chosen, _filter = QFileDialog.getSaveFileName(self, "Save Frame", str(Path(folder) / f"{name}.png"), "PNG image (*.png)")
+            if not chosen:
+                return
+            path = Path(chosen)
+        if path.suffix.lower() != ".png":
+            path = path.with_name(path.name + ".png")
+        if image.save(str(path), "PNG"):
+            set_last_export_dir(str(path.parent))
+            self._show_toast(f"Saved {path.name}{self._proxy_note()}.")
+        else:
+            self._show_toast(f"Couldn't save {path.name}.")
 
     def _is_video_window(self, obj: QObject) -> bool:
         """True for the native child window that draws the video inside this player's window."""

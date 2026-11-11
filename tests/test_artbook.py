@@ -423,10 +423,15 @@ def test_menu_layout(qapp, panel):
     menu = panel.board.context_menu(QPointF(0, 0))
     assert menu_layout(menu) == [
         "Undo", "Redo", "---", "Copy >", "  Image", "  File Path", "Paste", "Note", "Colour Picker", "Draw", "---",
-        "Canvas >", "  Frame Everything", "  Zoom to 100%", "  Grayscale Board", "  ---", "  Export as PNG...",
+        "Canvas >", "  Frame Everything", "  Zoom to 100%", "  Grayscale Board",
+        "  Values Board", "  Values Board Tones >", "    2 Tones", "    3 Tones", "    4 Tones", "    5 Tones", "  Mirror Board",
+        "  ---", "  Export as PNG...",
         "Images >", "  Select All", "  Image List",
         "  Selection >",
-        "    Crop", "    Grayscale", "    Opacity >", "      ", "    Pixelated", "    Caption...", "    ---",
+        "    Crop", "    Grayscale",
+        "    Values >", "      Off", "      2 Tones", "      3 Tones", "      4 Tones", "      5 Tones",
+        "    Guides >", "      Off", "      Thirds", "      Grid 4x4", "      Grid 8x8", "      Golden Ratio", "      Centre and Diagonals", "      ---", "      Custom Grid...",
+        "    Opacity >", "      ", "    Pixelated", "    Caption...", "    ---",
         "    Group", "    Ungroup",
         "    Group Colour >", "      Theme Default", "      White", "      Black", "      ---", "      Custom...", "    Lock Group", "    ---",
         "    Flip Horizontally", "    Flip Vertically",

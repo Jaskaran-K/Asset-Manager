@@ -74,7 +74,7 @@ def test_a_model_that_cant_be_read_says_so(qapp, tmp_path, monkeypatch):
     def fail(_path, **_kwargs):
         raise MemoryError("not enough memory")
 
-    monkeypatch.setattr(viewer, "load_3d_model", fail)
+    monkeypatch.setattr(viewer.model_reader, "read_mesh", fail)
     dialog = open_viewer(qapp, model_asset(tmp_path))
     assert pump(qapp, lambda: "couldn't be opened" in dialog.viewport.status_text)
     close(qapp, dialog)
@@ -152,7 +152,7 @@ def test_a_slow_model_doesnt_land_on_the_next_file(qapp, tmp_path, monkeypatch):
             time.sleep(0.5)
         return load_3d_model(path, **kwargs)
 
-    monkeypatch.setattr(viewer, "load_3d_model", slow)
+    monkeypatch.setattr(viewer.model_reader, "read_mesh", slow)
     dialog = open_viewer(qapp, first)
     old = dialog.viewport
     dialog.show_target(viewer.ViewerTarget(second))

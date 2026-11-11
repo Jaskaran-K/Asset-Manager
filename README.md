@@ -161,6 +161,15 @@ making your first board. The list below is the full reference.
   **Shift+G** shows the whole board in grayscale to judge values (remembered per page; page thumbnails stay in
   colour). Selection also has **Pixelated** (hard pixel edges when zoomed in, for pixel art and textures) and
   **Caption...** (a line of text under the image that moves, scales and flips with it).
+- **Values, guides and mirroring** (for studying a reference; nothing is changed in the picture itself):
+  - Selection > **Values** shows the selected images as 2, 3, 4 or 5 flat greys, black to white: the light and
+    shadow shapes without the detail. **Shift+V** (**Values Board**) does it to the whole board, with as many tones
+    as you pick under Canvas > Values Board Tones (3 to start with; remembered per page).
+  - Selection > **Guides** draws lines over the selected images: **Thirds**, **Grid 4x4**, **Grid 8x8** (for
+    transferring proportions), **Golden Ratio**, **Centre and Diagonals**, or **Custom Grid...** (any number of
+    columns and rows, up to 32). They stay one pixel thin at any zoom, and show in an exported PNG.
+  - **Shift+H** (**Mirror Board**) shows the whole board flipped left to right, to see proportions with fresh
+    eyes; Shift+H again turns it back. Everything still works while it's mirrored, and the page doesn't change.
 - **Groups:** **Ctrl+G** groups the selection: a soft panel shows behind it, and clicking any member (or the
   panel's empty space) picks up the whole group, so it moves, arranges and aligns as one block. **Alt+click**
   picks one member on its own, **Ctrl+Shift+G** ungroups. A selected group gets a small bar above it:
@@ -254,6 +263,11 @@ Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid
   sculpt takes a few seconds: binary FBX and OBJ are read with quick readers of their own (`core/fbx_fast.py`,
   `core/obj_fast.py`; a 270 MB OBJ in about 5 seconds, a 2 GB one in about a minute). OBJ files keep their own
   normals, so hard edges stay sharp. Moving on to another file or closing the viewer stops a model still loading.
+- **Read safely, apart from the app:** models (for the viewer, the grid's thumbnails and the face counts) are read
+  by a helper program of the app's own, one model at a time, so the window never stutters while a big one is read
+  and a file that crashes its reader can't take the app with it. The helpers together may use up to half the
+  computer's memory. A model that crashed the reader, ran out of memory or took too long gets a "Couldn't read" card
+  and isn't read again until the file changes (the viewer always tries).
 - **Moving round:** drag to turn the model, right-drag (or middle-drag) to pan, scroll to zoom. **R** resets the
   view, **G** the ground grid, **W** cycles shaded / wireframe / both.
 - **Its look:** pick a **material** (Matte, Clay, Phong, Glossy, Metallic, Toon, or Normals to check the
@@ -323,6 +337,9 @@ No extra Python packages are needed.
 - **Resume:** videos start where you left them. **Home** starts from the beginning.
 - **Frame step:** **,** and **.** pause and step one frame back or forward.
 - **A-B loop:** press **L** (or the A-B button) at the start and at the end of the part to repeat; press it again to stop.
+- **The frame on screen:** right-click the video > **Send Frame to Artbook** (any page, or a new one), **Copy Frame**
+  or **Save Frame As PNG...**, at the video's own resolution, named after the video and the time (e.g.
+  "Creating The Head 12:41"). Playback carries on. A video playing from its preview copy gives that copy's frame.
 - **ffmpeg** is optional. If you install it (for example `winget install ffmpeg`), the app uses it to:
   - make poster-frame thumbnails in the grid
   - make 720p H.264 preview copies ("proxies") of files that won't play or that stutter
@@ -379,7 +396,8 @@ Known limitations:
 - After each library scan, the database forgets files the scan didn't find (deleted ones, or folders opened with
   Open Folder) unless they have custom tags, a favorite or a rating; those are kept in case the file turns up again,
   as are files on a drive that's offline.
-- 3D model face counts are read for files up to 60 MB; bigger ones don't match `poly:` searches.
+- 3D model face counts are read for files up to 1 GB (the smallest first, so a big one never holds up the rest);
+  bigger ones don't match `poly:` searches.
 
 ## When something goes wrong
 
@@ -404,7 +422,9 @@ always show up on the page. **Settings > Appearance > Animations** turns animati
 
 ## Development
 
-`pip install -r requirements-dev.txt -c requirements.lock`, then `python -m pytest`. `requirements.lock` holds the
+`pip install -r requirements-dev.txt -c requirements.lock`, then `python -m pytest`. **Speed tests**
+(`python -m pytest -m speed`, also a step of the Tests run on GitHub) time loading, searching and counting on a
+made-up 50,000-file library, and fail when something takes over its budget (`tests/test_speed.py`). `requirements.lock` holds the
 exact versions the tests pass with; CI and release builds install those, so a release never ships an untested
 version (its header says how to update it). The project rules (shortcuts, threads, tooltips) are in `CLAUDE.md`. Release builds: `pyinstaller AssetManager.spec` makes both the portable exe and the folder
 build; `iscc /DAppVersion=x.y.z installer\AssetManager.iss` turns the folder build into the installer.

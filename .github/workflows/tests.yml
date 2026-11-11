@@ -52,6 +52,21 @@ jobs:
             exit $code
           }
 
+      - name: Speed tests
+        # A made-up 50,000-file library (tests/test_speed.py): fails if something takes over its budget.
+        # The timings are a table on the run's page.
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -m speed -q -s tests/test_speed.py 2>&1 | Tee-Object -FilePath speed.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $tail = (Get-Content speed.log -Tail 40 | ForEach-Object { $_ -replace '%', '%25' }) -join '%0A'
+            Write-Output "::error title=Speed tests failed (exit code $code)::$tail"
+            exit $code
+          }
+
       - name: Self-test
         shell: pwsh
         run: |

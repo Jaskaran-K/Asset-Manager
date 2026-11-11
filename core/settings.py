@@ -794,6 +794,28 @@ def set_render_settings(**changes: Any) -> None:
     _update_config("render", state)
 
 
+def get_artbook_value_tones() -> int:
+    """How many flat greys Values Board shows (2 to 5; 3 to start with)."""
+    value = _load_raw_config().get("artbook_value_tones")
+    return value if value in (2, 3, 4, 5) else 3
+
+
+def set_artbook_value_tones(tones: int) -> None:
+    _update_config("artbook_value_tones", int(tones))
+
+
+def get_artbook_custom_grid() -> tuple[int, int]:
+    """The last custom grid asked for (columns, rows): 6 x 6 to start with."""
+    value = _load_raw_config().get("artbook_custom_grid")
+    if isinstance(value, list) and len(value) == 2 and all(isinstance(v, int) and 1 <= v <= 32 for v in value):
+        return value[0], value[1]
+    return 6, 6
+
+
+def set_artbook_custom_grid(grid: tuple[int, int]) -> None:
+    _update_config("artbook_custom_grid", [int(grid[0]), int(grid[1])])
+
+
 def get_unpacked_limit_gb() -> int:
     """How many GB the copies unpacked from archives may take (Settings > Storage)."""
     from core.storage import DEFAULT_UNPACKED_LIMIT_GB, UNPACKED_LIMITS_GB

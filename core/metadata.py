@@ -18,7 +18,7 @@ from PySide6.QtGui import QImageReader
 from .scanner import MODEL_EXTENSIONS, TEXTURE_EXTENSIONS, VIDEO_EXTENSIONS
 from .tag_repository import AssetMeta
 
-MAX_MODEL_BYTES = 60 * 1024 * 1024
+MAX_MODEL_BYTES = 1024 ** 3  # (read in the model reader, biggest last: see core.model_reader)
 
 # Cheapest first: images (header only), then videos (ffmpeg), then models (full load)
 _COST = {**{e: 0 for e in TEXTURE_EXTENSIONS}, **{e: 1 for e in VIDEO_EXTENSIONS}, **{e: 2 for e in MODEL_EXTENSIONS}}
@@ -28,6 +28,18 @@ EMPTY = AssetMeta()
 def read_cost(extension: str) -> int:
     """Sort key: how expensive reading a file's details is (3 = nothing to read)."""
     return _COST.get(extension.lower(), 3)
+
+
+def read_order(path: str, extension: str) -> tuple[int, int]:
+    """Sort key for reading details: cheapest kinds first, and models smallest first (a 1 GB one takes a
+    minute; the hundreds of small ones shouldn't wait for it)."""
+    cost = read_cost(extension)
+    if cost != _COST.get(".obj"):
+        return cost, 0
+    try:
+        return cost, os.path.getsize(path)
+    except OSError:
+        return cost, 0
 
 
 def _psd_size(path: str) -> Optional[tuple[int, int]]:
@@ -163,12 +175,10 @@ def read_details(path: str, extension: str) -> Optional[AssetMeta]:
             duration, width, height = probed
             return AssetMeta(width=width or None, height=height or None, duration_ms=duration)
         if ext in MODEL_EXTENSIONS and os.path.getsize(path) <= MAX_MODEL_BYTES:
-            from .model_loader import load_3d_model
+            from .model_reader import read_faces
 
-            mesh = load_3d_model(Path(path))
-            if mesh.stand_in:  # the loader fell back to a placeholder cube
-                return EMPTY
-            return AssetMeta(poly_count=mesh.face_count)
+            faces = read_faces(Path(path))  # (in the model reader: a bad file can't take the app with it)
+            return AssetMeta(poly_count=faces) if faces is not None else EMPTY
     except Exception:  # pylint: disable=broad-except
         pass
     return EMPTY

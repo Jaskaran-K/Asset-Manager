@@ -1766,6 +1766,11 @@ def main() -> None:
 
         code = run_render(Path(sys.argv[sys.argv.index("--render") + 1]))
         os._exit(code)  # (everything's written: LuxCore can crash as it's unloaded in a normal exit)
+    if "--model-reader" in sys.argv:
+        # Reading 3D models for the app, in a process of its own (core.model_reader)
+        from core.model_reader import serve
+
+        sys.exit(serve(sys.argv[sys.argv.index("--model-reader") + 1]))
     if "--theme-studio" in sys.argv:
         # The Theme Studio on its own (ui.theme_studio): the app's window isn't made at all
         from ui.theme_studio import run as run_theme_studio

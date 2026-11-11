@@ -681,7 +681,7 @@ def test_the_viewer_shows_a_blends_picture_without_reading_it_as_a_model(library
     import ui.viewer
     from ui.viewer import AssetViewerDialog
 
-    monkeypatch.setattr(ui.viewer, "load_3d_model", lambda *a, **k: pytest.fail("a .blend can't be read as a model"))
+    monkeypatch.setattr(ui.viewer.model_reader, "read_mesh", lambda *a, **k: pytest.fail("a .blend can't be read as a model"))
     window = open_window(qapp)
     apps.configure(*every_app_config(library.parent))
     dialog = AssetViewerDialog(asset_named(window, "scene.blend"), window)

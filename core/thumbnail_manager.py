@@ -48,7 +48,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPdf import QPdfDocument
 
-from . import alphas, app_icons, apps, archives, file_pictures
+from . import alphas, app_icons, apps, archives, file_pictures, model_reader
 from .hdr_image import is_hdr, read_hdr_image
 from .psd_reader import read_psd_composite
 from .scanner import APP_FILE_EXTENSIONS, AssetItem
@@ -482,16 +482,17 @@ def render_model_thumbnail(vertices, faces, normals, category_name: str, size: i
 
 
 def load_model_picture(file_path: Path, size: int = 110) -> Optional[QImage]:
-    """Read a 3D model and render its picture (None if it can't be read)."""
-    from .model_loader import load_3d_model
+    """Read a 3D model and render its picture, in the model reader (core.model_reader): None if it can't
+    be read (or is the stand-in cube). Raises model_reader.ReadFailed if reading it crashed the reader,
+    ran it out of memory or took too long (remembered: it isn't read again until it changes)."""
+    from .model_reader import ReadFailed, read_picture
 
     try:
-        mesh = load_3d_model(file_path)
+        return read_picture(file_path, size)
+    except ReadFailed:
+        raise
     except Exception:  # pylint: disable=broad-except
         return None
-    if mesh.stand_in:
-        return None  # (no picture beats a picture of the stand-in cube)
-    return render_model_picture(mesh.vertices, mesh.faces, mesh.normals, size)
 
 
 def load_model_thumbnail_image(file_path: Path, category_name: str, size: int = 110) -> Optional[QImage]:
@@ -771,6 +772,8 @@ class _ThumbnailRunnable(QRunnable):
             return None, "Too large to preview"
         except archives.ArchiveError as exc:
             return None, "Password-protected" if "password" in str(exc) else "Damaged in archive"
+        except model_reader.ReadFailed:
+            return None, "Couldn't read"
         except Exception:  # pylint: disable=broad-except
             pass
         return None, ""

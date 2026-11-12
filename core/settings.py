@@ -950,3 +950,18 @@ def set_video_position(path: Path | str, position_ms: int) -> None:
     if positions != config.get("video_positions"):
         config["video_positions"] = positions
         _save_raw_config(config)
+
+
+def get_folder_rules() -> list[dict[str, Any]]:
+    """Folder rules (core.folder_rules): [{"folder": path, "tags": [names], "subfolders": bool}]."""
+    value = _load_raw_config().get("folder_rules")
+    if not isinstance(value, list):
+        return []
+    return [
+        {"folder": r["folder"], "tags": [t for t in r.get("tags", []) if isinstance(t, str)], "subfolders": r.get("subfolders", True) is not False}
+        for r in value if isinstance(r, dict) and isinstance(r.get("folder"), str) and isinstance(r.get("tags", []), list)
+    ]
+
+
+def set_folder_rules(rules: list[dict[str, Any]]) -> None:
+    _update_config("folder_rules", rules)

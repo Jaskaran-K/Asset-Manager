@@ -49,6 +49,10 @@ MAX_DRAG_BYTES = 50 * 1024 * 1024  # dragging out unpacks first: bigger ones go 
 
 _CHUNK = 1024 * 1024
 _DEFLATE64_CHUNK = 64 * 1024  # (inflate64 has no output limit: small inputs keep each output small)
+# inflate64 1.0.4 keeps a reference to every object given to Inflater.inflate, for good: each piece of a
+# Deflate64 member stayed in memory (a pass over 2,000 pictures in zips kept 2.5 GB). So it's always given
+# the same object: a buffer per thread, refilled for each piece (_Inflate64Input).
+_inflate64_input = threading.local()
 _INDEX_VERSION = 2  # 2: RAR / 7z (each member's kind)
 _PREVIEW_NAME = re.compile(r"preview|cover|thumb|icon", re.IGNORECASE)
 _PICTURE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tga", ".tif", ".tiff", ".psd")
@@ -608,13 +612,26 @@ def _unpacker(method: int) -> Callable[[Optional[bytes]], Iterable[bytes]]:
         if data is None:
             return
         try:
-            piece = inflater64.inflate(data)
+            piece = inflater64.inflate(_inflate64_view(data))
         except Exception as exc:  # pylint: disable=broad-except
             raise ArchiveError(f"Damaged data: {exc}") from exc
         if piece:
             yield piece
 
     return inflate_64
+
+
+def _inflate64_view(data: bytes) -> memoryview:
+    """data copied into this thread's reused input buffer (see _inflate64_input), as a view of it: inflate64
+    keeps that view (one per thread, or a small slice for a member's last piece), not the data."""
+    state = _inflate64_input.__dict__
+    if "buffer" not in state:
+        state["buffer"] = bytearray(_DEFLATE64_CHUNK)
+        state["view"] = memoryview(state["buffer"])
+    if len(data) > _DEFLATE64_CHUNK:  # (never: pieces are read this size)
+        return memoryview(bytes(data))
+    state["buffer"][:len(data)] = data
+    return state["view"] if len(data) == _DEFLATE64_CHUNK else state["view"][:len(data)]
 
 
 def _zipfile_chunks(member: ArchiveMember, should_stop: Optional[Callable[[], bool]]) -> Iterator[bytes]:

@@ -133,6 +133,18 @@ MIGRATIONS: list[str] = [
     DROP TABLE saved_searches;
     ALTER TABLE saved_searches_v7 RENAME TO saved_searches;
     """,
+    # v8: what pictures look like (core.picture_look: main colours, look-alike hash, small grey copy), read
+    # in the background; look_key is meta_key + the look version, as meta_key is. seen_folder: the folder
+    # a file was last seen in, so folder rules (core.folder_rules) tag a file once, when it arrives in a
+    # folder (NULL: not handled yet; '' for files known before rules existed: never tagged by them).
+    """
+    ALTER TABLE assets ADD COLUMN look_colors TEXT;
+    ALTER TABLE assets ADD COLUMN look_hash INTEGER;
+    ALTER TABLE assets ADD COLUMN look_grey BLOB;
+    ALTER TABLE assets ADD COLUMN look_key TEXT;
+    ALTER TABLE assets ADD COLUMN seen_folder TEXT;
+    UPDATE assets SET seen_folder = '';
+    """,
 ]
 
 
@@ -213,6 +225,17 @@ def default_tag_name(extension: str) -> str:
 def path_key(path: Path | str) -> str:
     """Stable lookup key for a file path (absolute, Windows case-insensitive)."""
     return os.path.normcase(os.path.abspath(str(path)))
+
+
+def folder_of_key(key: str) -> str:
+    """The folder a file is in, by its path_key (a file inside an archive: the archive's folder)."""
+    return os.path.dirname(key.partition("|")[0])
+
+
+def look_key(size: int, mtime: float) -> str:
+    from .picture_look import LOOK_VERSION
+
+    return f"{meta_key(size, mtime)}:v{LOOK_VERSION}"
 
 
 def _is_missing(path: str) -> bool:
@@ -542,8 +565,9 @@ class TagRepository:
     # ------------------------------------------------------------------
     # Assets
     # ------------------------------------------------------------------
-    def sync_assets(self, assets: Iterable[AssetItem]) -> dict[str, int]:
-        """Record scanned assets and give each its default file-type tag.
+    def sync_assets(self, assets: Iterable[AssetItem], folder_rules: Sequence = ()) -> dict[str, int]:
+        """Record scanned assets and give each its default file-type tag, and files that arrived in a
+        folder since the last scan the tags of the folder rules (core.folder_rules) that cover them.
 
         Returns {str(asset.path): asset_id}. Runs as one transaction, so it's
         cheap to call after every scan; it also backfills older libraries.
@@ -593,7 +617,77 @@ class TagRepository:
                     f"SELECT path_key, id FROM assets WHERE path_key IN ({_placeholders(len(chunk))})", chunk
                 ):
                     ids[by_key[found["path_key"]]] = found["id"]
+            self._apply_folder_rules(conn, set(by_key), folder_rules)
         return ids
+
+    def _apply_folder_rules(self, conn: sqlite3.Connection, keys: set[str], folder_rules: Sequence) -> None:
+        """Files among keys not yet seen in their folder: tag them by the rules covering it, and remember
+        the folder (files known before rules existed only have their folder remembered)."""
+        arrived = [
+            (row["id"], row["path_key"], row["seen_folder"]) for row in conn.execute(
+                "SELECT id, path_key, seen_folder FROM assets WHERE seen_folder IS NULL OR seen_folder = ''"
+            ) if row["path_key"] in keys
+        ]
+        if not arrived:
+            return
+        links: list[tuple[int, int]] = []
+        tag_ids: dict[str, Optional[int]] = {}
+        for asset_id, key, seen in arrived:
+            if seen is not None:
+                continue  # (known before folder rules: never tagged by them)
+            for name in dict.fromkeys(n for rule in folder_rules if rule.covers(key) for n in rule.tags):
+                if name not in tag_ids:
+                    tag_ids[name] = self._rule_tag_id(conn, name)
+                if tag_ids[name] is not None:
+                    links.append((asset_id, tag_ids[name]))
+        conn.executemany("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?, ?)", links)
+        conn.executemany(
+            "UPDATE assets SET seen_folder = ? WHERE id = ?", [(folder_of_key(key), asset_id) for asset_id, key, _seen in arrived]
+        )
+
+    @staticmethod
+    def _rule_tag_id(conn: sqlite3.Connection, name: str) -> Optional[int]:
+        """A folder rule's tag (made if it doesn't exist yet; None if it's a file type tag's name)."""
+        name = " ".join(name.split())[:MAX_TAG_NAME_LENGTH]
+        if not name:
+            return None
+        folded = name.casefold()  # (NOCASE only folds ASCII)
+        row = next((r for r in conn.execute("SELECT id, kind, name FROM tags") if r["name"].casefold() == folded), None)
+        if row is None:
+            return conn.execute("INSERT INTO tags (name, kind) VALUES (?, 'custom')", (name,)).lastrowid
+        return row["id"] if row["kind"] == "custom" else None
+
+    def files_in_folder_rule(self, rule) -> int:
+        """How many files the library knows in a rule's folder."""
+        return sum(1 for row in self._conn().execute("SELECT path_key FROM assets") if rule.covers(row["path_key"]))
+
+    def apply_folder_rule(self, rule, asset_keys: Optional[Iterable[str]] = None) -> int:
+        """Give the files already in a rule's folder its tags (rule: a core.folder_rules.FolderRule).
+        asset_keys: the path_keys to consider (default: every file the library knows). Returns how many
+        files got a tag they didn't have."""
+        wanted = set(asset_keys) if asset_keys is not None else None
+        with self._transaction() as conn:
+            ids = [
+                row["id"] for row in conn.execute("SELECT id, path_key FROM assets")
+                if (wanted is None or row["path_key"] in wanted) and rule.covers(row["path_key"])
+            ]
+            tag_ids = [t for t in (self._rule_tag_id(conn, name) for name in rule.tags) if t is not None]
+            if not ids or not tag_ids:
+                return 0
+            tagged: set[int] = set()
+            for chunk in _chunks(ids):
+                for row in conn.execute(
+                    f"SELECT asset_id, COUNT(*) AS n FROM asset_tags WHERE tag_id IN ({_placeholders(len(tag_ids))}) "
+                    f"AND asset_id IN ({_placeholders(len(chunk))}) GROUP BY asset_id",
+                    [*tag_ids, *chunk],
+                ):
+                    if row["n"] == len(tag_ids):
+                        tagged.add(row["asset_id"])
+                conn.executemany(
+                    "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?, ?)",
+                    [(asset_id, tag_id) for asset_id in chunk for tag_id in tag_ids],
+                )
+        return len(ids) - len(tagged)
 
     # Files with something worth carrying over when they move: custom tags, favorite, rating
     _CUSTOM_TAGGED = (
@@ -654,6 +748,11 @@ class TagRepository:
             with self._transaction() as tx:
                 tx.executemany(
                     "UPDATE assets SET path_key = ?, path = ?, name = ?, name_fold = ? WHERE id = ?", moves
+                )
+                # moved to another folder: it arrived there (its folder rules apply in sync_assets)
+                tx.executemany(
+                    "UPDATE assets SET seen_folder = NULL WHERE id = ? AND seen_folder != '' AND seen_folder IS NOT ?",
+                    [(move[4], folder_of_key(move[0])) for move in moves],
                 )
         return len(moves)
 
@@ -972,6 +1071,47 @@ class TagRepository:
                     (m.width, m.height, m.duration_ms, m.poly_count, None if m.alpha is None else int(m.alpha), key, asset_id)
                     for asset_id, (m, key) in details.items()
                 ],
+            )
+
+    # ------------------------------------------------------------------
+    # What pictures look like (core.picture_look)
+    # ------------------------------------------------------------------
+    def looks_by_asset(self, asset_ids: Sequence[int]) -> dict:
+        """{id: core.picture_look.Look} of pictures looked at since the file last changed."""
+        from .picture_look import Look
+
+        result = {}
+        for chunk in _chunks(list(asset_ids)):
+            for row in self._conn().execute(
+                f"SELECT id, size, mtime, look_colors, look_hash, look_grey, look_key FROM assets "
+                f"WHERE look_key IS NOT NULL AND id IN ({_placeholders(len(chunk))})",
+                chunk,
+            ):
+                if row["look_key"] == look_key(row["size"], row["mtime"]):
+                    result[row["id"]] = Look.from_stored(row["look_colors"], row["look_hash"], row["look_grey"])
+        return result
+
+    def assets_needing_look(self, asset_ids: Sequence[int]) -> list[tuple[int, str, str]]:
+        """(id, path, key) of pictures not looked at since they last changed; pass key back to store_looks()."""
+        from .picture_look import needs_look
+
+        rows = []
+        for chunk in _chunks(list(asset_ids)):
+            for row in self._conn().execute(
+                f"SELECT id, path, extension, size, mtime, look_key FROM assets WHERE id IN ({_placeholders(len(chunk))})",
+                chunk,
+            ):
+                key = look_key(row["size"], row["mtime"])
+                if row["look_key"] != key and needs_look(row["extension"]):
+                    rows.append((row["id"], row["path"], key))
+        return rows
+
+    def store_looks(self, looks: dict) -> None:
+        """Save {asset_id: (Look, key from assets_needing_look)}."""
+        with self._transaction() as conn:
+            conn.executemany(
+                "UPDATE assets SET look_colors = ?, look_hash = ?, look_grey = ?, look_key = ? WHERE id = ?",
+                [(look.colors_text(), look.hash, look.grey, key, asset_id) for asset_id, (look, key) in looks.items()],
             )
 
     # ------------------------------------------------------------------

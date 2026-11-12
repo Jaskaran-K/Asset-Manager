@@ -8,6 +8,7 @@ from typing import Mapping, Optional, Sequence, Union
 
 from .category_rules import RowFilter, Rule, names_of
 from .scanner import AssetItem
+from .picture_look import Look
 from .search_query import ParsedQuery
 from .tag_repository import NO_MARKS, AssetMeta, Marks
 
@@ -25,6 +26,8 @@ def filter_assets(
     ids: Mapping[str, int] = {},  # noqa: B006 (read only)
     marks: Mapping[int, Marks] = {},  # noqa: B006
     meta: Mapping[int, AssetMeta] = {},  # noqa: B006
+    looks: Mapping[int, Look] = {},  # noqa: B006
+    similar: Optional[Mapping[int, float]] = None,
 ) -> list[AssetItem]:
     """The assets to show.
 
@@ -33,7 +36,9 @@ def filter_assets(
     pass, or a set of file types) or "favorites". tag_names: {asset id: its folded tag names},
     for category rules with tags. tag_matches: ids of the files a tag search found, or None when
     no tag filter is active. ids: database ids by str(path), for tag_names, tag_matches, marks
-    (favorites / ratings) and meta (resolution, length, faces).
+    (favorites / ratings), meta (resolution, length, faces) and looks (colours: core.picture_look).
+    similar: {id: closeness} of a picture and its look-alikes (Find Similar; the picture itself at 0):
+    only those are shown, closest first.
     """
     filtered = list(assets)
     if mode == "category" and row is not None:
@@ -55,9 +60,15 @@ def filter_assets(
     if query is not None and query.words:
         filtered = [a for a in filtered if query.name_matches(a.name)]
 
+    if similar is not None:
+        filtered = [a for a in filtered if ids.get(str(a.path)) in similar]
+        filtered.sort(key=lambda a: similar[ids[str(a.path)]])
+
     if query is not None and query.filters:
         filtered = [
             a for a in filtered
-            if query.matches(a, marks.get(ids.get(str(a.path)), NO_MARKS), meta.get(ids.get(str(a.path))))
+            if query.matches(
+                a, marks.get(asset_id := ids.get(str(a.path)), NO_MARKS), meta.get(asset_id), looks.get(asset_id)
+            )
         ]
     return filtered

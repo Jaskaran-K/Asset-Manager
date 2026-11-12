@@ -416,3 +416,30 @@ def test_live_updates_replace_an_edited_archives_files(tmp_path):
     os.utime(archive, (time.time() + 5, time.time() + 5))
     result = rescan_folders([library], EXTS, set(), archive_contents=True)
     assert sorted(a.name for a in result.merge_into(before)) == ["new.png", "other.png", "pack.zip"]
+
+
+def test_deflate64_pieces_are_not_kept(tmp_path, monkeypatch):
+    """inflate64 keeps a reference to everything given to Inflater.inflate: it's only ever given views of one
+    reused buffer, so a member's pieces aren't kept in memory (2.5 GB over 2,000 pictures in zips)."""
+    import inflate64
+
+    data = os.urandom(300_000)
+    archive = make_zip(tmp_path / "big.zip", [Entry("noise.bin", data, DEFLATE64)])
+    given = []
+    real = inflate64.Inflater
+
+    class Watching:
+        def __init__(self):
+            self.inner = real()
+
+        def inflate(self, piece):
+            given.append(piece)
+            return self.inner.inflate(piece)
+
+    monkeypatch.setattr(inflate64, "Inflater", Watching)
+    first = archives.read_bytes(archives.read_listing(archive).members[0])
+    second = archives.read_bytes(archives.read_listing(archive).members[0])
+    assert first == second == data
+    assert len(given) > 4  # (in pieces)
+    assert all(isinstance(piece, memoryview) for piece in given)
+    assert len({id(piece.obj) for piece in given}) == 1  # one buffer, refilled

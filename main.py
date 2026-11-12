@@ -57,7 +57,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import apps, archives, crash_log, environment, profiles
+from core import apps, archives, crash_log, environment, folder_rules, profiles
 from core.asset_filter import filter_assets
 from core.category_rules import RowFilter
 from core.library_snapshot import load_snapshot
@@ -83,6 +83,7 @@ from core.settings import (
     set_model_view,
     set_scan_folders,
 )
+from core.picture_look import find_similar, hex_of
 from core.search_query import ParsedQuery, parse_query
 from core.tag_repository import NO_MARKS, Marks, SavedSearch, Tag, TagChange, get_repository, is_damage_error
 from core.thumbnail_manager import ThumbnailManager, prune_disk_cache
@@ -160,9 +161,12 @@ class MainWindow(QMainWindow):
         self.library.live_update.connect(self._on_live_update)
         self.library.live_update_failed.connect(self._on_live_update_failed)
         self.library.details_loaded.connect(self._on_details_loaded)
+        self.library.looks_loaded.connect(self._on_looks_loaded)
         self.library.files_edited.connect(self._on_files_edited)
         # The search: name words and detail filters, and the tag search result (None: no tag filter)
         self._query = ParsedQuery()
+        self._similar_cache: Optional[tuple[int, int, dict[int, float]]] = None  # (picture id, looks seen, matches)
+        self._looks_seen = 0  # (counts looks_loaded: Find Similar's matches are worked out again after one)
         self._tag_match_ids: Optional[set[int]] = None
         self._tag_search_generation = 0
         self.thumbnail_size: int = get_thumbnail_size()
@@ -185,7 +189,7 @@ class MainWindow(QMainWindow):
 
         self.undo_history = UndoHistory(on_change=lambda: self._update_undo_actions())
         # Tools menu: duplicates, tag export / import, backups (ui.library_tools)
-        self.library_tools = LibraryTools(self.repo, lambda: self.library.assets, self)
+        self.library_tools = LibraryTools(self.repo, lambda: self.library.assets, self, looks=self._library_looks)
         self._daily_backup_started = False  # (the automatic backup, once per session: after the first good scan)
         self.library_tools.status.connect(self._show_status)
         self.library_tools.tags_imported.connect(self._on_tags_imported)
@@ -448,6 +452,7 @@ class MainWindow(QMainWindow):
         self.search_bar.setMaximumWidth(560)
         self.search_bar.changed.connect(self._on_search_changed)
         self.search_bar.save_requested.connect(self._on_save_search)
+        self.search_bar.similar_label = self._similar_label
         self.search_bar.unknown_tag.connect(
             lambda name: self.status_label.setText(f'No tag named "{name}". Create it in Settings > Tags.')
         )
@@ -868,7 +873,7 @@ class MainWindow(QMainWindow):
         accepted = dialog.exec() == SettingsDialog.DialogCode.Accepted
         # Free it (a child of the window): each one kept would be restyled on every theme change
         dialog.deleteLater()  # (it can't close while moving pages or updating, so nothing is left running)
-        if dialog.page_tags.changed:
+        if dialog.page_tags.changed or dialog.rules_tagged:
             self._after_tags_changed()
         if not accepted:
             return
@@ -1060,6 +1065,11 @@ class MainWindow(QMainWindow):
             )
         elif self._query.uses_meta and self.library.meta_todo:
             self.status_label.setText(f"Still reading file details ({self.library.meta_todo} left); results will fill in.")
+        elif self._query_uses_looks() and self.library.looks_todo:
+            self.status_label.setText(
+                f"Still looking at pictures ({self.library.looks_todo:,} left: colours and look-alikes); results will fill in."
+            )
+        self._check_similar_picture()
         if self.search_bar.has_tag_filters():
             self._run_tag_search()
         else:
@@ -1092,11 +1102,102 @@ class MainWindow(QMainWindow):
             tag_names=self.library.tag_names() if self._sidebar_row_uses_tags() else {},
             tag_matches=self._tag_match_ids, query=self._query,
             ids=self.library.ids, marks=self.library.marks, meta=self.library.meta,
+            looks=self.library.looks, similar=self._similar_matches(),
         )
 
     def _on_details_loaded(self) -> None:
         if self._query.uses_meta:
             self._refresh_grid_display(keep_view=True)
+
+    # ------------------------------------------------------------------
+    # Colours and look-alikes (core.picture_look, read by the library in the background)
+    # ------------------------------------------------------------------
+    def _query_uses_looks(self) -> bool:
+        return self._query.uses_looks or self.search_bar.similar_id() is not None
+
+    def _on_looks_loaded(self) -> None:
+        self._looks_seen += 1
+        if self._query_uses_looks():
+            self._refresh_grid_display(keep_view=True)
+
+    def _library_looks(self):
+        """(ids by path, looks by id) for Tools > Find Look-alikes."""
+        return self.library.ids, self.library.looks
+
+    def _similar_matches(self) -> Optional[dict[int, float]]:
+        """Find Similar: {id: closeness} of the picture (0) and its look-alikes, or None when it's off."""
+        target = self.search_bar.similar_id()
+        if target is None:
+            return None
+        cache = self._similar_cache
+        if cache is not None and cache[:2] == (target, self._looks_seen):
+            return cache[2]
+        look = self.library.looks.get(target)
+        matches = {target: 0.0}
+        if look is not None:
+            matches.update({i: 1.0 + score for i, score in find_similar(look, self.library.looks, exclude=target).items()})
+        self._similar_cache = (target, self._looks_seen, matches)
+        return matches
+
+    def _similar_label(self, asset_id: int) -> str:
+        name = next((Path(path).name for path, i in self.library.ids.items() if i == asset_id), None)
+        return f"Similar to {name}" if name else "Similar picture"
+
+    def _find_similar(self, asset: AssetItem) -> None:
+        """Right-click > Find Similar: the picture and its look-alikes, from the whole library."""
+        asset_id = self.library.id_of(asset)
+        if asset_id is None:
+            self.status_label.setText("Find Similar works on files in the library (this one isn't in its database).")
+            return
+        self.filter_mode, self.filter_value = "all", None
+        self.search_bar.set_query_text(f"similar:{asset_id}")
+        if self.library.looks.get(asset_id) is None:
+            self.status_label.setText(f"Looking at {asset.name}...")
+            self.library.look_now(asset, self._on_similar_picture_read)
+
+    def _on_similar_picture_read(self, _look) -> None:
+        self._looks_seen += 1
+        self._check_similar_picture()
+        self._refresh_grid_display(keep_view=True)
+
+    def _check_similar_picture(self) -> None:
+        """Say what Find Similar found, or why it can't compare the picture."""
+        target = self.search_bar.similar_id()
+        if target is None:
+            return
+        look = self.library.looks.get(target)
+        if look is None:
+            return  # (being looked at)
+        if not look.comparable:
+            self.status_label.setText(
+                "This picture is one flat colour, or couldn't be read: there's nothing to compare it by."
+            )
+            return
+        found = len(self._similar_matches() or {}) - 1
+        more = f" More may appear: {self.library.looks_todo:,} pictures are still to be looked at." if self.library.looks_todo else ""
+        self.status_label.setText(
+            (f"Found {found} look-alike{'s' if found != 1 else ''}, closest first." if found else "No look-alikes found.") + more
+        )
+
+    def _search_color(self, word: str) -> None:
+        """Right-click > Search by Its Colours: pictures with that colour, from the whole library."""
+        self.filter_mode, self.filter_value = "all", None
+        self.search_bar.set_query_text(f"color:{word}")
+
+    def _add_folder_rule(self, asset: AssetItem) -> None:
+        """Right-click > Folder Rule...: make (or change) the rule for the file's folder."""
+        from ui.folder_rules_dialog import edit_rule
+
+        real = asset.archive.archive if asset.in_archive else asset.path
+        result = edit_rule(self.repo, folder_rules.load(), self, folder=str(Path(real).parent))
+        if result is None:
+            return
+        rules, rule, tag_existing = result
+        folder_rules.save(rules)
+        tagged = self.repo.apply_folder_rule(rule) if tag_existing else 0
+        self._after_tags_changed()
+        done = f" Tagged {tagged:,} file{'s' if tagged != 1 else ''} already there." if tagged else ""
+        self.status_label.setText(f"Files added to {rule.folder} will be tagged {', '.join(rule.tags)}.{done}")
 
     def _refresh_grid_display(self, keep_view: bool = False) -> None:
         """Show the currently filtered assets in the grid.
@@ -1201,6 +1302,13 @@ class MainWindow(QMainWindow):
                 kinds = ", ".join(f"{count} {kind}" for kind, count in summary.by_type[:6])
                 more = " ..." if len(summary.by_type) > 6 else ""
                 contents = f"<br>{summary.files} files: {kinds}{more}<br>Double-click to look inside"
+        look = self.library.look_of(asset)
+        colours = ""
+        if look is not None and look.colors:
+            swatches = "".join(
+                f'<span style="background-color:{hex_of(rgb)}">&nbsp;&nbsp;&nbsp;&nbsp;</span>&nbsp;' for rgb, _share in look.colors
+            )
+            colours = f"<br>Colours: {swatches}"
         return (
             f"<b>{html.escape(asset.name)}</b><br>"
             f"Type: {asset.asset_group} ({asset.category_name})<br>"
@@ -1209,6 +1317,7 @@ class MainWindow(QMainWindow):
             f"{where}"
             f"{contents}"
             f"{tag_line}"
+            f"{colours}"
         )
 
     def _on_async_thumbnail_loaded(self, path_str: str, pixmap: QPixmap) -> None:
@@ -1650,6 +1759,10 @@ class MainWindow(QMainWindow):
             open_in=lambda app: self._open_in(asset, app),
             import_board=lambda: self._open_board(asset, again=True),
             use_as_lighting=lambda: self._use_as_viewer_lighting(asset),
+            find_similar=lambda: self._find_similar(asset),
+            colors=look.colors if (look := self.library.look_of(asset)) is not None else (),
+            search_color=self._search_color,
+            add_folder_rule=lambda: self._add_folder_rule(asset),
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
         menu = build_asset_menu(self, asset, self._selected_assets(), marks, actions, self.artbook_sender)

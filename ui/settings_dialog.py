@@ -67,7 +67,7 @@ from PySide6.QtWidgets import (
 
 from core import app_helpers, apps, archives, artbook_store, crash_log
 from core.scanner import AssetItem
-from core import category_rules, profiles, storage
+from core import category_rules, folder_rules, profiles, storage
 from core.profiles import Profile, ProfileError
 from core.settings import (
     DEFAULT_CATEGORIES,
@@ -133,6 +133,7 @@ from core.video_tools import find_ffmpeg
 from ui.animations import set_motion_mode
 from ui.backgrounds import TEXTURES, render_tile
 from ui.duotone import IconLabel, set_icon
+from ui.folder_rules_dialog import FolderRulesPage
 from ui.glass import set_frost
 from ui.icons import (
     MAIN_CATEGORY_COLORS,
@@ -2830,9 +2831,11 @@ class SettingsDialog(QDialog):
         self.archives_changed = False  # 7-Zip's location, or whether files inside archives are shown
         self.apps_changed = False  # the apps in use (Settings > Apps)
         self.profiles_changed = False  # made, renamed or deleted (Settings > Profiles)
+        self.rules_tagged = False  # folder rules tagged files already in their folders
         self._tag_edits: list[Callable[[list[str]], list[str]]] = []  # for other profiles' categories
 
         self.page_folders = FoldersPage(self._orig_folders)
+        self.page_rules = FolderRulesPage(get_repository(), folder_rules.load())
         self.page_files = FilesPage(self._orig_extensions)
         self.page_tags = TagsPage(get_repository())
         self.page_categories = CategoriesPage(self._orig_categories, self._orig_extensions, self.page_tags.custom_tag_names())
@@ -2857,6 +2860,8 @@ class SettingsDialog(QDialog):
         self.page_tags.category_requested.connect(self._on_tag_category_requested)
         self.page_tags.tag_renamed.connect(self._on_tag_renamed)
         self.page_tags.tag_deleted.connect(self._on_tag_deleted)
+        self.page_tags.tag_renamed.connect(self.page_rules.rename_tag)
+        self.page_tags.tag_deleted.connect(self.page_rules.remove_tag)
         # (Folders, Files and Categories belong to the profile in use: they say which)
         in_use = profiles.current_profile().name
         for page in (self.page_folders, self.page_files, self.page_categories):
@@ -2890,6 +2895,7 @@ class SettingsDialog(QDialog):
         self.nav_items: dict[str, QTreeWidgetItem] = {}
         for name, page in (
             ("Folders", self.page_folders),
+            ("Folder Rules", self.page_rules),
             ("Files", self.page_files),
             ("Categories", self.page_categories),
             ("Profiles", self.page_profiles),
@@ -3052,6 +3058,8 @@ class SettingsDialog(QDialog):
             set_categories(categories)
         for edit in self._tag_edits:  # (tags renamed or deleted: other profiles' categories follow)
             profiles.edit_other_profiles_categories(edit)
+        if self.page_rules.changed():
+            self.rules_tagged = self.page_rules.apply() > 0
         if self.page_profiles.changed():
             self.profiles_changed = True
             problems = self.page_profiles.apply()

@@ -2,16 +2,17 @@
 
 LibraryState scans folders (ScanWorker, on its own thread), follows changes made while the app
 is open (core.library_watcher), starts from last session's snapshot, and reads file details
-(resolution, length, faces) for searching. It keeps, by database id, each file's tags,
-favorite / rating and details. It never touches widgets: the main window shows what it holds
-and listens to its signals.
+(resolution, length, faces) for searching, then what pictures look like (core.picture_look: colours
+and look-alike data). It keeps, by database id, each file's tags, favorite / rating, details and
+look. It never touches widgets: the main window shows what it holds and listens to its signals.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -19,11 +20,12 @@ from typing import Callable, Optional, Sequence
 import shiboken6
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
 
-from core import archives
+from core import archives, folder_rules
 from core.category_rules import tag_names_by_id
 from core.library_snapshot import save_snapshot
 from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
 from core.metadata import read_cost, read_details, read_order
+from core.picture_look import Look, read_look
 from core.profiles import current_profile, other_profiles_folders
 from core.scanner import AssetItem, AssetScanner, asset_sort_key
 from core.settings import get_archive_contents, get_file_extensions
@@ -110,7 +112,7 @@ class ScanWorker(QObject):
         repo = get_repository()
         try:
             relinked = repo.relink_moved_assets(assets)  # before sync, so moved files keep their rows
-            ids = repo.sync_assets(assets)
+            ids = repo.sync_assets(assets, folder_rules.load())  # (files new to a folder get its rules' tags)
             if forget_others and not (should_stop and should_stop()):  # (a replaced scan leaves them alone)
                 repo.forget_unscanned_assets(assets, keep_folders, scanned_folders)
             repo.fill_missing_hashes()
@@ -148,6 +150,7 @@ class SavedView:
     tags: dict[int, list[Tag]]
     marks: dict[int, Marks]
     meta: dict[int, AssetMeta]
+    looks: dict[int, Look] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,7 @@ class LibraryState(QObject):
     live_update = Signal(object)  # LiveUpdate
     live_update_failed = Signal(str)
     details_loaded = Signal()  # file details (resolution, length, faces) were read
+    looks_loaded = Signal()  # more pictures were looked at (colours, look-alikes)
     files_edited = Signal(list)  # str paths whose contents changed: their thumbnails are out of date
 
     def __init__(self, repo: Optional[TagRepository] = None, parent: Optional[QObject] = None):
@@ -180,6 +184,8 @@ class LibraryState(QObject):
         self.meta: dict[int, AssetMeta] = {}  # resolution / duration / faces, read in the background
         self.meta_todo = 0  # files whose details are still to be read
         self._meta_generation = 0
+        self.looks: dict[int, Look] = {}  # what pictures look like, read after the details
+        self.looks_todo = 0  # pictures still to be looked at
         self._view_generation = 0  # (reset(): results for what was shown before are dropped)
         self.scan_done_once = False  # a real scan has finished (snapshot data is outdated then)
 
@@ -207,6 +213,9 @@ class LibraryState(QObject):
 
     def meta_of(self, asset: AssetItem) -> Optional[AssetMeta]:
         return self.meta.get(self.ids.get(str(asset.path)))
+
+    def look_of(self, asset: AssetItem) -> Optional[Look]:
+        return self.looks.get(self.ids.get(str(asset.path)))
 
     def tags_of(self, asset: AssetItem) -> list[Tag]:
         return self.tags.get(self.ids.get(str(asset.path)), [])
@@ -360,20 +369,23 @@ class LibraryState(QObject):
         self._queued_folders.clear()
         self.watcher.clear()
         self.scan_done_once = False
-        self.assets, self.ids, self.marks, self.meta = [], {}, {}, {}
+        self.assets, self.ids, self.marks, self.meta, self.looks = [], {}, {}, {}, {}
+        self.looks_todo = 0
         self.tags = {}
 
     def save_view(self) -> "SavedView":
         """What's shown now, to come back to (leaving an opened archive) without waiting for a scan."""
-        return SavedView(list(self.assets), dict(self.ids), dict(self.tags), dict(self.marks), dict(self.meta))
+        return SavedView(
+            list(self.assets), dict(self.ids), dict(self.tags), dict(self.marks), dict(self.meta), dict(self.looks)
+        )
 
     def restore_view(self, saved: "SavedView") -> None:
         """Show a saved view again (a scan then brings it up to date)."""
         self._retire_scan()
         self._meta_generation += 1  # (the details being read belong to what was shown)
-        self.meta_todo = 0
-        self.assets, self.ids, self.tags, self.marks, self.meta = (
-            saved.assets, saved.ids, saved.tags, saved.marks, saved.meta,
+        self.meta_todo = self.looks_todo = 0
+        self.assets, self.ids, self.tags, self.marks, self.meta, self.looks = (
+            saved.assets, saved.ids, saved.tags, saved.marks, saved.meta, saved.looks,
         )
 
     # ------------------------------------------------------------------
@@ -449,6 +461,7 @@ class LibraryState(QObject):
             return repo.meta_by_asset(ids), todo
 
         run_in_background(self.repo, load, partial(self._on_meta_loaded, generation), _ignore_result, slow=True)
+        self._start_looking(generation)
 
     def _on_meta_loaded(self, generation: int, result) -> None:
         if generation != self._meta_generation:
@@ -489,6 +502,78 @@ class LibraryState(QObject):
         run_in_background(self.repo, read, finished, _ignore_result, slow=True)
 
     # ------------------------------------------------------------------
+    # What pictures look like (core.picture_look), read after the details
+    # ------------------------------------------------------------------
+    def _start_looking(self, generation: int) -> None:
+        ids = list(self.ids.values())
+
+        def load(repo):
+            todo = repo.assets_needing_look(ids)
+            todo.sort(key=lambda row: ("|" in row[1], row[1]))  # (inside archives last: they're unpacked first)
+            return repo.looks_by_asset(ids), todo
+
+        run_in_background(self.repo, load, partial(self._on_looks_loaded, generation), _ignore_result, slow=LOOK_LANE)
+
+    def _on_looks_loaded(self, generation: int, result) -> None:
+        if generation != self._meta_generation:
+            return
+        self.looks, todo = result
+        self.looks_todo = len(todo)
+        self.looks_loaded.emit()
+        self._look_batch(generation, todo)
+
+    def _look_batch(self, generation: int, todo: list) -> None:
+        if not todo or generation != self._meta_generation:
+            self.looks_todo = 0
+            return
+
+        def read(repo):
+            found, done, deadline = {}, 0, time.monotonic() + 0.5
+            with ThreadPoolExecutor(LOOK_THREADS, thread_name_prefix="look") as pool:
+                while done < len(todo) and time.monotonic() < deadline:  # (~0.5 s: a new scan can take over)
+                    chunk = todo[done:done + LOOK_THREADS]
+                    for (asset_id, path, key), look in zip(chunk, pool.map(read_look, [row[1] for row in chunk])):
+                        found[asset_id] = (look, key)
+                    done += len(chunk)
+            if found:
+                repo.store_looks(found)
+            return found, todo[done:]
+
+        def finished(result) -> None:
+            found, rest = result
+            if generation != self._meta_generation:
+                return
+            self.looks.update({asset_id: look for asset_id, (look, _key) in found.items()})
+            self.looks_todo = len(rest)
+            if found:
+                self.looks_loaded.emit()
+            self._look_batch(generation, rest)
+
+        run_in_background(self.repo, read, finished, _ignore_result, slow=LOOK_LANE)
+
+    def look_now(self, asset: AssetItem, on_done: Callable[[Optional[Look]], None]) -> None:
+        """Look at one picture right away (Find Similar on one not looked at yet); on_done(look) on the
+        UI thread (None if it isn't in the library)."""
+        asset_id = self.id_of(asset)
+        if asset_id is None:
+            on_done(None)
+            return
+        from core.tag_repository import look_key
+
+        path, key = str(asset.path), look_key(asset.size_bytes, asset.modified_timestamp)
+
+        def read(repo):
+            look = read_look(path)
+            repo.store_looks({asset_id: (look, key)})
+            return look
+
+        def finished(look: Look) -> None:
+            self.looks[asset_id] = look
+            on_done(look)
+
+        run_in_background(self.repo, read, finished, lambda _error: on_done(None))
+
+    # ------------------------------------------------------------------
     def shutdown(self) -> None:
         """Stop the scan and the background reading (before the app quits)."""
         if self.scan_worker is not None and shiboken6.isValid(self.scan_worker):
@@ -499,6 +584,10 @@ class LibraryState(QObject):
                 thread.wait(2000)  # (cancelled: it stops after the folder it's in)
         self._meta_generation += 1  # ends the file-details reading chain
         self.watcher.clear()
+
+
+LOOK_THREADS = 2  # pictures looked at side by side (thumbnails keep the rest of the processor)
+LOOK_LANE = "looks"  # (a background lane of its own: a big 3D model's details can take a minute)
 
 
 def _ignore_result(_result) -> None:

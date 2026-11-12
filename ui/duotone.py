@@ -613,6 +613,14 @@ def _upscale(p, primary, secondary):
     _line(p, primary, 2.0, (12.8, 6.6), (17.4, 6.6), (17.4, 11.2))  # its head
 
 
+def _similar(p, primary, secondary):
+    """Two pictures alike: one behind the other, the same hill on both (Find Similar)."""
+    _line(p, primary, 1.7, (3.5, 14.5), (3.5, 3.5), (14.5, 3.5))  # the picture behind
+    _body(p, _rounded(7, 7, 14, 14, 2.4), secondary)
+    _line(p, primary, 1.8, (9.5, 18), (13, 13.5), (15.5, 16), (18.5, 12.5))  # its hills
+    p.fillPath(_circle(16.6, 9.8, 1.4), primary)  # its sun
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -653,7 +661,7 @@ ICONS: dict[str, IconPainter] = {
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
-    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale,
+    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale, "similar": _similar,
 }
 
 

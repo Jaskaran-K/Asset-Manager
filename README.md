@@ -375,8 +375,29 @@ Tags let you find groups of files without relying on file names. They're stored 
   - a minus excludes, as with tags: `-ext:png`, `-is:fav`
   - `res:>=2048` (image or video resolution, `res:4k` = 4096), `dur:<30s`, `poly:<10k` (3D model faces). These
     details are read in the background after a scan; files not read yet don't match.
+  - `color:red` pictures with red on 15% of them or more (red, orange, yellow, green, cyan, blue, purple, pink,
+    brown, skin, black, white, grey; normal maps are left out), `color:#c04020` colours close to that one,
+    `-color:grey` without it. The palette button in the search box lists the names, or picks any colour (also
+    from the screen), and the search follows as you pick.
   - plus file name words, in any order (`rock wall` finds `Wall_Rock_02.png`; `"rock wall"` keeps them together).
     Backspace removes the last chip; Esc or ✕ clears everything.
+- **Find Similar:** right-click a picture > **Find Similar** shows it and its look-alikes from the whole library,
+  closest first: resized or re-saved copies, and very close versions (a "Similar to ..." chip in the search box;
+  remove it, combine it with other searches, or save it as a collection). **Search by Its Colours** in the same menu
+  searches for one of the picture's main colours, which its tooltip shows too. **Tools > Find Look-alikes...**
+  groups the look-alike pictures in the files shown, the biggest file first, to recycle extra copies; check the
+  groups first: a turntable's frames or an alpha's JPG preview look alike too.
+  - Each picture is looked at once in the background (its main colours, and a small fingerprint of how it looks),
+    then only again when it changes. The first time takes a while on a big library (about 9 minutes for 8,500
+    pictures, half of them inside archives); searches fill in as it goes.
+  - On the author's library, 100% of half-size copies, 97% of low-quality JPEG re-saves and 90% of slightly cropped
+    copies were found, while unrelated pictures matched 0.06% of the time. A picture of one flat colour (a blank
+    normal map) can't be compared.
+- **Folder rules:** **Settings > Folder Rules** (or right-click a file > **Folder Rule...**) tags files that are
+  added to a folder from now on: "files added to WIP get the tags WIP and Kitbash". New files, and files copied or
+  moved in, get the tags once, also when they were added while the app was closed (at the next scan); a tag you
+  take off a file stays off. Making a rule can tag the files already in the folder too. Rules work in every
+  profile, and follow tags being renamed or deleted.
 - **Collections:** click the star in the search box to save the search in the sidebar. Right-click one to rename or
   delete it. Renaming a tag updates the collections that use it.
 - **Categories by tag:** in **Settings > Categories**, a category's **Tags** list adds the files with any (or all)

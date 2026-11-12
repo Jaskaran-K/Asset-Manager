@@ -15,12 +15,14 @@ from PySide6.QtWidgets import QMenu, QWidget
 
 from core import app_helpers, apps, artbook_store
 from core.hdr_image import HDR_EXTENSIONS
+from core.picture_look import color_name, hex_of
 from core.scanner import AssetItem
 from core.settings import get_artbook_page
 from core.tag_repository import Marks
 from ui import file_actions, shortcuts
 from ui.asset_grid import rating_text
 from ui.duotone import set_icon
+from ui.icons import color_swatch_icon
 
 # Rating keys on the grid (0 clears), and the menu's Rating entries
 RATING_SHORTCUTS = (
@@ -128,6 +130,10 @@ class AssetMenuActions:
     open_in: Optional[Callable[[apps.App], None]] = None  # open it in one of the apps (Open In)
     import_board: Optional[Callable[[], None]] = None  # a PureRef board: make a new Artbook page from it
     use_as_lighting: Optional[Callable[[], None]] = None  # an HDR image: light 3D models with it
+    find_similar: Optional[Callable[[], None]] = None  # a picture: show it and its look-alikes
+    colors: Sequence[tuple[tuple[int, int, int], float]] = ()  # a picture's main colours (core.picture_look)
+    search_color: Optional[Callable[[str], None]] = None  # search for color:<word>
+    add_folder_rule: Optional[Callable[[], None]] = None  # a rule for the file's folder (core.folder_rules)
 
 
 def build_asset_menu(
@@ -195,6 +201,23 @@ def build_asset_menu(
         )
         action_extract.triggered.connect(actions.extract)
 
+    if asset.is_texture and (actions.find_similar is not None or actions.colors):
+        menu.addSeparator()
+    if asset.is_texture and actions.find_similar is not None:
+        action_similar = menu.addAction("Find Similar")
+        set_icon(action_similar, "similar")
+        action_similar.setToolTip("Show this picture and its look-alikes (resized or re-saved copies), closest first")
+        action_similar.triggered.connect(actions.find_similar)
+    if asset.is_texture and actions.colors and actions.search_color is not None:
+        colour_menu = menu.addMenu("Search by Its Colours")
+        colour_menu.setToolTipsVisible(True)
+        set_icon(colour_menu.menuAction(), "palette")
+        for rgb, share in actions.colors:
+            word = hex_of(rgb)
+            action = colour_menu.addAction(color_swatch_icon(word, 22, 14), f"{color_name(rgb).capitalize()}  {word}  ({share:.0%})")
+            action.setToolTip(f"Pictures with colours close to {word} on 15% of them or more")
+            action.triggered.connect(lambda _checked=False, w=word: actions.search_color(w))
+
     menu.addSeparator()
 
     selected = len(selection)
@@ -215,6 +238,12 @@ def build_asset_menu(
         action.setCheckable(True)
         action.setChecked(current == {rating})
         action.triggered.connect(lambda _checked=False, r=rating: actions.set_rating(r))
+
+    if actions.add_folder_rule is not None:
+        action_rule = menu.addAction("Folder Rule...")
+        set_icon(action_rule, "folder")
+        action_rule.setToolTip("Tag files added to this file's folder from now on (Settings > Folder Rules)")
+        action_rule.triggered.connect(actions.add_folder_rule)
 
     menu.addSeparator()
     sender.add_send_menu(menu, [a.path for a in selection], actions.send_files)

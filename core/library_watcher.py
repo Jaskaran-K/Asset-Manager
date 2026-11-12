@@ -104,7 +104,9 @@ def rescan_folders(
         result.assets.extend(expand_archives(list(result.assets), extensions))
     if repo is not None and result.assets:
         result.relinked = repo.relink_moved_assets(result.assets)
-        result.ids = repo.sync_assets(result.assets)
+        from . import folder_rules
+
+        result.ids = repo.sync_assets(result.assets, folder_rules.load())
         repo.fill_missing_hashes()
         result.tags = repo.tags_by_asset(list(result.ids.values()))
         result.marks = repo.marks_by_asset(list(result.ids.values()))

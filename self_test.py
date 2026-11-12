@@ -124,6 +124,28 @@ def run_self_test(log_path: Optional[str]) -> int:
             raise RuntimeError(f"an upscaled picture came out {made.size}")
         return f"Real-ESRGAN {upscaler.VERSION} downloads on first use; a picture goes through"
 
+    def check_picture_looks():
+        # Colours and look-alikes (core.picture_look): a picture and a resized copy of it are read, from
+        # files, and found alike; its main colour is named
+        import numpy as np
+        from PIL import Image
+        from core.picture_look import closeness, parse_color, read_look
+
+        rng = np.random.default_rng(4)
+        picture = Image.fromarray((rng.random((8, 8, 3)) * 255).astype(np.uint8)).resize((256, 256), Image.Resampling.BICUBIC)
+        red = Image.new("RGB", (64, 64), (214, 40, 30))
+        red.paste((0, 0, 0), (0, 0, 64, 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            picture.save(Path(tmp) / "a.png")
+            picture.resize((128, 128)).save(Path(tmp) / "b.jpg", quality=70)
+            red.save(Path(tmp) / "red.png")
+            a, b, c = (read_look(str(Path(tmp) / name)) for name in ("a.png", "b.jpg", "red.png"))
+        if closeness(a, b) is None:
+            raise RuntimeError("a resized copy wasn't found alike")
+        if not parse_color("red").matches(c):
+            raise RuntimeError(f"a red picture's colours came out {c.colors}")
+        return "colours and look-alikes are read"
+
     def check_model_reader():
         # 3D models are read in a helper program (this app again, with --model-reader): it must start, read a
         # model and send it back, from the build as it ships
@@ -268,6 +290,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("rendering", check_render)
     step("upscaling", check_upscale)
     step("model reader", check_model_reader)
+    step("colours and look-alikes", check_picture_looks)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
     step("app files", check_app_files)

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Optional, Sequence
 
 from PySide6.QtCore import (
     QCoreApplication,
     QObject,
+    QPoint,
     QRect,
     QRunnable,
     QSize,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -55,6 +58,13 @@ TAG_COLORS = list(dict.fromkeys(MAIN_CATEGORY_COLORS + SUB_CATEGORY_COLORS))
 _NAME = TAG_NAME
 _TAG_TOKEN = TAG_TOKEN
 _UNFINISHED_TOKEN = re.compile(r'(?i)(?:^|\s)-?tag:(?:"[^"]*|\S*)$')
+# The colours shown for color:name in the search bar's palette menu
+SEARCH_SWATCHES = {
+    "red": "#d63a2f", "orange": "#f08a24", "yellow": "#f2d230", "green": "#3fa34d", "cyan": "#2fb9c4",
+    "blue": "#2f62d6", "purple": "#8a45c9", "pink": "#e866b0", "brown": "#7a4a26", "skin": "#e0ac90",
+    "black": "#111111", "white": "#f5f5f5", "grey": "#8c8c8c",
+}
+_SIMILAR_TOKEN = re.compile(r"(?i)(?<!\S)similar:(\d+)(?!\S)")
 
 
 @dataclass(frozen=True)
@@ -198,6 +208,7 @@ _db_pool: Optional[QThreadPool] = None
 
 
 _slow_pool: Optional[QThreadPool] = None
+_lanes: dict[str, QThreadPool] = {}  # run_in_background(slow="name")
 
 
 _job_pool: Optional[QThreadPool] = None
@@ -222,7 +233,7 @@ def wait_for_background(timeout_ms: int = 5000) -> bool:
     """Drop queued background jobs and wait for running ones (call before the app quits:
     Qt objects being torn down under a running job crash the process). True if all finished."""
     finished = True
-    for pool in (_db_pool, _slow_pool, _job_pool):
+    for pool in (_db_pool, _slow_pool, _job_pool, *_lanes.values()):
         if pool is not None:
             pool.clear()
             finished = pool.waitForDone(timeout_ms) and finished
@@ -233,7 +244,7 @@ def wait_for_database_jobs(timeout_ms: int = 5000) -> bool:
     """Drop queued database jobs and wait for running ones, so none has the database open (before
     it's replaced by a backup). Other background work carries on. True if all finished."""
     finished = True
-    for pool in (_db_pool, _slow_pool):
+    for pool in (_db_pool, _slow_pool, *_lanes.values()):
         if pool is not None:
             pool.clear()
             finished = pool.waitForDone(timeout_ms) and finished
@@ -245,12 +256,13 @@ def run_in_background(
     fn: Callable[[TagRepository], Any],
     on_done: Callable[[Any], None],
     on_failed: Optional[Callable[[str], None]] = None,
-    slow: bool = False,
+    slow: bool | str = False,
 ) -> None:
     """Run fn(repo) on a worker thread (with its own connection); callbacks run on the UI thread.
 
     slow=True uses a separate single-thread pool, so long background jobs (reading file
-    details) never hold up quick ones like tag searches.
+    details) never hold up quick ones like tag searches; a name (slow="looks") a single-thread
+    pool of that name, so two long jobs don't wait for each other either.
     """
     global _db_pool, _slow_pool
     if _db_pool is None:
@@ -260,7 +272,13 @@ def run_in_background(
         _slow_pool.setMaxThreadCount(1)
     task = _DbTask(repo, fn)
     _CallbackRelay(task, on_done, on_failed)  # owned by the application until it reports back
-    (_slow_pool if slow else _db_pool).start(task)
+    if isinstance(slow, str):
+        if slow not in _lanes:
+            _lanes[slow] = QThreadPool()
+            _lanes[slow].setMaxThreadCount(1)
+        _lanes[slow].start(task)
+    else:
+        (_slow_pool if slow else _db_pool).start(task)
 
 
 # ----------------------------------------------------------------------
@@ -366,6 +384,33 @@ class FilterChip(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class SimilarChip(QFrame):
+    """Search bar chip for Find Similar: "Similar to skull.png", with an x to remove it."""
+
+    remove_clicked = Signal()
+
+    def __init__(self, label: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        bg, fg, border = "rgba(148, 163, 184, 0.16)", "palette(text)", "rgba(148, 163, 184, 0.6)"
+        self.setObjectName("tagChip")
+        self.setStyleSheet(
+            f"#tagChip {{ background-color: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
+            f"#tagChip QLabel, #tagChip QToolButton {{ color: {fg}; background: transparent; border: none; padding: 0; }}"
+        )
+        self.setToolTip(f"{label} and its look-alikes (resized or re-saved copies), closest first")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 1, 4, 1)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel(label))
+        btn = QToolButton()
+        set_icon(btn, "close", _chip_tone(bg, fg), size=11)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("Stop showing only look-alikes")
+        btn.clicked.connect(self.remove_clicked)
+        layout.addWidget(btn)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+
 class FlowLayout(QLayout):
     """Lays widgets out left to right, wrapping onto new rows (Qt's classic flow layout example)."""
 
@@ -451,6 +496,8 @@ class TagSearchBar(QFrame):
       Clicking a chip switches it between "has" and "doesn't have".
     - Backspace in an empty box removes the last chip; the clear button (or Esc)
       removes everything. The star saves the search as a sidebar collection.
+    - Find Similar shows as a chip too (similar:<id> in the saved text); similar_label names
+      the picture. The palette button adds a color: filter (a named colour, or one picked).
     """
 
     changed = Signal()  # filters or text changed
@@ -462,6 +509,10 @@ class TagSearchBar(QFrame):
         self.setObjectName("tagSearchBar")
         self._filters: list[TagFilter] = []  # active chips
         self._all_tags: list[Tag] = []
+        self._similar: Optional[int] = None  # Find Similar: the picture's database id
+        self.similar_label: Callable[[int], str] = lambda asset_id: "Similar picture"
+        self._color_popup = None  # (the colour picker, while it's open)
+        self._picked_token = ""  # the color: token the picker put in the box
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
@@ -478,6 +529,7 @@ class TagSearchBar(QFrame):
             "tag:name  has the tag (pick a suggestion, or type it and press Enter)\n"
             "-tag:name  doesn't have it      tag:a|b  has any of them\n"
             "is:fav, is:alpha, rating:>=3, res:>=2048, size:>10mb, dur:<30s, poly:<10k, ext:png\n"
+            "color:red, color:#c04020 (pictures with that colour on 15% of them or more)\n"
             "A minus excludes (-ext:png, -is:fav); several words match in any order.\n"
             "Click a tag chip to switch has / doesn't have. Esc clears."
         )
@@ -486,6 +538,16 @@ class TagSearchBar(QFrame):
         self.edit.returnPressed.connect(self._commit_tokens)
         self.edit.installEventFilter(self)
         layout.addWidget(self.edit, 1)
+
+        self.btn_color = QToolButton()
+        set_icon(self.btn_color, "palette", size=16)
+        self.btn_color.setToolTip("Search by colour: pictures with a colour on 15% of them or more")
+        self.btn_color.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_color.setAutoRaise(True)
+        self.btn_color.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_color.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+        self.btn_color.setMenu(self._color_menu())
+        layout.addWidget(self.btn_color)
 
         self.btn_save = QToolButton()
         set_icon(self.btn_save, "star", size=16)
@@ -552,17 +614,41 @@ class TagSearchBar(QFrame):
     def has_tag_filters(self) -> bool:
         return bool(self._filters)
 
+    def similar_id(self) -> Optional[int]:
+        """Find Similar's picture (database id), if it's on."""
+        return self._similar
+
+    def set_similar(self, asset_id: Optional[int]) -> None:
+        """Show only a picture and its look-alikes (None: stop)."""
+        if asset_id == self._similar:
+            return
+        self._similar = asset_id
+        self._rebuild_chips()
+        self.changed.emit()
+
+    def add_color(self, word: str) -> None:
+        """Add color:word to the search (replacing a colour the picker added)."""
+        self._replace_picked(f"color:{word}")
+        self._picked_token = ""
+
+    def _replace_picked(self, token: str) -> None:
+        words = [w for w in self.edit.text().split(" ") if w and w != self._picked_token and w != token]
+        self.edit.setText(" ".join(words + [token]) + " ")
+        self._picked_token = token
+
     def text(self) -> str:
         """Free-text part of the search (tag: tokens excluded)."""
         return parse_search_text(self.edit.text())[1]
 
     def query_text(self) -> str:
         """The whole search as text (chips as tokens), e.g. for saving it."""
-        return " ".join([filter_token(f) for f in self._filters] + ([self.text()] if self.text() else []))
+        similar = [f"similar:{self._similar}"] if self._similar is not None else []
+        return " ".join(similar + [filter_token(f) for f in self._filters] + ([self.text()] if self.text() else []))
 
     def set_query_text(self, text: str) -> None:
         """Replace the search with a saved one."""
         self._filters = []
+        self._similar = None
         self.edit.blockSignals(True)
         self.edit.setText(text)
         self.edit.blockSignals(False)
@@ -597,8 +683,9 @@ class TagSearchBar(QFrame):
         self.changed.emit()
 
     def clear(self) -> None:
-        had_anything = bool(self._filters or self.edit.text())
+        had_anything = bool(self._filters or self.edit.text() or self._similar is not None)
         self._filters = []
+        self._similar = None
         self._rebuild_chips()
         self.edit.blockSignals(True)
         self.edit.clear()
@@ -617,6 +704,10 @@ class TagSearchBar(QFrame):
             widget = self._chip_row.takeAt(0).widget()
             if widget is not None:
                 widget.deleteLater()
+        if self._similar is not None:
+            chip = SimilarChip(self.similar_label(self._similar))
+            chip.remove_clicked.connect(self._remove_similar)
+            self._chip_row.addWidget(chip)
         for tag_filter in self._filters:
             chip = FilterChip(tag_filter)
             chip.remove_clicked.connect(self.remove_filter)
@@ -624,15 +715,18 @@ class TagSearchBar(QFrame):
             self._chip_row.addWidget(chip)
         self._update_buttons()
 
+    def _remove_similar(self) -> None:
+        self.set_similar(None)
+
     def _update_buttons(self) -> None:
-        active = bool(self._filters or self.edit.text().strip())
+        active = bool(self._filters or self.edit.text().strip() or self._similar is not None)
         self.btn_clear.setVisible(active)
         self.btn_save.setVisible(active)
 
     def _on_text_changed(self, text: str) -> None:
         self._update_buttons()
         # "tag:..." + Space completes a token as soon as it's typed
-        if text.endswith(" ") and _TAG_TOKEN.search(text):
+        if text.endswith(" ") and (_TAG_TOKEN.search(text) or _SIMILAR_TOKEN.search(text)):
             self._commit_tokens(report_unknown=False)
             return
         word = text.rsplit(" ", 1)[-1]
@@ -646,6 +740,14 @@ class TagSearchBar(QFrame):
         self.changed.emit()
 
     def _commit_tokens(self, report_unknown: bool = True) -> None:
+        similar = _SIMILAR_TOKEN.findall(self.edit.text())
+        if similar:
+            self._similar = int(similar[-1])
+            self.edit.blockSignals(True)
+            self.edit.setText(" ".join(_SIMILAR_TOKEN.sub(" ", self.edit.text()).split()))
+            self.edit.blockSignals(False)
+            self._rebuild_chips()
+            self.changed.emit()
         tokens, rest = parse_search_text(self.edit.text())
         for token in tokens:
             tags = []
@@ -681,10 +783,49 @@ class TagSearchBar(QFrame):
         self._commit_tokens()
         self._update_buttons()
 
+    # Search by colour ----------------------------------------------------
+    def _color_menu(self) -> QMenu:
+        from core.picture_look import COLOR_NAMES
+
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        for name in COLOR_NAMES:
+            action = menu.addAction(color_swatch_icon(SEARCH_SWATCHES[name], 22, 14), name.capitalize())
+            action.setToolTip(f"Pictures with {name} on 15% of them or more (color:{name}); normal maps are left out")
+            action.triggered.connect(partial(self.add_color, name))
+        menu.addSeparator()
+        pick = menu.addAction("Pick a Colour...")
+        pick.setToolTip("Pick any colour, or take one from the screen: pictures with colours close to it (color:#hex)")
+        pick.triggered.connect(self.pick_color)
+        return menu
+
+    def pick_color(self) -> None:
+        """The colour picker: the search follows the colour as it's picked."""
+        from ui.color_popup import ColorPopup
+
+        if self._color_popup is not None:
+            self._color_popup.close()
+        self._picked_token = ""
+        self._color_popup = ColorPopup("Search by colour", QColor("#c04020"), self)
+        self._color_popup.changed.connect(self._on_color_picked)
+        self._color_popup.finished.connect(self._on_color_popup_closed)
+        self._on_color_picked(QColor("#c04020"))
+        self._color_popup.show_beside(QRect(self.mapToGlobal(QPoint(0, 0)), self.size()))
+
+    def _on_color_picked(self, color: QColor) -> None:
+        self._replace_picked(f"color:{color.name(QColor.NameFormat.HexRgb)}")
+
+    def _on_color_popup_closed(self) -> None:
+        self._color_popup = None
+        self._picked_token = ""
+
     def eventFilter(self, obj, event) -> bool:
         if obj is self.edit and event.type() == event.Type.KeyPress:
             if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._filters:
                 self.remove_filter(self._filters[-1])
+                return True
+            if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._similar is not None:
+                self.set_similar(None)
                 return True
             if shortcuts.matches("search.clear", event) and not self.completer.popup().isVisible():
                 self.clear()

@@ -27,21 +27,32 @@ pytestmark = pytest.mark.speed
 FILES = 50_000
 TAGS = 40
 TAG_LINKS = 60_000
-# Seconds (the best of a few runs): about 7.5 times what a desktop takes (GitHub's machines are 2-3 times
-# slower, then 3 times that), at least 0.1 s (timer noise). See the module docstring.
+# Seconds (the best of a few runs): 3 times what GitHub's machine took (in brackets: the Tests run of
+# 0.6.11, Python 3.14.10), at least 0.05 s (timer noise on a busy machine). See the module docstring.
 BUDGETS = {
-    "app imports": 7.0,  # (a desktop: 0.9 s)
-    "saved scan: write": 0.3,  # (0.04 s)
-    "saved scan: read": 1.5,  # (0.19 s)
-    "grid: fill with every file": 0.1,  # (0.006 s)
-    "sidebar counts (with a tag category)": 0.6,  # (0.08 s)
-    "tag search: one tag": 0.15,  # (0.017 s)
-    "tag search: any of two, not a third": 0.2,  # (0.028 s)
-    "tag search: a tag and a name": 0.1,  # (0.009 s)
+    "app imports": 2.3,  # (0.752 s)
+    "saved scan: write": 0.21,  # (0.068 s)
+    "saved scan: read": 1.4,  # (0.457 s)
+    "grid: fill with every file": 0.05,  # (0.010 s)
+    "sidebar counts (with a tag category)": 0.41,  # (0.136 s)
+    "tag search: one tag": 0.07,  # (0.022 s)
+    "tag search: any of two, not a third": 0.11,  # (0.036 s)
+    "tag search: a tag and a name": 0.05,  # (0.011 s)
+    # Batch 4, estimated until GitHub's first run (5 x this computer's time: GitHub took about 1.7 x as long)
+    "Find Similar: one picture": 0.05,  # (not run there yet)
+    "Find Look-alikes: every picture (Tools)": 4.2,  # (not run there yet)
 }
-SEARCHES = {  # what's typed: its budget (a desktop: 0.014-0.040 s)
-    "skull": 0.3, "head ref": 0.3, "ext:fbx": 0.3, "poly:>100000": 0.3, "res:>2000": 0.3,
-    "rating:>=3": 0.3, "is:favorite": 0.3, "dragon ext:obj size:>10mb": 0.3,
+SEARCHES = {  # what's typed: its budget (GitHub's machine)
+    "skull": 0.06,  # (0.020 s)
+    "head ref": 0.06,  # (0.020 s)
+    "ext:fbx": 0.18,  # (0.060 s)
+    "poly:>100000": 0.17,  # (0.057 s)
+    "res:>2000": 0.19,  # (0.064 s)
+    "rating:>=3": 0.19,  # (0.063 s)
+    "is:favorite": 0.17,  # (0.055 s)
+    "dragon ext:obj size:>10mb": 0.1,  # (0.034 s)
+    "color:red": 0.18,  # (not run there yet)
+    "color:#c04020": 0.3,  # (not run there yet)
 }
 TIMINGS: dict[str, tuple[float, float]] = {}  # name: (seconds, budget)
 
@@ -63,7 +74,8 @@ def timed(name: str, work, budget: float, repeat: int = 3) -> float:
 
 @pytest.fixture(scope="module")
 def library(tmp_path_factory):
-    """The made-up library: (assets, ids, repository, tag ids, marks, meta, folded tag names by id)."""
+    """The made-up library: (assets, ids, repository, tag ids, marks, meta, folded tag names by id, looks of
+    the pictures (core.picture_look: made-up colours and hashes))."""
     rng = random.Random(7)
     root = tmp_path_factory.mktemp("speed")
     assets = []
@@ -91,12 +103,20 @@ def library(tmp_path_factory):
         elif asset.extension in (".png", ".jpg", ".tif", ".exr", ".psd"):
             side = rng.choice([512, 1024, 2048, 4096])
             meta[asset_id] = AssetMeta(width=side, height=side)
+    from core.picture_look import Look
+
+    looks = {}
+    for asset in assets:
+        if asset.is_texture:
+            colors = [((rng.randrange(256), rng.randrange(256), rng.randrange(256)), share) for share in (0.4, 0.25, 0.15, 0.1)]
+            grey = bytes(rng.randrange(256) for _ in range(256)) if rng.random() < 0.02 else bytes(range(256))
+            looks[ids[str(asset.path)]] = Look.make(colors, rng.getrandbits(63), grey)
     names = {tag_id: f"tag {n}" for n, tag_id in enumerate(tags)}
     tag_names: dict[int, frozenset[str]] = {}
     for tag_id, tagged in by_tag.items():
         for asset_id in tagged:
             tag_names[asset_id] = tag_names.get(asset_id, frozenset()) | {names[tag_id]}
-    yield assets, ids, repo, tags, marks, meta, tag_names
+    yield assets, ids, repo, tags, marks, meta, tag_names, looks
     repo.close() if hasattr(repo, "close") else None
 
 
@@ -134,13 +154,25 @@ def test_searches(library):
     from core.asset_filter import filter_assets
     from core.search_query import parse_query
 
-    assets, ids, _repo, _tags, marks, meta, _names = library
+    assets, ids, _repo, _tags, marks, meta, _names, looks = library
     for text, budget in SEARCHES.items():
         query = parse_query(text)
         assert not query.errors, text
         found = []
-        timed(f"search: {text}", lambda: found.append(filter_assets(assets, query=query, ids=ids, marks=marks, meta=meta)), budget)
+        timed(f"search: {text}", lambda: found.append(
+            filter_assets(assets, query=query, ids=ids, marks=marks, meta=meta, looks=looks)), budget)
         assert found[-1] is not None
+
+
+def test_lookalikes(library):
+    from core.picture_look import find_similar, group_lookalikes
+
+    looks = library[7]
+    target = next(iter(looks))
+    timed("Find Similar: one picture", lambda: find_similar(looks[target], looks, exclude=target),
+          BUDGETS["Find Similar: one picture"])
+    timed("Find Look-alikes: every picture (Tools)", lambda: group_lookalikes(looks),
+          BUDGETS["Find Look-alikes: every picture (Tools)"], repeat=1)
 
 
 def test_tag_searches(library):
@@ -156,7 +188,7 @@ def test_sidebar_counts(qapp, library):
     from core import settings
     from ui.library_sidebar import LibrarySidebar
 
-    assets, ids, repo, _tags, marks, _meta, tag_names = library
+    assets, ids, repo, _tags, marks, _meta, tag_names, _looks = library
     categories = settings.get_categories()
     categories.append({"name": "Tagged", "extensions": [".fbx"], "tags": ["Tag 1", "Tag 2"], "subcategories": []})
     settings.set_categories(categories)

@@ -1,4 +1,5 @@
-"""Tools > Find Duplicates: lists identical files and moves chosen copies to the Recycle Bin."""
+"""Tools > Find Duplicates: lists identical files and moves chosen copies to the Recycle Bin. Tools > Find
+Look-alikes does the same for pictures that look the same (core.picture_look: resized or re-saved copies)."""
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.duplicates import DuplicateGroup, find_duplicates
+from core.picture_look import Look, group_lookalikes
 from core.scanner import AssetItem
 from core.tag_repository import TagRepository
 from ui import file_actions
@@ -35,17 +37,35 @@ def format_bytes(size: float) -> str:
     return f"{size:.1f} TB"
 
 
+def lookalike_groups(looks: Sequence[tuple[AssetItem, Look]], cancelled=lambda: False) -> list[DuplicateGroup]:
+    """Look-alike pictures (looks: (picture, its look)) as groups, the biggest file first (usually the copy
+    worth keeping)."""
+    groups = group_lookalikes({i: look for i, (_asset, look) in enumerate(looks)}, cancelled)
+    result = []
+    for group in groups:
+        files = sorted((looks[i][0] for i in group), key=lambda a: (-a.size_bytes, a.modified_timestamp))
+        result.append(DuplicateGroup(files, files[0].size_bytes, True))
+    result.sort(key=lambda g: sum(a.size_bytes for a in g.files[1:]), reverse=True)
+    return result
+
+
 class DuplicatesDialog(QDialog):
-    def __init__(self, repo: TagRepository, assets: Sequence[AssetItem], parent: Optional[QWidget] = None):
+    """looks: (picture, its look): find look-alikes among them instead of identical files."""
+
+    def __init__(self, repo: TagRepository, assets: Sequence[AssetItem], parent: Optional[QWidget] = None,
+                 looks: Optional[Sequence[tuple[AssetItem, Look]]] = None):
         super().__init__(parent)
-        self.setWindowTitle("Find Duplicates")
+        self.lookalikes = looks is not None
+        self.setWindowTitle("Find Look-alikes" if self.lookalikes else "Find Duplicates")
         self.resize(860, 560)
         self.removed = 0
         self._closed = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
-        self.lbl_summary = QLabel(f"Comparing {len(assets):,} files...")
+        self.lbl_summary = QLabel(
+            f"Comparing {len(looks):,} pictures..." if self.lookalikes else f"Comparing {len(assets):,} files..."
+        )
         self.lbl_summary.setObjectName("pageHint")
         self.lbl_summary.setWordWrap(True)
         layout.addWidget(self.lbl_summary)
@@ -60,8 +80,11 @@ class DuplicatesDialog(QDialog):
         layout.addWidget(self.tree, 1)
 
         buttons = QHBoxLayout()
-        self.btn_keep_oldest = QPushButton("Tick Copies (Keep Oldest)")
-        self.btn_keep_oldest.setToolTip("Tick every file except the oldest one in each group")
+        self.btn_keep_oldest = QPushButton("Tick Copies (Keep Biggest)" if self.lookalikes else "Tick Copies (Keep Oldest)")
+        self.btn_keep_oldest.setToolTip(
+            "Tick every picture except the biggest file in each group (usually the best copy)" if self.lookalikes
+            else "Tick every file except the oldest one in each group"
+        )
         self.btn_keep_oldest.clicked.connect(self._tick_all_but_oldest)
         self.btn_reveal = QPushButton("Show in File Explorer")
         self.btn_reveal.setToolTip("Show the highlighted file in File Explorer")
@@ -81,10 +104,16 @@ class DuplicatesDialog(QDialog):
         layout.addLayout(buttons)
         self._update_buttons()
 
-        snapshot = list(assets)
-        run_in_background(
-            repo, lambda _repo: find_duplicates(snapshot, cancelled=lambda: self._closed), self._show, self._on_failed
-        )
+        if self.lookalikes:
+            pictures = list(looks)
+            run_in_background(
+                repo, lambda _repo: lookalike_groups(pictures, cancelled=lambda: self._closed), self._show, self._on_failed
+            )
+        else:
+            snapshot = list(assets)
+            run_in_background(
+                repo, lambda _repo: find_duplicates(snapshot, cancelled=lambda: self._closed), self._show, self._on_failed
+            )
 
     def done(self, result: int) -> None:
         self._closed = True  # stops the search if it's still running
@@ -98,7 +127,11 @@ class DuplicatesDialog(QDialog):
         bold = QFont()
         bold.setBold(True)
         for group in groups:
-            label = f"{len(group.files)} copies • {format_bytes(group.size)} each • {format_bytes(group.wasted)} wasted"
+            if self.lookalikes:
+                extra = sum(a.size_bytes for a in group.files[1:])
+                label = f"{len(group.files)} look-alikes • {format_bytes(extra)} besides the biggest"
+            else:
+                label = f"{len(group.files)} copies • {format_bytes(group.size)} each • {format_bytes(group.wasted)} wasted"
             if not group.confirmed:
                 label += " • likely (very large files are compared by size and samples)"
             header = QTreeWidgetItem(self.tree, [label])
@@ -106,14 +139,21 @@ class DuplicatesDialog(QDialog):
             header.setFont(0, bold)
             header.setFlags(Qt.ItemFlag.ItemIsEnabled)
             for asset in group.files:
-                item = QTreeWidgetItem(header, [asset.name, asset.formatted_modified_time, str(asset.path.parent)])
+                when = f"{asset.formatted_size} • {asset.formatted_modified_time}" if self.lookalikes else asset.formatted_modified_time
+                item = QTreeWidgetItem(header, [asset.name, when, str(asset.path.parent)])
                 item.setData(0, _ASSET_ROLE, asset)
                 item.setToolTip(2, str(asset.path))
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
             header.setExpanded(True)
         self.tree.blockSignals(False)
-        if groups:
+        if groups and self.lookalikes:
+            self.lbl_summary.setText(
+                f"Found {len(groups)} group{'s' if len(groups) != 1 else ''} of pictures that look the same (resized or "
+                "re-saved copies, or very close versions), the biggest file first. Check before recycling: a turntable's "
+                "frames or an alpha's thumbnail look alike too. Double-click a file to open it."
+            )
+        elif groups:
             wasted = sum(g.wasted for g in groups)
             self.lbl_summary.setText(
                 f"Found {len(groups)} group{'s' if len(groups) != 1 else ''} of identical files, "
@@ -121,7 +161,7 @@ class DuplicatesDialog(QDialog):
                 "Double-click a file to open it."
             )
         else:
-            self.lbl_summary.setText("No duplicate files found.")
+            self.lbl_summary.setText("No look-alike pictures found." if self.lookalikes else "No duplicate files found.")
         self._update_buttons()
 
     def _on_failed(self, message: str) -> None:

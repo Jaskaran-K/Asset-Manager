@@ -6,13 +6,17 @@
     res:>=2048        larger side in pixels (k = 1024, so res:4k = 4096)
     dur:<30s          video length (s, m, h, or 1:30)
     poly:<10k         3D model faces (k = 1,000, m = 1,000,000)
+    color:red         pictures with that colour on 15% of them or more (core.picture_look.COLOR_NAMES,
+                      or an exact one: color:#c04020); colour: works too
+    similar:123       the picture with database id 123 and its look-alikes (Find Similar; the search
+                      bar shows it as a chip, and the grid lists them closest first)
 
 Comparisons: = < <= > >=; a bare number means "at least" for rating and res, and
 "equal" otherwise. "Equal" sizes, lengths and face counts match to the precision
 typed: size:10mb is 9.5-10.5 MB, size:10.2mb is 10.15-10.25 MB, poly:10k is
 9,500-10,500. A minus in front excludes: -ext:png, -is:fav. Files whose details
 aren't known yet (still being read) don't match a res / dur / poly filter, with
-or without the minus.
+or without the minus; pictures not looked at yet don't match a color filter.
 
 Name text: every word must be in the file name, in any order ("rock wall" finds
 Wall_Rock_02.png); "quoted words" must appear together.
@@ -29,10 +33,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .picture_look import Look, parse_color
 from .scanner import AssetItem
 from .tag_repository import NO_MARKS, AssetMeta, Marks
 
-_TOKEN = re.compile(r"(?<!\S)(-?)(is|rating|ext|type|size|res|dur|poly):(\S*)", re.IGNORECASE)
+_TOKEN = re.compile(r"(?<!\S)(-?)(is|rating|ext|type|size|res|dur|poly|colou?r|similar):(\S*)", re.IGNORECASE)
 _WORD = re.compile(r'"([^"]*)"|(\S+)')
 
 # Tag tokens:  tag:name   tag:"two words"   -tag:name (must not have)   tag:a|b|"c d" (any of)
@@ -48,13 +53,15 @@ _SIZE_UNITS = {"b": 1, "kb": 1024, "k": 1024, "mb": 1024 ** 2, "m": 1024 ** 2, "
 
 @dataclass(frozen=True)
 class DetailFilter:
-    field: str  # "favorite", "alpha", "rating", "ext", "size", "res", "dur", "poly"
+    field: str  # "favorite", "alpha", "rating", "ext", "size", "res", "dur", "poly", "color"
     op: str
     value: object
     negate: bool = False  # typed with a minus: files that don't match
     tolerance: float = 0  # "=" matches value +- tolerance (half a step of the last digit typed)
 
-    def matches(self, asset: AssetItem, marks: Marks, meta: Optional[AssetMeta]) -> bool:
+    def matches(self, asset: AssetItem, marks: Marks, meta: Optional[AssetMeta], look: Optional[Look] = None) -> bool:
+        if self.field == "color":
+            return look is not None and look.matches_color(self.value) != self.negate  # (not looked at: unknown)
         if meta is None and self.field in _META_FIELDS:
             return False  # not read yet: unknown either way
         return self._test(asset, marks, meta) != self.negate
@@ -89,6 +96,7 @@ class ParsedQuery:
     words: list[str] = field(default_factory=list)  # text as casefolded words / "quoted phrases"
     filters: list[DetailFilter] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    similar_to: Optional[int] = None  # similar:<id>: that picture and its look-alikes
 
     @property
     def uses_marks(self) -> bool:
@@ -98,12 +106,18 @@ class ParsedQuery:
     def uses_meta(self) -> bool:
         return any(f.field in _META_FIELDS for f in self.filters)
 
+    @property
+    def uses_looks(self) -> bool:
+        return self.similar_to is not None or any(f.field == "color" for f in self.filters)
+
     def name_matches(self, name: str) -> bool:
         folded = name.casefold()
         return all(word in folded for word in self.words)
 
-    def matches(self, asset: AssetItem, marks: Marks = NO_MARKS, meta: Optional[AssetMeta] = None) -> bool:
-        return all(f.matches(asset, marks, meta) for f in self.filters)
+    def matches(
+        self, asset: AssetItem, marks: Marks = NO_MARKS, meta: Optional[AssetMeta] = None, look: Optional[Look] = None
+    ) -> bool:
+        return all(f.matches(asset, marks, meta, look) for f in self.filters)
 
 
 def _number(text: str, units: dict[str, float], default_unit: float = 1) -> tuple[float, float]:
@@ -133,6 +147,8 @@ def _parse_filter(key: str, raw: str, negate: bool = False) -> DetailFilter:
         if raw.lower() in ("alpha", "alphas", "height", "heightmap"):
             return DetailFilter("alpha", "=", True, negate)
         raise ValueError(raw)
+    if key in ("color", "colour"):
+        return DetailFilter("color", "=", parse_color(raw), negate)
     if key in ("ext", "type"):
         exts = frozenset(e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip())
         if not exts:
@@ -170,6 +186,12 @@ def parse_query(text: str) -> ParsedQuery:
         minus, key, raw = match.groups()
         if not raw:
             continue  # still being typed
+        if key.lower() == "similar":
+            if raw.isdigit() and not minus:
+                result.similar_to = int(raw)
+            else:
+                result.errors.append(match.group(0))
+            continue
         try:
             result.filters.append(_parse_filter(key, raw, negate=bool(minus)))
         except ValueError:

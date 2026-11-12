@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
@@ -26,16 +26,20 @@ class LibraryTools(QObject):
     restored = Signal()  # the database was replaced by a backup: everything should be read again
     duplicates_removed = Signal()  # files went to the Recycle Bin
 
-    def __init__(self, repo: TagRepository, assets: Callable[[], list[AssetItem]], window: QWidget):
+    def __init__(self, repo: TagRepository, assets: Callable[[], list[AssetItem]], window: QWidget,
+                 looks: Optional[Callable[[], tuple[dict, dict]]] = None):
         super().__init__(window)
         self.repo = repo
         self._assets = assets  # the files shown (duplicates are looked for among them)
+        self._looks = looks  # (ids by path, core.picture_look.Look by id): for look-alikes
         self._window = window  # (parent of the dialogs)
         self._offered_restore = False  # (a damaged database is mentioned once per session)
 
     def add_to(self, menu: QMenu) -> None:
         entries = (
             ("Find Duplicates...", "Find identical files in the files shown, and recycle extra copies", self.find_duplicates),
+            ("Find Look-alikes...", "Find pictures that look the same (resized or re-saved copies), and recycle extra copies",
+             self.find_lookalikes),
             None,
             ("Export Tags...", "Save your custom tags and the files they're on to a .json file", self.export_tags),
             ("Import Tags...", "Add tags from an exported .json file (nothing is removed)", self.import_tags),
@@ -63,6 +67,21 @@ class LibraryTools(QObject):
         dialog.deleteLater()
         if dialog.removed:
             self.status.emit(f"Moved {dialog.removed} duplicate file{'s' if dialog.removed != 1 else ''} to the Recycle Bin.")
+            self.duplicates_removed.emit()
+
+    def find_lookalikes(self) -> None:
+        pictures = [a for a in self._assets() if a.is_texture and not a.in_archive]
+        if not pictures or self._looks is None:
+            QMessageBox.information(self._window, "Find Look-alikes", "There are no pictures to compare. Scan a folder first.")
+            return
+        ids, looks = self._looks()
+        dialog = DuplicatesDialog(self.repo, pictures, self._window, looks=[
+            (asset, looks[ids[str(asset.path)]]) for asset in pictures if ids.get(str(asset.path)) in looks
+        ])
+        dialog.exec()
+        dialog.deleteLater()
+        if dialog.removed:
+            self.status.emit(f"Moved {dialog.removed} look-alike picture{'s' if dialog.removed != 1 else ''} to the Recycle Bin.")
             self.duplicates_removed.emit()
 
     def export_tags(self) -> None:

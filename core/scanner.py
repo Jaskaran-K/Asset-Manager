@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
 if TYPE_CHECKING:
     from .archives import ArchiveMember
+    from .texture_sets import TextureSet
 
 
 # Supported file formats organized by type
@@ -145,6 +146,8 @@ class AssetItem:
     category_name: str  # e.g. "FBX", "OBJ", "PNG", "TIFF", "PDF"
     # A file inside an archive: path is then virtual (core.archives), not a file on disk
     archive: Optional["ArchiveMember"] = None
+    # A texture set's card in the grid (core.texture_sets.set_card): its path is virtual too
+    texture_set: Optional["TextureSet"] = field(default=None, compare=False, repr=False)
 
     @property
     def formatted_size(self) -> str:

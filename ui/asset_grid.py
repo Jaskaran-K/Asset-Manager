@@ -106,7 +106,9 @@ class AssetListModel(QAbstractListModel):
         rows = sorted({i.row() for i in indexes if i.isValid()})
         mime = QMimeData()
         # File URLs: Windows hands these to other apps as an ordinary file drop (CF_HDROP)
-        files = [self._file_for(self._assets[r]) for r in rows]
+        from core.texture_sets import files_of
+
+        files = [self._file_for(a) for a in files_of(self._assets[r] for r in rows)]  # (a set card: its maps)
         mime.setUrls([QUrl.fromLocalFile(str(f)) for f in files if f is not None])
         return mime
 

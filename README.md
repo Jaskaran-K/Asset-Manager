@@ -126,6 +126,34 @@ the app starts from that copy and notes it in the crash log.
   saves `.amtheme` files and never changes the app's settings. See **Settings > Guide > Theme Studio**.
 - **Help:** **Settings > Guide** has the Artbook guide, the Theme Studio guide and this Read Me, right in the app.
 
+### Texture sets, renaming and converting
+- **Texture sets:** a material's maps (Rock_BaseColor, Rock_Normal, Rock_Roughness ...) show as one card, with its
+  colour map's picture and a "SET · n" badge (**Library > Group Texture Sets** turns it off). A set is the images in
+  one folder, or one folder inside an archive, whose names differ only by a map word; UDIM tiles (`.1001`, `.1002`)
+  are one set. A search that finds any of its maps shows the set. Tagging, favorites, ratings, Send to Artbook and
+  dragging a set card apply to all its maps (drag one into Substance Painter's shelf or Blender's node editor).
+- **The material:** double-click a set (or right-click > **Preview Material**) for it on a sphere, cube or plane,
+  under the viewer's lights or your HDRIs: colour, normal (with **Flip Green** for DirectX ones, guessed from the
+  names), roughness or gloss, metallic, AO, emissive, opacity, packed ORM maps, and height as real displacement.
+  Each map's kind can be corrected, or a map left out; a set with a Normal and a Normal_OpenGL uses the OpenGL one,
+  a Displacement map is used for height over a Bump map, and of two files named alike the EXR over a PNG or JPG.
+  The **Adjust** sliders (colour, normal, roughness, metal, AO, emissive, height) change the preview only, each with
+  its value beside it; double-click one to reset it. Height is the map's depth as a share of its width.
+- **Send to Blender / Maya as Material** (right-click a set, or in the material window) makes the material in the
+  Blender or Maya that's open, on its selected objects, through the helper in **Settings > Apps**: a Principled BSDF
+  in Blender; an Arnold **aiStandardSurface** in Maya (or a standardSurface: Settings > Apps), with an aiNormalMap,
+  Raw colour space for data maps and displacement on the shading group (turn on the mesh's Arnold subdivision to
+  see it). AO maps are added but not connected (renderers make their own shadowing). After an update, the helper
+  is brought up to date by itself: restart Blender or Maya once.
+- **Rename** (F2, or right-click > **Rename...**): new names from a pattern (`{name}`, `{set}`, `{map}` with the map
+  words as they are, Substance style or short, `{n}` / `{n:3}`, `{folder}`), a find and replace and a letter case,
+  shown for every file first, with what's in the way. Renamed files keep their tags, favorites and ratings, and
+  Ctrl+Z renames them back. Files inside archives can't be renamed.
+- **Convert and Resize** (right-click pictures): PNG, JPG, TGA or TIF copies, at full size or the longest side at
+  512 / 1K / 2K / 4K / any size (never bigger), optionally each side down to a power of two, into a folder next to
+  each file or one folder. 16-bit heights and masks stay 16-bit in PNG and TIF; the originals are never changed.
+  **Move New Files to Recycle Bin** takes them back.
+
 ## The Artbook
 
 The Artbook holds reference boards, called **Pages**: endless canvases you fill with images from the library,

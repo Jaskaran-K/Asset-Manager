@@ -965,3 +965,25 @@ def get_folder_rules() -> list[dict[str, Any]]:
 
 def set_folder_rules(rules: list[dict[str, Any]]) -> None:
     _update_config("folder_rules", rules)
+
+
+def get_group_texture_sets() -> bool:
+    """Show a texture set's maps as one card (core.texture_sets; the Library menu)."""
+    return _load_raw_config().get("group_texture_sets") is not False
+
+
+def set_group_texture_sets(group: bool) -> None:
+    _update_config("group_texture_sets", bool(group))
+
+
+MAYA_MATERIALS = ("arnold", "standard")
+
+
+def get_maya_material() -> str:
+    """What Send to Maya as Material makes: "arnold" (aiStandardSurface) or "standard" (standardSurface)."""
+    value = _load_raw_config().get("maya_material")
+    return value if value in MAYA_MATERIALS else "arnold"
+
+
+def set_maya_material(kind: str) -> None:
+    _update_config("maya_material", kind if kind in MAYA_MATERIALS else "arnold")

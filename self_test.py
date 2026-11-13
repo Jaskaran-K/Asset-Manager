@@ -146,6 +146,35 @@ def run_self_test(log_path: Optional[str]) -> int:
             raise RuntimeError(f"a red picture's colours came out {c.colors}")
         return "colours and look-alikes are read"
 
+    def check_texture_sets():
+        # Texture sets, their material request (the helpers' scripts compile), and a conversion
+        import numpy as np
+        from PIL import Image
+        from core import app_helpers, batch_convert
+        from core.scanner import AssetItem
+        from core.texture_sets import find_sets
+        from ui import batch_dialogs, material_view  # noqa: F401 (the windows: they must be in the build)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            files = []
+            for kind, color in (("BaseColor", (200, 80, 40)), ("Normal", (128, 128, 255)), ("ORM", (255, 128, 0))):
+                path = Path(tmp) / f"Crate_{kind}.png"
+                Image.new("RGB", (64, 64), color).save(path)
+                files.append(AssetItem(path, path.name, ".png", path.stat().st_size, 0.0, "Textures", "PNG"))
+            sets = find_sets(files)
+            if len(sets) != 1 or sets[0].roles != ["color", "normal", "packed"]:
+                raise RuntimeError(f"the texture set came out {[(s.name, s.roles) for s in sets]}")
+            request = app_helpers.material_request(sets[0], {str(a.path): a.path for a in files})
+            for app_id in ("blender", "maya"):
+                compile(app_helpers.helper_source(app_id), app_id, "exec")
+            options = batch_convert.ConvertOptions("tga", 32)
+            row = batch_convert.plan(files[:1], options).jobs[0]
+            batch_convert.convert(row, options)
+            with Image.open(row.target) as made:
+                if made.size != (32, 32):
+                    raise RuntimeError(f"a converted picture came out {made.size}")
+        return f"a set of {len(request['maps'])} maps found, sent as a material, converted"
+
     def check_model_reader():
         # 3D models are read in a helper program (this app again, with --model-reader): it must start, read a
         # model and send it back, from the build as it ships
@@ -291,6 +320,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("upscaling", check_upscale)
     step("model reader", check_model_reader)
     step("colours and look-alikes", check_picture_looks)
+    step("texture sets and batch convert", check_texture_sets)
     step("image thumbnails", check_images)
     step("zip archives", check_archives)
     step("app files", check_app_files)

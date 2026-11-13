@@ -391,6 +391,10 @@ class LibraryState(QObject):
     # ------------------------------------------------------------------
     # Live updates (LibraryWatcher)
     # ------------------------------------------------------------------
+    def rescan_folders(self, folders: list[Path]) -> None:
+        """Bring these folders up to date now (files renamed by the app), as the watcher would."""
+        self._on_folders_changed(folders)
+
     def _on_folders_changed(self, folders: list[Path]) -> None:
         """Rescan just the folders whose contents changed."""
         if self.is_scanning():

@@ -756,6 +756,26 @@ class TagRepository:
                 )
         return len(moves)
 
+    def move_asset_paths(self, moves: Sequence[tuple[Path | str, Path | str]]) -> int:
+        """Files renamed or moved by the app (core.batch_rename): their rows follow them, so tags, favorites,
+        ratings and details stay. A stale row already at a new path (a file long gone) makes way. Returns
+        how many rows moved."""
+        moved = 0
+        with self._transaction() as conn:
+            for old, new in moves:
+                old_key, new_key, new = path_key(old), path_key(new), Path(new)
+                if old_key == new_key:  # (only the letter case changed: the key is the same)
+                    conn.execute("UPDATE assets SET path = ?, name = ?, name_fold = ? WHERE path_key = ?",
+                                 (str(new), new.name, new.name.casefold(), old_key))
+                    moved += 1
+                    continue
+                conn.execute("DELETE FROM assets WHERE path_key = ?", (new_key,))
+                moved += conn.execute(
+                    "UPDATE assets SET path_key = ?, path = ?, name = ?, name_fold = ? WHERE path_key = ?",
+                    (new_key, str(new), new.name, new.name.casefold(), old_key),
+                ).rowcount
+        return moved
+
     def forget_unscanned_assets(
         self, assets: Iterable[AssetItem], keep_folders: Sequence[Path | str] = (),
         scanned_folders: Sequence[Path | str] = (),

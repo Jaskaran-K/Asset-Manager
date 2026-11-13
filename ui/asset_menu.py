@@ -134,6 +134,9 @@ class AssetMenuActions:
     colors: Sequence[tuple[tuple[int, int, int], float]] = ()  # a picture's main colours (core.picture_look)
     search_color: Optional[Callable[[str], None]] = None  # search for color:<word>
     add_folder_rule: Optional[Callable[[], None]] = None  # a rule for the file's folder (core.folder_rules)
+    rename: Optional[Callable[[], None]] = None  # batch rename the selected files (ui.batch_dialogs)
+    convert: Optional[Callable[[], None]] = None  # convert / resize the selected pictures
+    send_material: Optional[Callable[[str], None]] = None  # a texture set: make it a material in "blender" / "maya"
 
 
 def build_asset_menu(
@@ -152,13 +155,26 @@ def build_asset_menu(
 
     board = asset.extension.lower() == ".pur"
 
-    action_view = menu.addAction("Look Inside" if archive else "Open in Artbook" if board else "Preview in Asset Viewer")
+    texture_set = asset.texture_set
+    action_view = menu.addAction(
+        "Preview Material" if texture_set is not None else "Look Inside" if archive else "Open in Artbook" if board
+        else "Preview in Asset Viewer"
+    )
     font = action_view.font()
     font.setBold(True)
     action_view.setFont(font)
     if archive:
         set_icon(action_view, "archive")
+    elif texture_set is not None:
+        set_icon(action_view, "material")
+        action_view.setToolTip("The maps as a material on a sphere, cube or plane")
     action_view.triggered.connect(actions.open_viewer)
+    if texture_set is not None and actions.send_material is not None:
+        for app_id, name, what in (("blender", "Blender", "a Principled BSDF"), ("maya", "Maya", "an Arnold aiStandardSurface")):
+            action = menu.addAction(f"Send to {name} as Material")
+            set_icon(action, "open_in")
+            action.setToolTip(f"Make {what} material with these maps in the {name} that's open, on its selected objects")
+            action.triggered.connect(lambda _checked=False, a=app_id: actions.send_material(a))
     if board and actions.import_board is not None:
         action_again = menu.addAction("Import Again")
         set_icon(action_again, "import")
@@ -172,7 +188,7 @@ def build_asset_menu(
 
     menu.addSeparator()
 
-    fitting = apps.apps_for(asset.extension) if actions.open_in is not None else []
+    fitting = apps.apps_for(asset.extension) if actions.open_in is not None and texture_set is None else []
     if fitting:
         open_in = menu.addMenu("Open In")
         open_in.setToolTipsVisible(True)
@@ -185,10 +201,11 @@ def build_asset_menu(
                 action.setToolTip(f"Unpacks it first, then opens it in {app.name}")
             action.triggered.connect(lambda _checked=False, a=app: actions.open_in(a))
 
-    action_open = menu.addAction("Open with External App")
-    if asset.in_archive:
-        action_open.setToolTip("Unpacks it first, then opens it in the program Windows uses for it")
-    action_open.triggered.connect(actions.open_external or (lambda: file_actions.open_file(asset.path)))
+    if texture_set is None:
+        action_open = menu.addAction("Open with External App")
+        if asset.in_archive:
+            action_open.setToolTip("Unpacks it first, then opens it in the program Windows uses for it")
+        action_open.triggered.connect(actions.open_external or (lambda: file_actions.open_file(asset.path)))
 
     action_reveal = menu.addAction("Show Archive in File Explorer" if asset.in_archive else "Show in File Explorer")
     action_reveal.triggered.connect(actions.reveal)
@@ -238,6 +255,19 @@ def build_asset_menu(
         action.setCheckable(True)
         action.setChecked(current == {rating})
         action.triggered.connect(lambda _checked=False, r=rating: actions.set_rating(r))
+
+    files = len(selection)
+    if actions.rename is not None:
+        action_rename = menu.addAction("Rename..." if files <= 1 else f"Rename {files} Files...")
+        action_rename.setShortcut(shortcuts.sequence("main.rename"))
+        action_rename.setToolTip("New names from a pattern, with a preview first (Ctrl+Z undoes it)")
+        action_rename.setEnabled(not all(a.in_archive for a in selection))
+        action_rename.triggered.connect(actions.rename)
+    if actions.convert is not None and any(a.is_texture for a in selection):
+        action_convert = menu.addAction("Convert and Resize...")
+        set_icon(action_convert, "upscale")
+        action_convert.setToolTip("Make copies in another type or smaller (PNG, JPG, TGA, TIF; 2K, 4K ...); the originals stay")
+        action_convert.triggered.connect(actions.convert)
 
     if actions.add_folder_rule is not None:
         action_rule = menu.addAction("Folder Rule...")

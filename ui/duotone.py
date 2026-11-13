@@ -621,6 +621,17 @@ def _similar(p, primary, secondary):
     p.fillPath(_circle(16.6, 9.8, 1.4), primary)  # its sun
 
 
+def _material(p, primary, secondary):
+    """A shaded ball: a material on a sphere (texture sets, the material preview)."""
+    _body(p, _circle(12, 12, 8.5), secondary)
+    seam = QPainterPath()
+    seam.addEllipse(QRectF(3.5, 9.6, 17, 4.8))  # (its equator)
+    p.setPen(_pen(primary, 1.6))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(seam)
+    p.fillPath(_circle(9, 7.6, 1.7), primary)  # its highlight
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -661,7 +672,7 @@ ICONS: dict[str, IconPainter] = {
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
-    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale, "similar": _similar,
+    "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale, "similar": _similar, "material": _material,
 }
 
 

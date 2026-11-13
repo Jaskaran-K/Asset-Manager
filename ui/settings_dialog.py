@@ -70,6 +70,8 @@ from core.scanner import AssetItem
 from core import category_rules, folder_rules, profiles, storage
 from core.profiles import Profile, ProfileError
 from core.settings import (
+    get_maya_material,
+    set_maya_material,
     DEFAULT_CATEGORIES,
     DEFAULT_FILE_EXTENSIONS,
     MAX_CATEGORY_ICON_BYTES,
@@ -1684,6 +1686,16 @@ class AppsPage(QWidget):
             helpers.addWidget(button, row, 2)
             self._helpers[app_id] = (status, button)
         layout.addLayout(helpers)
+        material_row = QHBoxLayout()
+        material_row.addWidget(QLabel("Texture sets sent to Maya become"))
+        self.cmb_maya_material = QComboBox()
+        self.cmb_maya_material.addItem("Arnold aiStandardSurface", "arnold")
+        self.cmb_maya_material.addItem("Maya standardSurface", "standard")
+        self.cmb_maya_material.setCurrentIndex(self.cmb_maya_material.findData(get_maya_material()))
+        self.cmb_maya_material.setToolTip("The material Send to Maya as Material makes (needs the helper above)")
+        material_row.addWidget(self.cmb_maya_material)
+        material_row.addStretch(1)
+        layout.addLayout(material_row)
         layout.addStretch(1)
         self._build_custom_rows()
         self._update_helpers()
@@ -3096,6 +3108,8 @@ class SettingsDialog(QDialog):
             # (down to the new limit now, not at the next start: a big folder takes a moment)
             threading.Thread(target=archives.prune_extracted, name="prune-unpacked", daemon=True).start()
         page = self.page_apps
+        if page.cmb_maya_material.currentData() != get_maya_material():
+            set_maya_material(page.cmb_maya_material.currentData())
         if (
             page.found() != get_found_apps() or page.choices() != get_app_choices()
             or page.custom() != get_custom_apps() or page.types() != get_app_types()

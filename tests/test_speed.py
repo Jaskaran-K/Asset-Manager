@@ -41,6 +41,9 @@ BUDGETS = {
     # Batch 4, estimated until GitHub's first run (5 x this computer's time: GitHub took about 1.7 x as long)
     "Find Similar: one picture": 0.05,  # (not run there yet)
     "Find Look-alikes: every picture (Tools)": 4.2,  # (not run there yet)
+    # Batch 5, estimated the same way
+    "texture sets: find them": 0.9,  # (not run there yet)
+    "texture sets: group the grid": 0.13,  # (not run there yet)
 }
 SEARCHES = {  # what's typed: its budget (GitHub's machine)
     "skull": 0.06,  # (0.020 s)
@@ -173,6 +176,22 @@ def test_lookalikes(library):
           BUDGETS["Find Similar: one picture"])
     timed("Find Look-alikes: every picture (Tools)", lambda: group_lookalikes(looks),
           BUDGETS["Find Look-alikes: every picture (Tools)"], repeat=1)
+
+
+def test_texture_sets(library):
+    from core.texture_sets import find_sets, group_into_sets
+
+    maps = [  # 2,000 made-up sets of 4 maps, among the 50,000 files
+        AssetItem(Path(f"D:/Library/materials/{i % 40}") / f"Mat{i}_{kind}.png", f"Mat{i}_{kind}.png", ".png", 4_000_000,
+                  1_700_000_000.0, determine_asset_group(".png"), "PNG")
+        for i in range(2000) for kind in ("BaseColor", "Normal", "Roughness", "Metallic")
+    ]
+    assets = library[0] + maps
+    found = []
+    timed("texture sets: find them", lambda: found.append(find_sets(assets)), BUDGETS["texture sets: find them"])
+    sets = found[-1]
+    assert len(sets) >= 2000
+    timed("texture sets: group the grid", lambda: group_into_sets(assets, sets), BUDGETS["texture sets: group the grid"])
 
 
 def test_tag_searches(library):

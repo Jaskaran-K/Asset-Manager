@@ -64,8 +64,10 @@ from core.library_snapshot import load_snapshot
 from core.scanner import AssetItem
 from core import artbook_store
 from core.settings import (
+    get_maya_material,
     apply_new_defaults,
     get_archive_contents,
+    get_group_texture_sets,
     get_found_apps,
     get_pages_dir,
     get_background_texture,
@@ -79,11 +81,14 @@ from core.settings import (
     get_thumbnail_size,
     is_scan_folder,
     set_archive_contents,
+    set_group_texture_sets,
     set_found_apps,
     set_model_view,
     set_scan_folders,
 )
 from core.picture_look import find_similar, hex_of
+from core import app_helpers, batch_rename
+from core.texture_sets import TextureSet, files_of, find_sets, group_into_sets
 from core.search_query import ParsedQuery, parse_query
 from core.tag_repository import NO_MARKS, Marks, SavedSearch, Tag, TagChange, get_repository, is_damage_error
 from core.thumbnail_manager import ThumbnailManager, prune_disk_cache
@@ -166,6 +171,8 @@ class MainWindow(QMainWindow):
         # The search: name words and detail filters, and the tag search result (None: no tag filter)
         self._query = ParsedQuery()
         self._similar_cache: Optional[tuple[int, int, dict[int, float]]] = None  # (picture id, looks seen, matches)
+        self._sets_cache: Optional[tuple[int, int, list[TextureSet]]] = None  # (id and length of the assets, sets)
+        self.group_sets = get_group_texture_sets()
         self._looks_seen = 0  # (counts looks_loaded: Find Similar's matches are worked out again after one)
         self._tag_match_ids: Optional[set[int]] = None
         self._tag_search_generation = 0
@@ -321,6 +328,13 @@ class MainWindow(QMainWindow):
 
     def _find_apps(self) -> None:
         run_job(apps.detect, self._on_apps_found)
+        run_job(self._refresh_helpers, self._ignore_result)
+
+    @staticmethod
+    def _refresh_helpers() -> None:
+        """Bring installed Blender / Maya helpers up to date (they run the new one once restarted)."""
+        for app_id in ("blender", "maya"):
+            app_helpers.refresh(app_id, apps.program(app_id))
 
     def _on_apps_found(self, found: dict[str, list[str]]) -> None:
         """Installed, moved or removed since last time: the menus and the cards' icons follow."""
@@ -400,6 +414,15 @@ class MainWindow(QMainWindow):
         )
         set_icon(self.action_archive_contents, "archive")
         self.action_archive_contents.toggled.connect(self._on_archive_contents_toggled)
+        self.action_group_sets = library_menu.addAction("Group Texture Sets")
+        self.action_group_sets.setCheckable(True)
+        self.action_group_sets.setChecked(self.group_sets)
+        self.action_group_sets.setToolTip(
+            "Show a material's maps (Rock_BaseColor, Rock_Normal, Rock_Roughness ...) as one card.\n"
+            "Double-click it for the material on a sphere; drag it to drag all its maps."
+        )
+        set_icon(self.action_group_sets, "material")
+        self.action_group_sets.toggled.connect(self._on_group_sets_toggled)
         self.btn_library.setMenu(library_menu)
         layout.addWidget(self.btn_library)
 
@@ -1227,6 +1250,8 @@ class MainWindow(QMainWindow):
 
     def _fill_grid(self) -> None:
         filtered = self._get_filtered_assets()
+        if self.group_sets and self.search_bar.similar_id() is None:  # (Find Similar lists single pictures)
+            filtered = group_into_sets(filtered, self._texture_sets())
         self.grid_model.set_assets(filtered)
 
         first_run = not self.library.assets and self.browse_folder is None and not get_scan_folders()
@@ -1263,7 +1288,23 @@ class MainWindow(QMainWindow):
         self.list_grid.show()
         self.status_info.setText(f"{len(filtered)} of {len(self.library.assets)} assets shown")
 
+    def _texture_sets(self) -> list[TextureSet]:
+        """The texture sets among the library's files (found again when the files change)."""
+        assets = self.library.assets
+        key = (id(assets), len(assets))
+        if self._sets_cache is None or self._sets_cache[:2] != key:
+            self._sets_cache = (*key, find_sets(assets))
+        return self._sets_cache[2]
+
+    def _on_group_sets_toggled(self, group: bool) -> None:
+        self.group_sets = group
+        set_group_texture_sets(group)
+        self._refresh_grid_display()
+
     def _marks_of(self, asset: AssetItem) -> Marks:
+        if asset.texture_set is not None:  # a set: a favorite if any of its maps is, rated as its best
+            marks = [self.library.marks_of(a) for a in asset.texture_set.assets]
+            return Marks(any(m.favorite for m in marks), max(m.rating for m in marks))
         return self.library.marks_of(asset)
 
     def _known_alpha(self, asset: AssetItem) -> Optional[bool]:
@@ -1276,6 +1317,15 @@ class MainWindow(QMainWindow):
         return self._marks_of(asset) if asset is not None else NO_MARKS
 
     def _asset_tooltip(self, asset: AssetItem) -> str:
+        if asset.texture_set is not None:
+            texture_set = asset.texture_set
+            maps = "<br>".join(html.escape(line) for line in texture_set.describe().splitlines())
+            where = texture_set.assets[0]
+            place = f"Inside: {html.escape(where.archive.archive.name)}" if where.in_archive else f"Folder: {html.escape(str(where.path.parent))}"
+            return (
+                f"<b>{html.escape(texture_set.name)}</b> (texture set, {len(texture_set.maps)} files)<br>{maps}<br>{place}"
+                "<br>Double-click for the material on a sphere"
+            )
         tags = self.library.tags.get(self.library.ids.get(str(asset.path)), [])
         tag_line = f"<br>Tags: {', '.join(t.name for t in tags)}" if tags else ""
         marks = self._marks_of(asset)
@@ -1376,6 +1426,9 @@ class MainWindow(QMainWindow):
 
     def _open_viewer(self, asset: AssetItem) -> None:
         """Open the interactive AssetViewerDialog modal for the given asset (an archive: look inside it)."""
+        if asset.texture_set is not None:
+            self._open_material(asset.texture_set)
+            return
         if asset.is_archive:
             if asset.in_archive:
                 self.status_label.setText(
@@ -1553,8 +1606,8 @@ class MainWindow(QMainWindow):
 
     def _send_files(self, paths: list[Path]) -> list[Path]:
         """Send to Artbook: the real files for the paths chosen (files inside archives unpacked)."""
-        assets = [self.grid_model.asset_at(row) for row in (self.grid_model.row_of(str(p)) for p in paths) if row is not None]
-        return self._unpack_now([a for a in assets if a is not None], "send")
+        known = {str(a.path): a for a in files_of(self.grid_model.assets())}  # (a set card's maps too)
+        return self._unpack_now([known[str(p)] for p in paths if str(p) in known], "send")
 
     def _open_external(self, asset: AssetItem) -> None:
         """Open with the app Windows uses for the file (inside an archive: unpacked first, with progress)."""
@@ -1658,6 +1711,9 @@ class MainWindow(QMainWindow):
             if shortcuts.matches("main.favorite", event):
                 self._toggle_favorite()
                 return True
+            if shortcuts.matches("main.rename", event):
+                self._rename_selected()
+                return True
             for shortcut_id, rating in RATING_SHORTCUTS:
                 if shortcuts.matches(shortcut_id, event):
                     self._set_rating(rating)
@@ -1669,8 +1725,135 @@ class MainWindow(QMainWindow):
         rows = sorted(index.row() for index in self.list_grid.selectionModel().selectedIndexes())
         return [a for a in (self.grid_model.asset_at(r) for r in rows) if a is not None]
 
+    # ------------------------------------------------------------------
+    # Texture sets (core.texture_sets): the material window, and making it a material in Blender / Maya
+    # ------------------------------------------------------------------
+    def _open_material(self, texture_set: TextureSet) -> None:
+        from ui.material_view import MaterialViewerDialog
+
+        first = texture_set.assets[0]
+        dialog = MaterialViewerDialog(
+            texture_set, self, hdri_assets=lambda: self.library.assets,
+            send=lambda app_id, choices, flip: self._send_material(texture_set, app_id, choices, flip),
+            reveal=lambda: self._reveal_in_explorer(first.archive.archive if first.in_archive else first.path),
+        )
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _send_material(self, texture_set: TextureSet, app_id: str, choices: Optional[dict] = None,
+                       flip: Optional[bool] = None) -> None:
+        """Make the set a material in the Blender / Maya that's open (through its helper: Settings > Apps)."""
+        name = "Blender" if app_id == "blender" else "Maya"
+        program = apps.program(app_id)
+        if not app_helpers.is_installed(app_id, program):
+            self.status_label.setText(f"Install the {name} helper first (Settings > Apps), then start {name}.")
+            return
+        app_helpers.refresh(app_id, program)
+        version = app_helpers.open_window_version(app_id)
+        if version is None:
+            self.status_label.setText(f"Start {name} first: the material is made in the {name} that's open.")
+            return
+        if version < app_helpers.MATERIAL_VERSION:
+            self.status_label.setText(f"The {name} helper was updated: restart {name} once, then send the material again.")
+            return
+        if choices is None:
+            choices = {role: chosen[0] for role in texture_set.roles if (chosen := texture_set.choice(role))}
+        shader = get_maya_material() if app_id == "maya" else "principled"
+        used = [m.asset for m in choices.values()]
+        if texture_set.tiles:  # (a UDIM set: every tile of the maps used must be there as files)
+            used = [m.asset for role, m in choices.items() for m in texture_set.choice(role)] or used
+
+        def send(paths: list[Path]) -> None:
+            files = {str(asset.path): path for asset, path in zip(used, paths)}
+            request = app_helpers.material_request(texture_set, files, shader, choices, flip)
+            try:
+                app_helpers.send_material(app_id, request)
+            except OSError as exc:
+                self.status_label.setText(f"Couldn't ask {name}: {exc}")
+                return
+            what = "an aiStandardSurface" if shader == "arnold" else "a standardSurface" if shader == "standard" else "a Principled BSDF"
+            self.status_label.setText(f"Sent {texture_set.name} to {name}: it's made as {what}, on the selected objects there.")
+
+        if any(a.in_archive for a in used):
+            self._unpack_then(used, "material", send)
+        else:
+            send([a.path for a in used])
+
+    def _unpack_then(self, assets: list[AssetItem], what: str, then) -> None:
+        """then(real files, in order) once the ones inside archives are unpacked."""
+        paths = self._unpack_now(assets, what)
+        if len(paths) == len(assets):
+            then(paths)
+
+    # ------------------------------------------------------------------
+    # Batch rename and convert (core.batch_rename, core.batch_convert)
+    # ------------------------------------------------------------------
+    def _sets_by_file(self) -> dict[str, TextureSet]:
+        return {str(a.path): s for s in self._texture_sets() for a in s.assets}
+
+    def _rename_selected(self) -> None:
+        from ui.batch_dialogs import RenameDialog
+
+        files = [a for a in self._selected_files() if not a.in_archive]
+        if not files:
+            self.status_label.setText("Files inside archives can't be renamed.")
+            return
+        dialog = RenameDialog(files, self._sets_by_file(), self)
+        accepted = dialog.exec() == RenameDialog.DialogCode.Accepted
+        rows = dialog.plan().renames
+        dialog.deleteLater()
+        if not accepted or not rows:
+            return
+        try:
+            done = batch_rename.apply(rows)
+        except OSError as exc:
+            QMessageBox.warning(self, "Rename", f"The files couldn't be renamed (nothing was changed):\n{exc}")
+            return
+        self._after_rename(done)
+        missed = len(rows) - len(done)
+        self.status_label.setText(
+            f"Renamed {len(done)} file{'s' if len(done) != 1 else ''}." + (f" {missed} couldn't be (in use?)." if missed else "")
+            + " Ctrl+Z undoes it."
+        )
+
+        def undo() -> None:
+            back = batch_rename.undo(done)
+            self._after_rename(back)
+
+        def redo() -> None:
+            again = batch_rename.apply([batch_rename.RenameRow(batch_rename._FakeAsset(old), new.name) for old, new in done])
+            self._after_rename(again)
+
+        self.undo_history.push(UndoStep(f"renaming {len(done)} file{'s' if len(done) != 1 else ''}", undo, redo))
+
+    def _after_rename(self, moves: list[tuple[Path, Path]]) -> None:
+        """Files were renamed: their database rows follow (tags, ratings), and their folders are scanned."""
+        if not moves:
+            return
+        self.repo.move_asset_paths(moves)
+        for old, _new in moves:
+            self.thumbnail_manager.invalidate(str(old))
+        self.library.rescan_folders(sorted({new.parent for _old, new in moves}))
+
+    def _convert_selected(self) -> None:
+        from ui.batch_dialogs import ConvertDialog
+
+        pictures = [a for a in self._selected_files() if a.is_texture]
+        if not pictures:
+            return
+        dialog = ConvertDialog(pictures, self._sets_by_file(), self)
+        dialog.exec()
+        made = len(dialog.created)
+        dialog.deleteLater()
+        if made:
+            self.status_label.setText(f"Made {made} new file{'s' if made != 1 else ''} (the originals are as they were).")
+
+    def _selected_files(self) -> list[AssetItem]:
+        """The selected files: a texture set's card counts as its maps."""
+        return files_of(self._selected_assets())
+
     def _selected_asset_ids(self) -> list[int]:
-        return [self.library.ids[str(a.path)] for a in self._selected_assets() if str(a.path) in self.library.ids]
+        return [self.library.ids[str(a.path)] for a in self._selected_files() if str(a.path) in self.library.ids]
 
     def _toggle_favorite(self) -> None:
         ids = self._selected_asset_ids()
@@ -1759,13 +1942,16 @@ class MainWindow(QMainWindow):
             open_in=lambda app: self._open_in(asset, app),
             import_board=lambda: self._open_board(asset, again=True),
             use_as_lighting=lambda: self._use_as_viewer_lighting(asset),
-            find_similar=lambda: self._find_similar(asset),
+            find_similar=(lambda: self._find_similar(asset)) if asset.texture_set is None else None,
+            rename=self._rename_selected,
+            convert=self._convert_selected,
+            send_material=(lambda app_id: self._send_material(asset.texture_set, app_id)) if asset.texture_set is not None else None,
             colors=look.colors if (look := self.library.look_of(asset)) is not None else (),
             search_color=self._search_color,
             add_folder_rule=lambda: self._add_folder_rule(asset),
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
-        menu = build_asset_menu(self, asset, self._selected_assets(), marks, actions, self.artbook_sender)
+        menu = build_asset_menu(self, asset, self._selected_files(), marks, actions, self.artbook_sender)
         menu.exec(self.list_grid.mapToGlobal(pos))
         menu.deleteLater()  # (its actions belong to it: nothing is left behind on the window)
 
@@ -1779,7 +1965,7 @@ class MainWindow(QMainWindow):
         """
         if assets is None:
             assets = self._selected_assets()
-        ids = [self.library.ids[str(a.path)] for a in assets if str(a.path) in self.library.ids]
+        ids = [self.library.ids[str(a.path)] for a in files_of(assets) if str(a.path) in self.library.ids]
         if not ids:
             QMessageBox.information(self, "Tags Unavailable", "These files aren't in the tag database yet. Try Refresh.")
             return None

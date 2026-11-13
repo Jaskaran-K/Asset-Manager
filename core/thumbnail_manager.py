@@ -663,6 +663,7 @@ class _ThumbnailRunnable(QRunnable):
     def __init__(
         self, request: _Request, asset: AssetItem, size: int, cache_file: Optional[Path],
         style: dict[str, QColor], render_model: bool = False, relief: bool = False, alpha: Optional[bool] = None,
+        label: str = "",
     ):
         """relief: an image that's an alpha is drawn as a lit relief; alpha: whether it is one, if
         known (the library's file details), else it's found out here."""
@@ -673,7 +674,7 @@ class _ThumbnailRunnable(QRunnable):
         self.cache_file = cache_file
         self.style = style  # the card colors when it was asked for (taken on the UI thread)
         self.render_model = render_model  # a 3D model without a companion picture: render one
-        self.label = ""  # the badge's text, if not the file type ("ZIP · 124")
+        self.label = label  # the badge's text, if not the file type ("ZIP · 124", "SET · 6")
         self.relief = relief and (asset.is_texture or asset.is_app_file)
         self.alpha = alpha
         self._relief_file: Optional[Path] = None  # where a relief picture is cached
@@ -923,6 +924,10 @@ class ThumbnailManager(QObject):
 
         self._sizes[cache_key] = size
         request = self._pending.get(cache_key)
+        label = ""
+        if asset.texture_set is not None:  # a texture set's card: its cover file's picture, with its own badge
+            label = f"SET \u00b7 {len(asset.texture_set.maps)}"
+            asset = asset.texture_set.cover
         if request is not None:
             request.last_asked = time.monotonic()  # still on screen
         elif self._needs_async(asset, size):
@@ -936,7 +941,7 @@ class ThumbnailManager(QObject):
             )
             self._start(_ThumbnailRunnable(
                 request, asset, size, cache_file, card_style(), render_model=rendered,
-                relief=relief, alpha=self.alpha_of(asset) if relief and asset.is_texture else None,
+                relief=relief, alpha=self.alpha_of(asset) if relief and asset.is_texture else None, label=label,
             ), rendered)
 
         return self.placeholder(asset, size)

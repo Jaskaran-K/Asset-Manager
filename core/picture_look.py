@@ -306,21 +306,21 @@ def _shrink(pixels: np.ndarray, side: int = SIDE) -> np.ndarray:
 Pixels = tuple[np.ndarray, Optional[np.ndarray], bool]  # (rgb, opacity, precise: more than 8 bits)
 
 
-def _from_pil(im: Image.Image) -> Pixels:
-    """(rgb float 0..1 (h, w, 3), opacity 0..1 (h, w) or None, precise) at about SIDE, precision kept."""
+def _from_pil(im: Image.Image, side: int = SIDE) -> Pixels:
+    """(rgb float 0..1 (h, w, 3), opacity 0..1 (h, w) or None, precise) at about side, precision kept."""
     if im.format == "JPEG":
-        im.draft("RGB", (SIDE, SIDE))  # (decoded at a fraction of its size)
-    elif max(im.size) > SIDE * 4:
+        im.draft("RGB", (side, side))  # (decoded at a fraction of its size)
+    elif max(im.size) > side * 4:
         try:  # whole blocks averaged by Pillow before any copy is made (a big 16-bit PNG took 1 GB as floats)
-            im = im.reduce(max(im.size) // (SIDE * 2))
+            im = im.reduce(max(im.size) // (side * 2))
         except (ValueError, NotImplementedError):
             pass  # (modes reduce doesn't do: _shrink skips rows and columns instead)
     mode = im.mode
     if mode.startswith("I;16"):
-        grey = _shrink(np.asarray(im)) / 65535.0
+        grey = _shrink(np.asarray(im), side) / 65535.0
         return np.repeat(grey[..., None], 3, axis=2), None, True
     if mode in ("I", "F"):  # (a 16-bit grey PNG opens as "I")
-        grey = _shrink(np.asarray(im, dtype=np.float32))
+        grey = _shrink(np.asarray(im, dtype=np.float32), side)
         top = float(grey.max())
         if mode == "F":
             scale = 1.0 if top <= 1.0 else top
@@ -329,45 +329,58 @@ def _from_pil(im: Image.Image) -> Pixels:
         grey = np.clip(grey / scale, 0.0, 1.0)
         return np.repeat(grey[..., None], 3, axis=2), None, scale != 255.0
     if mode in ("1", "L"):
-        grey = _shrink(np.asarray(im.convert("L"))) / 255.0
+        grey = _shrink(np.asarray(im.convert("L")), side) / 255.0
         return np.repeat(grey[..., None], 3, axis=2), None, False
     if mode not in ("RGB", "RGBA"):
         im = im.convert("RGBA") if mode in ("LA", "PA", "P", "RGBa", "La") or "transparency" in im.info else im.convert("RGB")
-    pixels = _shrink(np.asarray(im)) / 255.0
+    pixels = _shrink(np.asarray(im), side) / 255.0
     if pixels.shape[2] == 4:
         return pixels[..., :3], pixels[..., 3], False
     return pixels[..., :3], None, False
 
 
-def _from_psd(source) -> Pixels:
+def _from_psd(source, side: int = SIDE) -> Pixels:
     from .psd_reader import read_psd_composite, read_psd_planes
 
     try:
-        planes, depth, color_mode, _base = read_psd_planes(source, max_size=SIDE)
+        planes, depth, color_mode, _base = read_psd_planes(source, max_size=side)
     except Exception:  # pylint: disable=broad-except
-        with read_psd_composite(source, max_size=SIDE) as im:
-            return _from_pil(im)
+        with read_psd_composite(source, max_size=side) as im:
+            return _from_pil(im, side)
     scale = {8: 255.0, 16: 65535.0, 32: 1.0}.get(depth, 255.0)
     if color_mode in (1, 8):  # grayscale, duotone
-        grey = np.clip(_shrink(planes[0]) / scale, 0.0, 1.0)
+        grey = np.clip(_shrink(planes[0], side) / scale, 0.0, 1.0)
         return np.repeat(grey[..., None], 3, axis=2), None, depth > 8
     if color_mode == 3 and len(planes) >= 3:
-        return np.clip(_shrink(np.moveaxis(np.asarray(planes[:3]), 0, -1)) / scale, 0.0, 1.0), None, depth > 8
-    with read_psd_composite(source, max_size=SIDE) as im:  # (CMYK ...)
-        return _from_pil(im)
+        return np.clip(_shrink(np.moveaxis(np.asarray(planes[:3]), 0, -1), side) / scale, 0.0, 1.0), None, depth > 8
+    with read_psd_composite(source, max_size=side) as im:  # (CMYK ...)
+        return _from_pil(im, side)
 
 
-def _from_file(path: Path | str, name: str) -> Pixels:
+def _from_file(path: Path | str, name: str, side: int = SIDE, data: bool = False) -> Pixels:
+    """data: an EXR / HDR's values as they are (clipped to 0..1: a height map), not tone mapped for showing."""
     ext = Path(name).suffix.lower()
     if ext in (".psd", ".psb"):
-        return _from_psd(path)
+        return _from_psd(path, side)
     if ext in (".exr", ".hdr"):
-        from .hdr_image import read_hdr_image
+        from .hdr_image import _read_exr, _read_radiance, read_hdr_image
 
-        with read_hdr_image(path, max_size=SIDE) as im:
-            return _from_pil(im)
+        if data:
+            values = _read_exr(Path(path)) if ext == ".exr" else _read_radiance(Path(path), None)
+            values = np.clip(np.nan_to_num(np.asarray(values, dtype=np.float32)), 0.0, 1.0)
+            values = _shrink(values if values.ndim == 2 else values[..., :3], side)
+            rgb = np.repeat(values[..., None], 3, axis=2) if values.ndim == 2 else values
+            return rgb, None, True
+        with read_hdr_image(path, max_size=side) as im:
+            return _from_pil(im, side)
     with Image.open(path) as im:
-        return _from_pil(im)
+        return _from_pil(im, side)
+
+
+def read_scaled(path: Path | str, name: str, side: int, data: bool = False) -> Pixels:
+    """A picture at about side on its longest side (between side and twice it), precision kept: (rgb float
+    0..1, opacity or None, precise). Raises if it can't be read."""
+    return _from_file(path, name, side, data)
 
 
 def look_of_pixels(rgb: np.ndarray, opacity: Optional[np.ndarray] = None, precise: bool = False) -> Look:

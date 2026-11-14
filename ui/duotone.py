@@ -632,6 +632,15 @@ def _material(p, primary, secondary):
     p.fillPath(_circle(9, 7.6, 1.7), primary)  # its highlight
 
 
+def _web(p, primary, secondary):
+    """A globe: a web page (the browser extension, Open Source Page)."""
+    _body(p, _circle(12, 12, 8.5), secondary)
+    p.setPen(_pen(primary, 1.6))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(QRectF(8.3, 3.6, 7.4, 16.8))  # (a meridian)
+    _line(p, primary, 1.6, (3.9, 12), (20.1, 12))  # (the equator)
+
+
 def _spark(cx: float, cy: float, r: float) -> QPainterPath:
     """A four-pointed spark: long points, a pinched waist."""
     waist = r * 0.28
@@ -707,7 +716,7 @@ ICONS: dict[str, IconPainter] = {
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
     "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale, "similar": _similar, "material": _material,
-    "ai": _ai, "cutout": _cutout,
+    "ai": _ai, "cutout": _cutout, "web": _web,
 }
 
 

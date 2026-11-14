@@ -27,7 +27,7 @@ DEFAULT_ID = "default"
 DEFAULT_NAME = "Default"
 MAX_NAME_LENGTH = 40
 # The config keys a profile has its own of ("default_folder": the old single library folder)
-PROFILE_KEYS = ("scan_folders", "default_folder", "file_extensions", "categories", "defaults_seen")
+PROFILE_KEYS = ("scan_folders", "default_folder", "file_extensions", "categories", "defaults_seen", "web_folder")
 _BAD_NAME_CHARACTERS = '<>:"/\\|?*'  # (a profile's name goes in a desktop shortcut's file name)
 
 

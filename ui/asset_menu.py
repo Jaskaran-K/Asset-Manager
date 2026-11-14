@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from PySide6.QtGui import QGuiApplication, QImage
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage
 from PySide6.QtWidgets import QMenu, QWidget
 
 from core import app_helpers, apps, artbook_store
@@ -95,6 +96,25 @@ class ArtbookSender:
         self._status(message)
         return message
 
+    def send_pictures(self, pictures: list[tuple[bytes, str, str]]) -> None:
+        """Pictures sent from the browser (core.browser_link), as (data, extension, name), to the Artbook page
+        that's open, or the last one open."""
+        panel = self.panel
+        if panel.current_page_id() is None:
+            try:
+                panel.open_page(get_artbook_page())
+            except (artbook_store.PageError, OSError) as exc:
+                self._status(f"Couldn't open the Artbook page: {exc}")
+                return
+            if panel.current_page_id() is None:
+                self._status("The Artbook page couldn't be opened.")
+                return
+        panel.board.add_pictures_data(pictures)
+        count = len(pictures)
+        name = panel.page.get("name") or "Untitled"
+        hint = " Ctrl+2 shows the Artbook." if not panel.isVisible() else ""
+        self._status(f'Added {count} picture{"s" if count != 1 else ""} from the browser to "{name}".{hint}')
+
     def _open_page(self, page_id: Optional[str]) -> str:
         """Open an Artbook page to send things to (None: a new one): "" or what went wrong."""
         panel = self.panel
@@ -139,6 +159,7 @@ class AssetMenuActions:
     more_like: Optional[Callable[[], None]] = None  # AI Search: the files with the same kind of content
     remove_background: Optional[Callable[[], None]] = None  # cut-outs of the selected pictures (BEN2)
     send_material: Optional[Callable[[str], None]] = None  # a texture set: make it a material in "blender" / "maya"
+    source_page: Optional[str] = None  # the web page the browser extension saved it from (core.browser_link)
 
 
 def build_asset_menu(
@@ -211,6 +232,11 @@ def build_asset_menu(
 
     action_reveal = menu.addAction("Show Archive in File Explorer" if asset.in_archive else "Show in File Explorer")
     action_reveal.triggered.connect(actions.reveal)
+    if actions.source_page:
+        action_source = menu.addAction("Open Source Page")
+        set_icon(action_source, "web")
+        action_source.setToolTip(f"The page it was saved from: {actions.source_page[:200]}")
+        action_source.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(actions.source_page)))
 
     if actions.extract is not None and (archive or asset.in_archive):
         action_extract = menu.addAction("Extract To..." if archive else "Extract...")

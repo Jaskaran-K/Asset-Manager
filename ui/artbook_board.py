@@ -18,16 +18,11 @@ keyboard focus it takes its keys first, so Ctrl+Z undoes board changes, not libr
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import html as html_lib
-import io
 import math
 import os
 import re
 import time
-import urllib.parse
-import urllib.request
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -87,6 +82,7 @@ from PIL import Image
 
 from core import artbook_store as store
 from core import artbook_share, pur_import, video_tools
+from core.web_images import fetch_image as _fetch_image, is_web_url as _is_web_url, web_image_sources
 from core.settings import get_artbook_custom_grid, get_artbook_value_tones, set_artbook_custom_grid, set_artbook_value_tones
 from ui import animations, artbook_layout, file_actions, shortcuts
 from ui.artbook_note_bar import SWATCHES, NoteBar, swatch_icon
@@ -140,7 +136,6 @@ NOTE_BAR_GAP = 38  # px between the format bar and the note (room for the rotate
 _IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)  # a note never loads pictures from its HTML
 ROTATE_HANDLE_PX = 26.0  # how far above the image the rotate handle sits
 SCENE_EXTENT = 1_000_000.0
-MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 BASE_SIDE = 160  # every image keeps a copy this big (longest side): what shows from far away
 DETAIL_STEP = 1.15  # a sharper copy loads once an image shows this much bigger than the one it has
 DETAIL_MAX_BYTES = 256 * 1024 * 1024  # one image's sharp copy at most (about 8000 x 8000)
@@ -1233,88 +1228,6 @@ def _prepare_qimage(page_id: str, image: QImage) -> dict[str, Any]:
     return _prepare_bytes(page_id, store.encode_png(image), ".png")
 
 
-_IMG_SRC = re.compile(r"""<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
-_OG_IMAGE = re.compile(
-    r"""<meta\b[^>]*?(?:property|name)\s*=\s*["'](?:og:image|twitter:image)["'][^>]*?content\s*=\s*["']([^"']+)["']""",
-    re.IGNORECASE,
-)
-_DATA_URI = re.compile(r"data:image/([a-z0-9.+-]+);base64,(.+)", re.IGNORECASE | re.DOTALL)
-_BROWSER_UA = (  # some image hosts refuse requests that don't look like a browser
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
-)
-
-
-def web_image_sources(urls: list[str], html: str = "") -> list[str]:
-    """Where a dragged / pasted web image can be fetched from, best first.
-
-    Search results (Google Images and the like) hand over a link to a page, not the image;
-    the dragged picture comes along as HTML. So, in order: the real image a result link
-    wraps (?imgurl=), the HTML's <img> address, the image data embedded in the HTML (a
-    smaller copy, but always there), then the links themselves.
-    """
-    sources: list[str] = []
-
-    def add(url: str) -> None:
-        url = html_lib.unescape(url.strip())
-        if url and url not in sources and (_is_web_url(url) or url.startswith("data:image/")):
-            sources.append(url)
-
-    for url in urls:
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
-        for key in ("imgurl", "mediaurl", "img_url", "image_url"):
-            for value in query.get(key, []):
-                add(value)
-    embedded = []
-    for src in _IMG_SRC.findall(html or ""):
-        if _is_web_url(src):
-            add(src)
-        elif src.startswith("data:image/"):
-            embedded.append(src)
-    for src in embedded:
-        add(src)
-    for url in urls:
-        add(url)
-    return sources
-
-
-def _download(url: str) -> tuple[bytes, str]:
-    request = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA, "Accept": "image/*,*/*;q=0.8"})
-    with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310 (http(s) only: web_image_sources)
-        data = response.read(MAX_DOWNLOAD_BYTES + 1)
-        kind = response.headers.get_content_type()
-    if len(data) > MAX_DOWNLOAD_BYTES:
-        raise store.PageError("That image is too big to download (over 64 MB).")
-    return data, kind
-
-
-def _image_ext(data: bytes) -> Optional[str]:
-    """".png" etc. if data is an image Pillow can open (whatever the server called it), else None."""
-    try:
-        with Image.open(io.BytesIO(data)) as im:
-            return "." + (im.format or "img").lower().replace("jpeg", "jpg")
-    except Exception:  # pylint: disable=broad-except
-        return None
-
-
-def _fetch_image(url: str) -> tuple[bytes, str]:
-    """(image data, extension) from a data: URI or a web address. A web page's preview image
-    (og:image) stands in when the address is a page rather than an image."""
-    match = _DATA_URI.match(url)
-    if match:
-        data = base64.b64decode(match.group(2))
-    else:
-        data, kind = _download(url)
-        if _image_ext(data) is None and kind in ("text/html", "application/xhtml+xml"):
-            page = data[:2_000_000].decode("utf-8", errors="replace")
-            preview = _OG_IMAGE.search(page)
-            if preview:
-                data, _kind = _download(urllib.parse.urljoin(url, html_lib.unescape(preview.group(1))))
-    ext = _image_ext(data)
-    if ext is None:
-        raise store.PageError("That link isn't an image.")
-    return data, ext
-
-
 def _prepare_web(page_id: str, sources: list[str]) -> dict[str, Any]:
     """The first source that gives a usable image, stored in full (it has no file to link to)."""
     error = "Nothing to download."
@@ -1499,10 +1412,6 @@ def find_files(folder: Path, names: set[str], limit: int = RELINK_SCAN_LIMIT) ->
         if len(found) == len(wanted) or seen > limit:
             break
     return found
-
-
-def _is_web_url(text: str) -> bool:
-    return text.startswith(("http://", "https://"))
 
 
 class BoardView(QGraphicsView):
@@ -2126,6 +2035,13 @@ class BoardView(QGraphicsView):
         self._start_batch(at)
         copy = QImage(image)  # the clipboard's image may change before the worker reads it
         self._prepare(lambda page_id: {**_prepare_qimage(page_id, copy), "name": name})
+
+    def add_pictures_data(self, pictures: list[tuple[bytes, str, str]], at: Optional[QPointF] = None) -> None:
+        """Pictures as file data, each (data, extension, name), in a row: sent from the browser
+        (core.browser_link). Stored in full: there's no file to link to."""
+        self._start_batch(at)
+        for data, ext, name in pictures:
+            self._prepare(lambda page_id, d=data, e=ext, n=name: {**_prepare_bytes(page_id, d, e), "name": n})
 
     def add_web_image(self, sources: list[str], at: Optional[QPointF] = None) -> None:
         """One image from the web: the first of `sources` (web_image_sources) that works."""

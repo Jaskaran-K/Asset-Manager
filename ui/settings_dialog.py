@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -65,13 +66,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import app_helpers, apps, archives, artbook_store, crash_log
+from core import app_helpers, apps, archives, artbook_store, browser_link, crash_log
 from core.scanner import AssetItem
 from core import category_rules, folder_rules, profiles, storage
 from core.profiles import Profile, ProfileError
 from core.settings import (
     get_maya_material,
     set_maya_material,
+    WEB_FOLDER_NAME,
+    get_chosen_web_folder,
+    get_web_folder,
+    set_web_folder,
     DEFAULT_CATEGORIES,
     DEFAULT_FILE_EXTENSIONS,
     MAX_CATEGORY_ICON_BYTES,
@@ -1469,6 +1474,179 @@ class ArchivesPage(QWidget):
 
 
 # ----------------------------------------------------------------------
+# General > Browser
+# ----------------------------------------------------------------------
+class BrowserPage(QWidget):
+    """The browser extension (core.browser_link): where its pictures go in this profile, and setting it up."""
+
+    def __init__(self, web_folder: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        from ui import browser_inbox
+
+        self._inbox = browser_inbox
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        layout.addWidget(_page_header(
+            "Browser",
+            "Right-click a picture on a web page in Chrome or Opera GX > Asset Manager > Save to Library, or Add to "
+            "Artbook Page (the page that's open). The app needn't be open: library pictures are saved anyway, "
+            "and Artbook ones go on the page when it next opens.",
+        ))
+
+        layout.addWidget(VideoPage._section_label("Library pictures go to"))
+        row = QHBoxLayout()
+        self.txt_folder = QLineEdit(web_folder)
+        self.txt_folder.textChanged.connect(self._update_folder_hint)
+        btn_browse = QPushButton("Browse...")
+        btn_browse.setToolTip("Pick the folder web pictures are saved in")
+        btn_browse.clicked.connect(self._on_browse)
+        row.addWidget(self.txt_folder, 1)
+        row.addWidget(btn_browse)
+        layout.addLayout(row)
+        self.lbl_folder = IconLabel(text_name="pageHint")
+        self.lbl_folder.label.setWordWrap(True)
+        layout.addWidget(self.lbl_folder)
+        layout.addSpacing(10)
+
+        layout.addWidget(VideoPage._section_label("Chrome and Opera GX"))
+        self.lbl_status = IconLabel(text_name="pageHint")
+        self.lbl_status.label.setWordWrap(True)
+        layout.addWidget(self.lbl_status)
+        buttons = QHBoxLayout()
+        self.btn_set_up = QPushButton("Set Up")
+        self.btn_set_up.setToolTip(
+            "Lets the extension reach the app (for this Windows user only; no admin rights), and makes the "
+            "extension's folder for the browser to load"
+        )
+        self.btn_set_up.clicked.connect(self._on_set_up)
+        self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setToolTip("Undo Set Up (then remove the extension in the browser too)")
+        self.btn_remove.clicked.connect(self._on_remove)
+        buttons.addWidget(self.btn_set_up)
+        buttons.addWidget(self.btn_remove)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.steps = QWidget(self)
+        steps = QVBoxLayout(self.steps)
+        steps.setContentsMargins(0, 6, 0, 0)
+        steps.setSpacing(6)
+        how = QLabel(
+            "Then, in each browser:<br>"
+            "1. Open its extensions page (the buttons below, or type the address).<br>"
+            "2. Turn on <b>Developer mode</b>.<br>"
+            "3. Click <b>Load unpacked</b> and pick the extension's folder (Copy Folder Path, then paste it in).<br>"
+            "4. Right-click any picture on a web page: <b>Asset Manager</b> is in the menu."
+        )
+        how.setObjectName("pageHint")
+        how.setWordWrap(True)
+        steps.addWidget(how)
+        self.txt_extension = QLineEdit(str(browser_link.extension_folder()))
+        self.txt_extension.setReadOnly(True)
+        steps.addWidget(self.txt_extension)
+        open_row = QHBoxLayout()
+        btn_copy = QPushButton("Copy Folder Path")
+        btn_copy.setToolTip("Copy the extension's folder, to paste in the browser's Load unpacked window")
+        btn_copy.clicked.connect(self._on_copy)
+        open_row.addWidget(btn_copy)
+        self.browser_buttons: list[QPushButton] = []
+        for name, exe, address in browser_inbox.BROWSERS:
+            button = QPushButton(f"Open {name}'s Extensions")
+            button.setToolTip(f"Opens {address} in {name}")
+            button.clicked.connect(lambda _checked=False, e=exe, a=address, n=name: self._on_open_browser(n, e, a))
+            button.setEnabled(browser_inbox.browser_program(exe) is not None)
+            open_row.addWidget(button)
+            self.browser_buttons.append(button)
+        open_row.addStretch(1)
+        steps.addLayout(open_row)
+        self.lbl_opened = QLabel("")
+        self.lbl_opened.setObjectName("pageHint")
+        self.lbl_opened.setWordWrap(True)
+        steps.addWidget(self.lbl_opened)
+        layout.addWidget(self.steps)
+        layout.addStretch(1)
+
+        self._update_folder_hint()
+        self._update_status()
+
+    def web_folder(self) -> str:
+        return self.txt_folder.text().strip()
+
+    def _on_browse(self) -> None:
+        start = self.web_folder() or str(get_web_folder() or Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Save web pictures in", start)
+        if chosen:
+            self.txt_folder.setText(str(Path(chosen)))
+
+    def _update_folder_hint(self) -> None:
+        folders = get_scan_folders()
+        chosen = Path(self.web_folder()) if self.web_folder() else (folders[0] / WEB_FOLDER_NAME if folders else None)
+        self.txt_folder.setPlaceholderText(str(chosen) if chosen is not None else "Add a library folder first")
+        if chosen is None:
+            self.lbl_folder.set_icon("close", "danger")
+            self.lbl_folder.setText("This profile has no library folder yet: add one on the Folders page.")
+        elif not any(_inside(chosen, f) for f in folders):
+            self.lbl_folder.set_icon("warning", "warning")
+            self.lbl_folder.setText(
+                "That folder isn't in one of this profile's library folders, so its pictures won't show in the "
+                "library. Pick one inside a library folder, or add it on the Folders page."
+            )
+        else:
+            self.lbl_folder.set_icon("check", "success")
+            self.lbl_folder.setText(
+                "Each site gets a folder of its own in it (artstation.com, pinterest.com). The page a picture "
+                "came from is kept: right-click it > Open Source Page. Leave the box empty for the default."
+            )
+
+    def _update_status(self) -> None:
+        ready = browser_link.is_set_up()
+        self.btn_set_up.setText("Set Up Again" if ready else "Set Up")
+        self.btn_remove.setEnabled(ready)
+        self.steps.setVisible(ready)
+        if not ready:
+            self.lbl_status.set_icon("close", "danger")
+            self.lbl_status.setText("Not set up yet.")
+            return
+        used = browser_link.last_used()
+        when = time.strftime("%d %b %Y at %H:%M", time.localtime(used)) if used else ""
+        self.lbl_status.set_icon("check", "success")
+        self.lbl_status.setText(
+            f"Set up. The extension last reached the app on {when}." if used
+            else "Set up. The extension hasn't reached the app yet: load it in the browser (below)."
+        )
+
+    def _on_set_up(self) -> None:
+        try:
+            self._inbox.set_up()
+        except OSError as exc:
+            QMessageBox.warning(self, "Browser", f"Couldn't set it up: {exc}")
+        self._update_status()
+
+    def _on_remove(self) -> None:
+        browser_link.remove()
+        self._update_status()
+
+    def _on_copy(self) -> None:
+        QApplication.clipboard().setText(self.txt_extension.text())
+        self.lbl_opened.setText("Copied the folder's path.")
+
+    def _on_open_browser(self, name: str, exe: str, address: str) -> None:
+        if self._inbox.open_extensions_page(exe, address):
+            self.lbl_opened.setText(f"Opened {name}. If its extensions page didn't show, type {address} in its address bar.")
+        else:
+            self.lbl_opened.setText(f"{name} wasn't found on this computer.")
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+# ----------------------------------------------------------------------
 # General > Storage
 # ----------------------------------------------------------------------
 class StoragePage(QWidget):
@@ -2860,6 +3038,7 @@ class SettingsDialog(QDialog):
         self.page_archives = ArchivesPage(self._orig_seven_zip_path, self._orig_archive_contents)
         self.page_apps = AppsPage(get_found_apps(), get_app_choices(), get_custom_apps(), get_app_types())
         self.page_artbook = ArtbookPage(artbook)
+        self.page_browser = BrowserPage(get_chosen_web_folder())
         self.page_profiles = ProfilesPage(get_repository())
         self.page_shortcuts = ShortcutsPage()
         self.page_storage = StoragePage(self._orig_unpacked_limit)
@@ -2876,10 +3055,10 @@ class SettingsDialog(QDialog):
         self.page_tags.tag_deleted.connect(self.page_rules.remove_tag)
         # (Folders, Files and Categories belong to the profile in use: they say which)
         in_use = profiles.current_profile().name
-        for page in (self.page_folders, self.page_files, self.page_categories):
+        for page in (self.page_folders, self.page_files, self.page_categories, self.page_browser):
             note = QLabel(
-                f"Profile: <b>{html.escape(in_use)}</b>. Each profile has its own folders, file types and "
-                "categories (Settings > Profiles)."
+                f"Profile: <b>{html.escape(in_use)}</b>. Each profile has its own folders, file types, "
+                "categories and web pictures folder (Settings > Profiles)."
             )
             note.setObjectName("mutedLabel")
             note.setWordWrap(True)
@@ -2916,6 +3095,7 @@ class SettingsDialog(QDialog):
             ("Archives", self.page_archives),
             ("Apps", self.page_apps),
             ("Artbook", self.page_artbook),
+            ("Browser", self.page_browser),
             ("Tags", self.page_tags),
             ("Shortcuts", self.page_shortcuts),
             ("Storage", self.page_storage),
@@ -3063,6 +3243,8 @@ class SettingsDialog(QDialog):
 
         if self.folders_changed:
             set_scan_folders(folders)
+        if self.page_browser.web_folder() != get_chosen_web_folder():
+            set_web_folder(self.page_browser.web_folder())
         if self.extensions_changed:
             set_file_extensions(extensions)
         if self.categories_changed or self.extensions_changed:

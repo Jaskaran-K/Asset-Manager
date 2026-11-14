@@ -14,11 +14,19 @@ The main window puts the parts together and runs what the user asks for. The par
 
 from __future__ import annotations
 
-import dataclasses
-import html
-import os
 import sys
-import threading
+
+if __name__ == "__main__" and any(arg.startswith("chrome-extension://") for arg in sys.argv[1:]):
+    # The browser extension's helper (core.browser_link), started by Chrome / Opera GX for each picture sent: it
+    # answers before the window's modules (Qt, numpy...) load, in 0.1 s instead of 0.8.
+    from core.browser_link import run_host
+
+    sys.exit(run_host())
+
+import dataclasses  # noqa: E402 (after the browser helper's early exit above)
+import html  # noqa: E402
+import os  # noqa: E402
+import threading  # noqa: E402
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -88,7 +96,7 @@ from core.settings import (
     set_scan_folders,
 )
 from core.picture_look import find_similar, hex_of
-from core import ai_helper, ai_search, app_helpers, batch_rename
+from core import ai_helper, ai_search, app_helpers, batch_rename, browser_link
 from core.texture_sets import TextureSet, files_of, find_sets, group_into_sets
 from core.search_query import ParsedQuery, parse_query
 from core.tag_repository import NO_MARKS, Marks, SavedSearch, Tag, TagChange, get_repository, is_damage_error
@@ -101,6 +109,8 @@ from ui.archive_jobs import unpack_in_background
 from ui.artbook import ArtbookPanel
 from ui.asset_grid import ASSET_ROLE, AssetCardDelegate, AssetListModel, GridView, rating_text
 from ui.asset_menu import RATING_SHORTCUTS, ArtbookSender, AssetMenuActions, build_asset_menu
+from ui import browser_inbox
+from ui.browser_inbox import BrowserLinkWorker
 from ui.duotone import set_icon
 from ui import file_actions
 from ui.glass import set_frost
@@ -266,6 +276,10 @@ class MainWindow(QMainWindow):
         self.artbook_panel = ArtbookPanel()
         # Sends images from the grid, and PDF pages from the viewer, to Artbook pages
         self.artbook_sender = ArtbookSender(self.artbook_panel, self._show_status)
+        # Pictures sent from the browser extension (core.browser_link): the helper saves them, the app hears of it
+        self.browser_worker = BrowserLinkWorker(self)
+        self.browser_worker.arrived.connect(self._on_browser_arrived)
+        self.browser_worker.start()
         if pages_note:
             self.artbook_panel.board.show_message(pages_note)
         self.view_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -340,6 +354,28 @@ class MainWindow(QMainWindow):
             self._view_restored = True
             QTimer.singleShot(0, self.view_modes.restore)
             self._find_apps_timer.start()
+            QTimer.singleShot(0, self._after_start_browser)
+
+    def _after_start_browser(self) -> None:
+        """Pictures sent to the Artbook while the app was closed go on the page now, and the extension's setup
+        follows this copy of the app (another folder, a newer version)."""
+        self._take_browser_pictures()
+        try:
+            browser_inbox.refresh_if_needed()
+        except OSError as exc:
+            crash_log.log_error(f"Browser extension: couldn't refresh its setup: {exc}")
+
+    def _on_browser_arrived(self, message: dict) -> None:
+        """The browser extension saved a picture (core.browser_link; on the UI thread: BrowserLinkWorker)."""
+        if message.get("op") == "artbook":
+            self._take_browser_pictures()
+        elif message.get("op") == "library" and isinstance(message.get("path"), str):
+            self._show_status(f"Saved from the browser: {Path(message['path']).name}")
+
+    def _take_browser_pictures(self) -> None:
+        pictures = browser_link.take_inbox()
+        if pictures:
+            self.artbook_sender.send_pictures(pictures)
 
     def _find_apps(self) -> None:
         run_job(apps.detect, self._on_apps_found)
@@ -2137,6 +2173,7 @@ class MainWindow(QMainWindow):
             colors=look.colors if (look := self.library.look_of(asset)) is not None else (),
             search_color=self._search_color,
             add_folder_rule=lambda: self._add_folder_rule(asset),
+            source_page=self.repo.web_page_of(asset.path) if not asset.in_archive and asset.texture_set is None else None,
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
         menu = build_asset_menu(self, asset, self._selected_files(), marks, actions, self.artbook_sender)
@@ -2235,6 +2272,7 @@ class MainWindow(QMainWindow):
         self.thumbnail_manager.shutdown()
         wait_for_background()
         ai_helper.close()
+        self.browser_worker.stop()
         self.artbook_panel.save_now()  # after background jobs, so an older autosave can't land on top
         super().closeEvent(event)
 

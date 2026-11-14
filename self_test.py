@@ -212,6 +212,54 @@ def run_self_test(log_path: Optional[str]) -> int:
             return f"the helper answers; AI Search ran on the {device}"
         return f"the helper answers; ONNX Runtime {ai_tools.RUNTIME_VERSION} and the models download on first use"
 
+    def check_browser_link():
+        # The browser extension's helper (core.browser_link): the browser starts this app through cmd with the
+        # extension's origin and talks over its standard input and output, which the windowed build must have.
+        # Run that way, in a temp home and data folder, it must answer and save a picture; the extension's files
+        # must be in the build.
+        import base64
+        import io
+        import json
+        import struct
+        import subprocess
+        import time
+
+        from PIL import Image
+
+        from core import browser_link
+
+        bundled = browser_link.bundled_extension()
+        if not (bundled / "manifest.json").is_file() or not (bundled / "background.js").is_file():
+            raise RuntimeError(f"the browser extension's files aren't in the build ({bundled})")
+        command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve().parent / "main.py")]
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), (200, 30, 30)).save(buffer, "PNG")
+        messages = [
+            {"op": "hello"},
+            {"op": "save", "target": "library", "page": "https://example.com/art", "title": "Self-test",
+             "sources": ["data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()]},
+        ]
+        payload = b"".join(struct.pack("=I", len(b)) + b for b in (json.dumps(m).encode() for m in messages))
+        with tempfile.TemporaryDirectory() as tmp:
+            home, library = Path(tmp) / "home", Path(tmp) / "Library"
+            home.mkdir()
+            (home / ".3d_asset_manager_config.json").write_text(json.dumps({"scan_folders": [str(library)]}), encoding="utf-8")
+            env = dict(os.environ, USERPROFILE=str(home), LOCALAPPDATA=str(Path(tmp) / "local"))
+            line = subprocess.list2cmdline(command + [f"chrome-extension://{browser_link.EXTENSION_ID}/", "--parent-window=0"])
+            started = time.perf_counter()
+            done = subprocess.run(f'cmd /d /c "{line}"', input=payload, capture_output=True, env=env, timeout=120,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            took = time.perf_counter() - started
+            replies, out = [], done.stdout
+            while len(out) >= 4:
+                (size,) = struct.unpack("=I", out[:4])
+                replies.append(json.loads(out[4:4 + size]))
+                out = out[4 + size:]
+            saved = library / "Web Images" / "example.com" / "Self-test.png"
+            if len(replies) != 2 or not replies[0].get("ok") or not replies[1].get("ok") or not saved.is_file():
+                raise RuntimeError(f"the browser helper answered {replies!r} (exit {done.returncode}, {done.stderr[-300:]!r})")
+        return f"the helper answers the browser and saves a picture ({took:.2f} s to start and answer)"
+
     def check_model_reader():
         # 3D models are read in a helper program (this app again, with --model-reader): it must start, read a
         # model and send it back, from the build as it ships
@@ -357,6 +405,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("upscaling", check_upscale)
     step("model reader", check_model_reader)
     step("AI tools", check_ai_tools)
+    step("browser extension", check_browser_link)
     step("colours and look-alikes", check_picture_looks)
     step("texture sets and batch convert", check_texture_sets)
     step("image thumbnails", check_images)

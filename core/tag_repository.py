@@ -151,6 +151,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE assets ADD COLUMN ai_vector BLOB;
     ALTER TABLE assets ADD COLUMN ai_key TEXT;
     """,
+    # v10: the web page a picture was saved from by the browser extension (core.browser_link): Open Source Page
+    """
+    ALTER TABLE assets ADD COLUMN web_page TEXT;
+    """,
 ]
 
 
@@ -1190,6 +1194,22 @@ class TagRepository:
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
+    def set_web_page(self, path: Path | str, page: str) -> None:
+        """The web page a picture came from (the browser extension saved it). Its row is made now if the library
+        hasn't seen the file yet (the next scan fills in the rest, and folder rules still treat it as new)."""
+        p = Path(path)
+        with self._transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO assets (path_key, path, name, name_fold, extension) VALUES (?, ?, ?, ?, ?)",
+                (path_key(p), str(p), p.name, p.name.casefold(), p.suffix.lower()),
+            )
+            conn.execute("UPDATE assets SET web_page = ? WHERE path_key = ?", (page, path_key(p)))
+
+    def web_page_of(self, path: Path | str) -> Optional[str]:
+        """The page a picture was saved from by the browser extension, if it was."""
+        row = self._conn().execute("SELECT web_page FROM assets WHERE path_key = ?", (path_key(path),)).fetchone()
+        return row["web_page"] if row is not None and row["web_page"] else None
+
     def find_assets_by_tags(
         self, tag_ids: Sequence[int], match_all: bool = True, text: Optional[str] = None
     ) -> set[int]:

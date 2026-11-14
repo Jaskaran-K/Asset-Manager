@@ -32,6 +32,8 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - board_pages:      {PureRef board: {"page", "modified"}}: the Artbook page it opens as
 - defaults_seen:    the newest set of default file types / categories added to this config's own
                     lists (apply_new_defaults)
+- web_folder:       where the browser extension's Save to Library puts pictures (core.browser_link): each
+                    profile has its own; "" = "Web Images" in the profile's first library folder
 """
 
 from __future__ import annotations
@@ -987,6 +989,30 @@ def get_maya_material() -> str:
 
 def set_maya_material(kind: str) -> None:
     _update_config("maya_material", kind if kind in MAYA_MATERIALS else "arnold")
+
+
+WEB_FOLDER_NAME = "Web Images"
+
+
+def get_web_folder() -> Path | None:
+    """Where the browser extension saves pictures for the profile in use (core.browser_link), in a folder per site:
+    the one chosen in Settings > Browser, else "Web Images" in the profile's first library folder. None without a
+    library folder."""
+    value = _load_raw_config().get("web_folder")
+    if isinstance(value, str) and value:
+        return Path(value)
+    folders = get_scan_folders()
+    return folders[0] / WEB_FOLDER_NAME if folders else None
+
+
+def get_chosen_web_folder() -> str:
+    """The web folder as chosen in Settings > Browser ("": the default, get_web_folder)."""
+    value = _load_raw_config().get("web_folder")
+    return value if isinstance(value, str) else ""
+
+
+def set_web_folder(folder: str) -> None:
+    _update_config("web_folder", str(folder or ""))
 
 
 def get_cutout_model() -> str:

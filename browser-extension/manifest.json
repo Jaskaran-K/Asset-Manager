@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Asset Manager",
+  "version": "0.0.0",
+  "description": "Right-click a picture to save it to your Asset Manager library, or put it on the Artbook page you have open.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAssW7xPYaNsYkjarkigWIWRJpNINFvyUXl71OhB4tz4VO7pp/BhduKXdELyHBqkv9iem7g5aUtfcuIsROaqk5PQkZUrBqytIVsGQBkxU4nTSCfAubjtingaAT2VDCQzF+9/fRyFUIO3DZogyO0MRNg+/GLPH/wwowOMfI3mMT9V+o8vQGXBYh2gNGgsFW07K1fhEJjSp+SYvGkgGHSPRVRGmTJ2f6PFDugcRiJU2SXCwvHMC3vun4VAmMufaF4OVnMp2bf1krM3L9J2gusQGoedEU3Ca15Xt8hpMNXGPu88iegHfMAk0kwPTPCG//RM1WqNABpo3vc7XdpzBglLhn5wIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": ["contextMenus", "nativeMessaging", "activeTab", "scripting", "downloads"],
+  "background": {"service_worker": "background.js"}
+}

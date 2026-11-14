@@ -334,6 +334,7 @@ def test_web_sources_prefer_the_real_image_over_the_result_link():
 
 
 def test_web_images_come_from_whatever_works(qapp, web):
+    from core.web_images import WebImageError
     from ui.artbook_board import _fetch_image, _prepare_web
 
     base, png = web
@@ -341,7 +342,7 @@ def test_web_images_come_from_whatever_works(qapp, web):
     assert _fetch_image(f"{base}/page.html")[0] == png  # a page: its preview image
     import base64
     assert _fetch_image("data:image/png;base64," + base64.b64encode(png).decode())[0] == png
-    with pytest.raises(store.PageError):
+    with pytest.raises(WebImageError):
         _fetch_image(f"{base}/notimage")
     page = store.new_page("Web")
     result = _prepare_web(page["id"], [f"{base}/notimage", f"{base}/real.png"])  # first one fails: next

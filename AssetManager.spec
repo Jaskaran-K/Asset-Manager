@@ -11,7 +11,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/Asset-Manager-Icon.ico', 'assets'), ('README.md', '.'), ('docs/artbook-guide.md', 'docs'), ('docs/theme-studio.md', 'docs')],  # (the Guide in Settings)
+    datas=[('assets/Asset-Manager-Icon.ico', 'assets'), ('README.md', '.'), ('docs/artbook-guide.md', 'docs'), ('docs/theme-studio.md', 'docs'),  # (the Guide in Settings)
+           ('browser-extension', 'browser-extension')],  # (core.browser_link copies it for the browser to load)
     # Imath: OpenEXR's compiled module imports it as it loads, unseen by PyInstaller.
     # inflate64: Deflate64 zips; core.archives imports it only when one is read.
     # importlib.metadata: ONNX Runtime (downloaded for the AI tools, core.ai_tools) reads its version with it.

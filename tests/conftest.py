@@ -23,6 +23,11 @@ def isolated_user_data(tmp_path, monkeypatch):
     monkeypatch.setattr(video_tools, "PROXY_DIR", data / "cache" / "proxies")
     monkeypatch.setattr(video_tools, "POSTER_DIR", data / "cache" / "posters")
     monkeypatch.setattr(video_tools, "THUMB_DIR", data / "cache" / "thumbnails")
+    # The browser extension's link file, inbox and registration (a key of the test's own, removed by the test)
+    from core import browser_link
+
+    monkeypatch.setattr(browser_link, "DATA_ROOT", data / "cache")
+    monkeypatch.setattr(browser_link, "REGISTRY_KEY", rf"Software\AssetManager-test-{tmp_path.name}")
     # Models are read in the test's own process (tests that replace the loader see their replacement);
     # tests/test_model_reader.py starts the real helper program
     from core import model_reader

@@ -175,6 +175,27 @@ app with it.
   **BiRefNet** (520 MB with ONNX Runtime; about 1 s a picture on a recent graphics card), the best on most pictures,
   and **BEN2** (250 MB; 0.3 s), a second try that often gets right what BiRefNet misses. The choice is remembered.
 
+### Browser extension
+Right-click a picture on a web page in **Chrome** or **Opera GX** > **Asset Manager** > **Save to Library**, or
+**Add to Artbook Page**. The app needn't be open.
+- **Save to Library** puts it in the profile's web folder (**Web Images** in its first library folder unless you pick
+  another in **Settings > Browser**; each profile has its own), in a folder per site (`artstation.com`,
+  `pinterest.com`), under the picture's own name, or the page's title when that's a code. The biggest version is
+  taken: the picture a link points to, the largest of the page's sizes, ArtStation's 4K copy and Pinterest's
+  original. The same picture isn't saved twice, and a type the profile doesn't show (WebP, AVIF) is saved as PNG or
+  JPG. Right-click it in the library > **Open Source Page** for the page it came from. To tag them as they arrive,
+  give the folder a folder rule.
+- **Add to Artbook Page** puts it on the page that's open (or the one last open). With the app closed, it goes on
+  the page when the app next opens.
+- **Pictures behind a login** (when a site refuses the app): the browser downloads it with your login and the app
+  moves it into place.
+- **Setting it up:** **Settings > Browser > Set Up**, then in each browser open its extensions page (buttons there),
+  turn on **Developer mode**, click **Load unpacked** and pick the folder shown (Copy Folder Path). Set Up adds one
+  registry entry for your Windows user (no admin rights), read by both browsers; **Remove** takes it away.
+- **Safety:** no network port is opened. The browser starts the app's helper for each picture, and only for this
+  extension (its ID is fixed). The extension asks for no access to your sites: only the tab you right-click, when
+  you do, and downloads (for the login case).
+
 ## The Artbook
 
 The Artbook holds reference boards, called **Pages**: endless canvases you fill with images from the library,
@@ -185,7 +206,8 @@ making your first board. The list below is the full reference.
   **Ctrl+1** to **Ctrl+4**, also offers Split View (both side by side; drag the divider) and Separate View (the
   Artbook in its own window). The app reopens in the view you left it in.
 - **Getting images in:** drop files or images from a browser (Google Images results too), drag them in from
-  the asset grid, or paste with **Ctrl+V** (image data, files or an image link). In the asset grid,
+  the asset grid, paste with **Ctrl+V** (image data, files or an image link), or right-click a picture in Chrome or
+  Opera GX > Asset Manager > **Add to Artbook Page** (the browser extension). In the asset grid,
   right-click > **Send to Artbook** adds the selected images to any page (listed in its folders), or to a new page.
 - **Working over other apps (Separate View):** the **Window** button in the Artbook window (also under
   **Window** in the board's right-click menu) has:

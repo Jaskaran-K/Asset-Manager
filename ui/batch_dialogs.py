@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from core import batch_convert, batch_rename
 from core.scanner import AssetItem
 from core.texture_sets import TextureSet
+from ui.duotone import set_icon
 from ui.tag_widgets import run_job
 
 PREVIEW_ROWS = 2000  # (the rest are done too; the list shows this many)
@@ -375,6 +376,189 @@ class ConvertDialog(QDialog):
         self.btn_ok.setVisible(False)
         self.btn_trash.setVisible(bool(self.created))
         text = f"Made {len(self.created)} new file{'s' if len(self.created) != 1 else ''}"
+        if self._stop and len(self.created) + len(self.failed) < total:
+            text += f" (stopped: {total - len(self.created) - len(self.failed)} not made)"
+        text += "."
+        if self.failed:
+            text += f" {len(self.failed)} couldn't be made: " + "; ".join(f"{name} ({why})" for name, why in self.failed[:5])
+        self.lbl_summary.setText(text)
+
+    def _trash_created(self) -> None:
+        from PySide6.QtCore import QFile
+
+        answer = QMessageBox.question(
+            self, "Move to Recycle Bin", f"Move the {len(self.created)} new files to the Recycle Bin?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        kept = [path for path in self.created if path.exists() and not QFile.moveToTrash(str(path))]
+        self.lbl_summary.setText(
+            f"Moved {len(self.created) - len(kept)} new files to the Recycle Bin."
+            + (f" {len(kept)} couldn't be moved." if kept else "")
+        )
+        self.created = kept
+        self.btn_trash.setVisible(bool(kept))
+
+    def reject(self) -> None:
+        if self._running:
+            self._request_stop()
+            return
+        super().reject()
+
+    def done(self, result: int) -> None:
+        if self._running:
+            self._request_stop()
+            return
+        super().done(result)
+
+
+class CutoutDialog(QDialog):
+    """Remove Background (core.ai_search: BiRefNet, or BEN2 as a second try): a name_cutout.png beside each
+    picture, one at a time. The pictures themselves never change; created lists the new files (Move to Recycle
+    Bin takes them back)."""
+
+    def __init__(self, assets: Sequence[AssetItem], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        from core import ai_search
+
+        self.assets = [a for a in assets if a.is_texture]
+        self.targets = [ai_search.cutout_target(a) for a in self.assets]
+        self.created: list[Path] = []
+        self.failed: list[tuple[str, str]] = []
+        self._running = False
+        self._stop = False
+        count = len(self.assets)
+        self.setWindowTitle(f"Remove Background from {count} Picture{'s' if count != 1 else ''}")
+        self.resize(820, 520)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        note = QLabel("Each picture gets a copy with its background removed, beside it (a PNG with transparency). "
+                      "The pictures themselves don't change. It works on pictures with a subject: a render, a photo "
+                      "of an object, a character. A full scene has no single subject to keep.")
+        note.setObjectName("pageHint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        from core import ai_tools
+        from core.settings import get_cutout_model
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model"))
+        self.cmb_model = QComboBox()
+        for key in ai_tools.CUTOUT_MODELS:
+            tool = ai_tools.TOOLS[key]
+            self.cmb_model.addItem(f"{tool.model.split(' (')[0]}: {tool.about.split(':')[0].lower()}", key)
+        self.cmb_model.setCurrentIndex(self.cmb_model.findData(get_cutout_model()))
+        self.cmb_model.setToolTip("Which model removes the backgrounds. If one misses part of a picture, try the other "
+                                  "(each downloads the first time it's used)")
+        model_row.addWidget(self.cmb_model)
+        model_row.addStretch(1)
+        layout.addLayout(model_row)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Picture", "New file", "Note"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setColumnWidth(0, 240)
+        self.tree.setColumnWidth(1, 360)
+        for asset, target in zip(self.assets[:PREVIEW_ROWS], self.targets):
+            item = QTreeWidgetItem(self.tree, [asset.name, str(target), ""])
+            item.setToolTip(1, str(target))
+        layout.addWidget(self.tree, 1)
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+        self.lbl_summary = QLabel(f"{count} new file{'s' if count != 1 else ''} will be made.")
+        self.lbl_summary.setObjectName("pageHint")
+        self.lbl_summary.setWordWrap(True)
+        layout.addWidget(self.lbl_summary)
+        buttons = QHBoxLayout()
+        self.btn_trash = QPushButton("Move New Files to Recycle Bin")
+        self.btn_trash.setToolTip("Take back what was made here (the new files go to the Recycle Bin)")
+        self.btn_trash.clicked.connect(self._trash_created)
+        self.btn_trash.setVisible(False)
+        buttons.addWidget(self.btn_trash)
+        buttons.addStretch(1)
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setToolTip("Close (the new files stay)")
+        self.btn_close.clicked.connect(self.accept)
+        self.btn_ok = QPushButton("Remove Backgrounds" if count != 1 else "Remove Background")
+        set_icon(self.btn_ok, "cutout")
+        self.btn_ok.setObjectName("primaryBtn")
+        self.btn_ok.setToolTip("Make the cut-outs as listed (the model downloads the first time it's used)")
+        self.btn_ok.setEnabled(count > 0)
+        self.btn_ok.clicked.connect(self._start)
+        buttons.addWidget(self.btn_close)
+        buttons.addWidget(self.btn_ok)
+        layout.addLayout(buttons)
+
+    def model(self) -> str:
+        return self.cmb_model.currentData()
+
+    def _start(self) -> None:
+        from core.settings import set_cutout_model
+        from ui import ai_download
+
+        set_cutout_model(self.model())
+        if not ai_download.ensure_tool(self.model(), self):
+            return
+        self.cmb_model.setEnabled(False)
+        self._running, self._stop = True, False
+        self.created, self.failed = [], []
+        self.progress.setRange(0, len(self.assets))
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
+        self.btn_ok.setText("Stop")
+        self.btn_ok.setToolTip("Stop after the picture being done")
+        self.btn_ok.clicked.disconnect(self._start)
+        self.btn_ok.clicked.connect(self._request_stop)
+        self._next(0)
+
+    def _request_stop(self) -> None:
+        self._stop = True
+        self.btn_ok.setEnabled(False)
+
+    def _mark(self, index: int, text: str, problem: bool = False) -> None:
+        item = self.tree.topLevelItem(index) if index < self.tree.topLevelItemCount() else None
+        if item is not None:
+            item.setText(2, text)
+            if problem:
+                item.setForeground(2, Qt.GlobalColor.red)
+
+    def _next(self, index: int) -> None:
+        if self._stop or index >= len(self.assets):
+            self._finished()
+            return
+        from core import ai_helper, ai_search
+
+        asset, target, model = self.assets[index], self.targets[index], self.model()
+        if target.exists():  # (made meanwhile: never written over)
+            target = self.targets[index] = ai_search.cutout_target(asset)
+        self.lbl_summary.setText(f"Removing the background of {asset.name} ({index + 1} of {len(self.assets)})...")
+        self._mark(index, "Working...")
+
+        def done(path: Path) -> None:
+            self.created.append(path)
+            device = ai_helper.last_device.get(model)
+            self._mark(index, "Done" + (f" (on the {device})" if device else ""))
+            self.progress.setValue(index + 1)
+            self._next(index + 1)
+
+        def failed(message: str) -> None:
+            self.failed.append((asset.name, message))
+            self._mark(index, message, problem=True)
+            self.progress.setValue(index + 1)
+            if "AI helper" in message or "isn't downloaded" in message:
+                self._stop = True  # (the same thing would stop the rest)
+            self._next(index + 1)
+
+        run_job(lambda: ai_search.make_cutout(asset, target, model), done, failed)
+
+    def _finished(self) -> None:
+        total = len(self.assets)
+        self._running = False
+        self.progress.setVisible(False)
+        self.btn_ok.setVisible(False)
+        self.btn_trash.setVisible(bool(self.created))
+        text = f"Made {len(self.created)} cut-out{'s' if len(self.created) != 1 else ''}"
         if self._stop and len(self.created) + len(self.failed) < total:
             text += f" (stopped: {total - len(self.created) - len(self.failed)} not made)"
         text += "."

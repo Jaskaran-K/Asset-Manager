@@ -65,6 +65,8 @@ SEARCH_SWATCHES = {
     "black": "#111111", "white": "#f5f5f5", "grey": "#8c8c8c",
 }
 _SIMILAR_TOKEN = re.compile(r"(?i)(?<!\S)similar:(\d+)(?!\S)")
+_LIKE_TOKEN = re.compile(r"(?i)(?<!\S)like:(\d+)(?!\S)")  # More Like This (AI Search)
+_AI_TOKEN = re.compile(r"(?i)(?<!\S)ai:on(?!\S)")  # AI Search on (the AI button), in saved searches
 
 
 @dataclass(frozen=True)
@@ -389,7 +391,8 @@ class SimilarChip(QFrame):
 
     remove_clicked = Signal()
 
-    def __init__(self, label: str, parent: Optional[QWidget] = None):
+    def __init__(self, label: str, parent: Optional[QWidget] = None, tooltip: str = "",
+                 remove_tip: str = "Stop showing only look-alikes"):
         super().__init__(parent)
         bg, fg, border = "rgba(148, 163, 184, 0.16)", "palette(text)", "rgba(148, 163, 184, 0.6)"
         self.setObjectName("tagChip")
@@ -397,7 +400,7 @@ class SimilarChip(QFrame):
             f"#tagChip {{ background-color: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
             f"#tagChip QLabel, #tagChip QToolButton {{ color: {fg}; background: transparent; border: none; padding: 0; }}"
         )
-        self.setToolTip(f"{label} and its look-alikes (resized or re-saved copies), closest first")
+        self.setToolTip(tooltip or f"{label} and its look-alikes (resized or re-saved copies), closest first")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 1, 4, 1)
         layout.setSpacing(4)
@@ -405,7 +408,7 @@ class SimilarChip(QFrame):
         btn = QToolButton()
         set_icon(btn, "close", _chip_tone(bg, fg), size=11)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip("Stop showing only look-alikes")
+        btn.setToolTip(remove_tip)
         btn.clicked.connect(self.remove_clicked)
         layout.addWidget(btn)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -498,11 +501,14 @@ class TagSearchBar(QFrame):
       removes everything. The star saves the search as a sidebar collection.
     - Find Similar shows as a chip too (similar:<id> in the saved text); similar_label names
       the picture. The palette button adds a color: filter (a named colour, or one picked).
+    - The AI button (ai:on in the saved text) makes the words a description for AI Search (core.ai_search):
+      files whose pictures match, best first, not file names. More Like This is a chip (like:<id>).
     """
 
     changed = Signal()  # filters or text changed
     unknown_tag = Signal(str)
     save_requested = Signal()
+    ai_wanted = Signal()  # the AI button was turned on (the window downloads AI Search first if it must)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -511,6 +517,9 @@ class TagSearchBar(QFrame):
         self._all_tags: list[Tag] = []
         self._similar: Optional[int] = None  # Find Similar: the picture's database id
         self.similar_label: Callable[[int], str] = lambda asset_id: "Similar picture"
+        self._like: Optional[int] = None  # More Like This: the file's database id
+        self.like_label: Callable[[int], str] = lambda asset_id: "More like a file"
+        self._ai = False  # AI Search: the words describe what's in the pictures
         self._color_popup = None  # (the colour picker, while it's open)
         self._picked_token = ""  # the color: token the picker put in the box
 
@@ -534,10 +543,23 @@ class TagSearchBar(QFrame):
             "Click a tag chip to switch has / doesn't have. Esc clears."
         )
         self.edit.setMinimumWidth(160)
+        self._placeholder = self.edit.placeholderText()
         self.edit.textChanged.connect(self._on_text_changed)
         self.edit.returnPressed.connect(self._commit_tokens)
         self.edit.installEventFilter(self)
         layout.addWidget(self.edit, 1)
+
+        self.btn_ai = QToolButton()
+        set_icon(self.btn_ai, "ai", size=16)
+        self.btn_ai.setCheckable(True)
+        self.btn_ai.setToolTip(
+            "AI Search: describe what you're looking for (\"creature skull side view\") and get the files whose\n"
+            "pictures match, best first, not file names. Tags and filters still apply. Click again to turn it off."
+        )
+        self.btn_ai.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ai.setAutoRaise(True)
+        self.btn_ai.clicked.connect(self._on_ai_clicked)
+        layout.addWidget(self.btn_ai)
 
         self.btn_color = QToolButton()
         set_icon(self.btn_color, "palette", size=16)
@@ -626,6 +648,39 @@ class TagSearchBar(QFrame):
         self._rebuild_chips()
         self.changed.emit()
 
+    def like_id(self) -> Optional[int]:
+        """More Like This: the file (database id), if it's on."""
+        return self._like
+
+    def set_like(self, asset_id: Optional[int]) -> None:
+        """Show only a file and the files most like it (None: stop)."""
+        if asset_id == self._like:
+            return
+        self._like = asset_id
+        self._rebuild_chips()
+        self.changed.emit()
+
+    def ai_on(self) -> bool:
+        """The words are a description for AI Search."""
+        return self._ai
+
+    def set_ai(self, on: bool) -> None:
+        if on == self._ai:
+            return
+        self._ai = on
+        self._show_ai()
+        self._update_buttons()
+        self.changed.emit()
+
+    def _show_ai(self) -> None:
+        self.btn_ai.setChecked(self._ai)
+        self.edit.setPlaceholderText("Describe what you're looking for..." if self._ai else self._placeholder)
+
+    def _on_ai_clicked(self, checked: bool) -> None:
+        self.set_ai(checked)
+        if checked:
+            self.ai_wanted.emit()
+
     def add_color(self, word: str) -> None:
         """Add color:word to the search (replacing a colour the picker added)."""
         self._replace_picked(f"color:{word}")
@@ -643,16 +698,21 @@ class TagSearchBar(QFrame):
     def query_text(self) -> str:
         """The whole search as text (chips as tokens), e.g. for saving it."""
         similar = [f"similar:{self._similar}"] if self._similar is not None else []
-        return " ".join(similar + [filter_token(f) for f in self._filters] + ([self.text()] if self.text() else []))
+        like = [f"like:{self._like}"] if self._like is not None else []
+        ai = ["ai:on"] if self._ai else []
+        return " ".join(ai + similar + like + [filter_token(f) for f in self._filters] + ([self.text()] if self.text() else []))
 
     def set_query_text(self, text: str) -> None:
         """Replace the search with a saved one."""
         self._filters = []
         self._similar = None
+        self._like = None
+        self._ai = False
         self.edit.blockSignals(True)
         self.edit.setText(text)
         self.edit.blockSignals(False)
         self._commit_tokens()
+        self._show_ai()
         self._rebuild_chips()
         self.changed.emit()
 
@@ -683,9 +743,10 @@ class TagSearchBar(QFrame):
         self.changed.emit()
 
     def clear(self) -> None:
-        had_anything = bool(self._filters or self.edit.text() or self._similar is not None)
+        had_anything = bool(self._filters or self.edit.text() or self._similar is not None or self._like is not None)
         self._filters = []
         self._similar = None
+        self._like = None
         self._rebuild_chips()
         self.edit.blockSignals(True)
         self.edit.clear()
@@ -708,6 +769,12 @@ class TagSearchBar(QFrame):
             chip = SimilarChip(self.similar_label(self._similar))
             chip.remove_clicked.connect(self._remove_similar)
             self._chip_row.addWidget(chip)
+        if self._like is not None:
+            label = self.like_label(self._like)
+            chip = SimilarChip(label, tooltip=f"{label}: files with the same kind of content (AI Search), closest first",
+                               remove_tip="Stop showing only files like it")
+            chip.remove_clicked.connect(self._remove_like)
+            self._chip_row.addWidget(chip)
         for tag_filter in self._filters:
             chip = FilterChip(tag_filter)
             chip.remove_clicked.connect(self.remove_filter)
@@ -718,15 +785,19 @@ class TagSearchBar(QFrame):
     def _remove_similar(self) -> None:
         self.set_similar(None)
 
+    def _remove_like(self) -> None:
+        self.set_like(None)
+
     def _update_buttons(self) -> None:
-        active = bool(self._filters or self.edit.text().strip() or self._similar is not None)
+        active = bool(self._filters or self.edit.text().strip() or self._similar is not None or self._like is not None)
         self.btn_clear.setVisible(active)
         self.btn_save.setVisible(active)
 
     def _on_text_changed(self, text: str) -> None:
         self._update_buttons()
         # "tag:..." + Space completes a token as soon as it's typed
-        if text.endswith(" ") and (_TAG_TOKEN.search(text) or _SIMILAR_TOKEN.search(text)):
+        if text.endswith(" ") and (_TAG_TOKEN.search(text) or _SIMILAR_TOKEN.search(text) or _LIKE_TOKEN.search(text)
+                                   or _AI_TOKEN.search(text)):
             self._commit_tokens(report_unknown=False)
             return
         word = text.rsplit(" ", 1)[-1]
@@ -740,6 +811,18 @@ class TagSearchBar(QFrame):
         self.changed.emit()
 
     def _commit_tokens(self, report_unknown: bool = True) -> None:
+        like, ai = _LIKE_TOKEN.findall(self.edit.text()), _AI_TOKEN.search(self.edit.text())
+        if like or ai:
+            if like:
+                self._like = int(like[-1])
+            if ai:
+                self._ai = True
+                self._show_ai()
+            self.edit.blockSignals(True)
+            self.edit.setText(" ".join(_AI_TOKEN.sub(" ", _LIKE_TOKEN.sub(" ", self.edit.text())).split()))
+            self.edit.blockSignals(False)
+            self._rebuild_chips()
+            self.changed.emit()
         similar = _SIMILAR_TOKEN.findall(self.edit.text())
         if similar:
             self._similar = int(similar[-1])
@@ -824,6 +907,9 @@ class TagSearchBar(QFrame):
             if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._filters:
                 self.remove_filter(self._filters[-1])
                 return True
+            if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._like is not None:
+                self.set_like(None)
+                return True
             if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._similar is not None:
                 self.set_similar(None)
                 return True
@@ -846,12 +932,16 @@ class TagAssetsDialog(QDialog):
     Checkboxes are tri-state: checked = every selected file has the tag,
     partial = some do, unchecked = none. Only rows the user changes are
     applied, so an untouched partial row leaves each file as it was.
+    suggested: tag names from the most similar files already tagged (core.ai_search.suggest_tags), shown as
+    buttons that tick them.
     """
 
-    def __init__(self, repo: TagRepository, asset_ids: Sequence[int], parent: Optional[QWidget] = None):
+    def __init__(self, repo: TagRepository, asset_ids: Sequence[int], parent: Optional[QWidget] = None,
+                 suggested: Sequence[str] = ()):
         super().__init__(parent)
         self.repo = repo
         self.asset_ids = list(asset_ids)
+        self.suggested = list(suggested)
         self.changed = False  # True once tags were applied or created
         self.last_change = TagChange()  # what Apply did, for undo
         count = len(self.asset_ids)
@@ -875,6 +965,23 @@ class TagAssetsDialog(QDialog):
         self.list_tags = QListWidget()
         self.list_tags.itemChanged.connect(self._update_apply_button)
         layout.addWidget(self.list_tags, 1)
+
+        self.suggestion_buttons: dict[str, QPushButton] = {}
+        if self.suggested:
+            row = QHBoxLayout()
+            label = QLabel("Suggested:")
+            label.setObjectName("pageHint")
+            label.setToolTip("Tags of the most similar files you've tagged (AI Search)")
+            row.addWidget(label)
+            for name in self.suggested:
+                button = QPushButton(name)
+                set_icon(button, "ai", size=14)
+                button.setToolTip(f"Tick {name}: the files most like {'this one' if count == 1 else 'these'} have it")
+                button.clicked.connect(lambda _checked=False, n=name: self.tick_suggestion(n))
+                row.addWidget(button)
+                self.suggestion_buttons[name] = button
+            row.addStretch(1)
+            layout.addLayout(row)
 
         new_row = QHBoxLayout()
         self.txt_new = QLineEdit()
@@ -940,6 +1047,19 @@ class TagAssetsDialog(QDialog):
             self._default_box.addWidget(label)
             self._default_box.addWidget(tag_chip_cloud(defaults))
         self._update_apply_button()
+
+    def tick_suggestion(self, name: str) -> None:
+        """Tick a suggested tag (it's applied with Apply, like any other)."""
+        for i in range(self.list_tags.count()):
+            item = self.list_tags.item(i)
+            tag = item.data(_TAG_ROLE)
+            if tag is not None and tag.name.casefold() == name.casefold():
+                item.setCheckState(Qt.CheckState.Checked)
+                self.list_tags.scrollToItem(item)
+                break
+        button = self.suggestion_buttons.get(name)
+        if button is not None:
+            button.setEnabled(False)
 
     def _add_row(self, tag: Tag, state: Qt.CheckState) -> QListWidgetItem:
         item = QListWidgetItem(f"{tag.name}   ({tag.file_count} file{'s' if tag.file_count != 1 else ''})")

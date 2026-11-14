@@ -14,7 +14,8 @@ a = Analysis(
     datas=[('assets/Asset-Manager-Icon.ico', 'assets'), ('README.md', '.'), ('docs/artbook-guide.md', 'docs'), ('docs/theme-studio.md', 'docs')],  # (the Guide in Settings)
     # Imath: OpenEXR's compiled module imports it as it loads, unseen by PyInstaller.
     # inflate64: Deflate64 zips; core.archives imports it only when one is read.
-    hiddenimports=['Imath', 'inflate64', 'compression.zstd'],
+    # importlib.metadata: ONNX Runtime (downloaded for the AI tools, core.ai_tools) reads its version with it.
+    hiddenimports=['Imath', 'inflate64', 'compression.zstd', 'importlib.metadata'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

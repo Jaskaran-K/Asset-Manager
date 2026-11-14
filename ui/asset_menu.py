@@ -136,6 +136,8 @@ class AssetMenuActions:
     add_folder_rule: Optional[Callable[[], None]] = None  # a rule for the file's folder (core.folder_rules)
     rename: Optional[Callable[[], None]] = None  # batch rename the selected files (ui.batch_dialogs)
     convert: Optional[Callable[[], None]] = None  # convert / resize the selected pictures
+    more_like: Optional[Callable[[], None]] = None  # AI Search: the files with the same kind of content
+    remove_background: Optional[Callable[[], None]] = None  # cut-outs of the selected pictures (BEN2)
     send_material: Optional[Callable[[str], None]] = None  # a texture set: make it a material in "blender" / "maya"
 
 
@@ -218,13 +220,18 @@ def build_asset_menu(
         )
         action_extract.triggered.connect(actions.extract)
 
-    if asset.is_texture and (actions.find_similar is not None or actions.colors):
+    if (asset.is_texture and (actions.find_similar is not None or actions.colors)) or actions.more_like is not None:
         menu.addSeparator()
     if asset.is_texture and actions.find_similar is not None:
         action_similar = menu.addAction("Find Similar")
         set_icon(action_similar, "similar")
         action_similar.setToolTip("Show this picture and its look-alikes (resized or re-saved copies), closest first")
         action_similar.triggered.connect(actions.find_similar)
+    if actions.more_like is not None:
+        action_like = menu.addAction("More Like This")
+        set_icon(action_like, "ai")
+        action_like.setToolTip("Files with the same kind of content (AI Search), closest first: other skulls, other brick walls")
+        action_like.triggered.connect(actions.more_like)
     if asset.is_texture and actions.colors and actions.search_color is not None:
         colour_menu = menu.addMenu("Search by Its Colours")
         colour_menu.setToolTipsVisible(True)
@@ -268,6 +275,12 @@ def build_asset_menu(
         set_icon(action_convert, "upscale")
         action_convert.setToolTip("Make copies in another type or smaller (PNG, JPG, TGA, TIF; 2K, 4K ...); the originals stay")
         action_convert.triggered.connect(actions.convert)
+    if actions.remove_background is not None and any(a.is_texture for a in selection):
+        pictures = sum(1 for a in selection if a.is_texture)
+        action_cutout = menu.addAction("Remove Background..." if pictures <= 1 else f"Remove Background ({pictures} Pictures)...")
+        set_icon(action_cutout, "cutout")
+        action_cutout.setToolTip("Make a copy with the background removed beside each picture (a PNG with transparency); the originals stay")
+        action_cutout.triggered.connect(actions.remove_background)
 
     if actions.add_folder_rule is not None:
         action_rule = menu.addAction("Folder Rule...")

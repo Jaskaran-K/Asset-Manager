@@ -14,6 +14,7 @@ The main window puts the parts together and runs what the user asks for. The par
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import os
 import sys
@@ -87,7 +88,7 @@ from core.settings import (
     set_scan_folders,
 )
 from core.picture_look import find_similar, hex_of
-from core import app_helpers, batch_rename
+from core import ai_helper, ai_search, app_helpers, batch_rename
 from core.texture_sets import TextureSet, files_of, find_sets, group_into_sets
 from core.search_query import ParsedQuery, parse_query
 from core.tag_repository import NO_MARKS, Marks, SavedSearch, Tag, TagChange, get_repository, is_damage_error
@@ -167,6 +168,9 @@ class MainWindow(QMainWindow):
         self.library.live_update_failed.connect(self._on_live_update_failed)
         self.library.details_loaded.connect(self._on_details_loaded)
         self.library.looks_loaded.connect(self._on_looks_loaded)
+        self.library.vectors_loaded.connect(self._on_vectors_loaded)
+        self.library.ai_failed.connect(self._on_ai_failed)
+        self.library.thumbnail_size = lambda: self.thumbnail_size
         self.library.files_edited.connect(self._on_files_edited)
         # The search: name words and detail filters, and the tag search result (None: no tag filter)
         self._query = ParsedQuery()
@@ -174,6 +178,17 @@ class MainWindow(QMainWindow):
         self._sets_cache: Optional[tuple[int, int, list[TextureSet]]] = None  # (id and length of the assets, sets)
         self.group_sets = get_group_texture_sets()
         self._looks_seen = 0  # (counts looks_loaded: Find Similar's matches are worked out again after one)
+        # AI Search (core.ai_search): the words searched for, their vectors (asked of the helper), the last result
+        self._ai_words = ""
+        self._text_vectors: dict[str, object] = {}
+        self._ai_asking: Optional[str] = None
+        self._ai_cache: Optional[tuple] = None  # (what was searched, vectors seen, files allowed, matches)
+        self._vectors_seen = 0
+        self._ai_offering = False
+        self._ai_timer = QTimer(self)
+        self._ai_timer.setSingleShot(True)
+        self._ai_timer.setInterval(250)  # (the words are sent once typing pauses)
+        self._ai_timer.timeout.connect(self._ask_text_vector)
         self._tag_match_ids: Optional[set[int]] = None
         self._tag_search_generation = 0
         self.thumbnail_size: int = get_thumbnail_size()
@@ -476,6 +491,8 @@ class MainWindow(QMainWindow):
         self.search_bar.changed.connect(self._on_search_changed)
         self.search_bar.save_requested.connect(self._on_save_search)
         self.search_bar.similar_label = self._similar_label
+        self.search_bar.like_label = self._like_label
+        self.search_bar.ai_wanted.connect(self._on_ai_wanted)
         self.search_bar.unknown_tag.connect(
             lambda name: self.status_label.setText(f'No tag named "{name}". Create it in Settings > Tags.')
         )
@@ -1082,12 +1099,23 @@ class MainWindow(QMainWindow):
     def _on_search_changed(self) -> None:
         """Filter the grid as the search text or tag chips change."""
         self._query = parse_query(self.search_bar.text())
+        self._ai_words = self._query.text.strip() if self.search_bar.ai_on() else ""
+        if self.search_bar.ai_on():  # (the words describe the pictures: they don't filter file names)
+            self._query = dataclasses.replace(self._query, text="", words=[])
+            self._ai_timer.start()
+            from ui.library_state import ai_ready
+
+            if not ai_ready() and not self._ai_offering:  # (a saved search with it on, after it was removed)
+                self._ai_offering = True
+                QTimer.singleShot(0, self._offer_ai)
         if self._query.errors:
             self.status_label.setText(
                 f"Didn't understand {', '.join(self._query.errors)}. Hover over the search box for examples."
             )
         elif self._query.uses_meta and self.library.meta_todo:
             self.status_label.setText(f"Still reading file details ({self.library.meta_todo} left); results will fill in.")
+        elif self._ai_key() is not None:
+            self._show_ai_status()
         elif self._query_uses_looks() and self.library.looks_todo:
             self.status_label.setText(
                 f"Still looking at pictures ({self.library.looks_todo:,} left: colours and look-alikes); results will fill in."
@@ -1119,14 +1147,172 @@ class MainWindow(QMainWindow):
 
     def _get_filtered_assets(self) -> list[AssetItem]:
         """The files to show: the sidebar row, tag matches (found in SQL by _run_tag_search), name words
-        and detail filters (core.asset_filter)."""
-        return filter_assets(
+        and detail filters (core.asset_filter); with AI Search or More Like This, those of them that match,
+        best first."""
+        similar = self._similar_matches()
+        assets = filter_assets(
             self.library.assets, mode=self.filter_mode, row=self.filter_value, categorized=self.sidebar_tree.categorized,
             tag_names=self.library.tag_names() if self._sidebar_row_uses_tags() else {},
             tag_matches=self._tag_match_ids, query=self._query,
             ids=self.library.ids, marks=self.library.marks, meta=self.library.meta,
-            looks=self.library.looks, similar=self._similar_matches(),
+            looks=self.library.looks, similar=similar,
         )
+        key = self._ai_key() if similar is None else None
+        return assets if key is None else self._ai_order(assets, key)
+
+    # ------------------------------------------------------------------
+    # AI Search and More Like This (core.ai_search; the vectors are read by the library in the background)
+    # ------------------------------------------------------------------
+    def _ai_key(self) -> Optional[tuple]:
+        """What the AI orders the grid by: ("like", id), ("text", words), or None."""
+        like = self.search_bar.like_id()
+        if like is not None:
+            return ("like", like)
+        return ("text", self._ai_words) if self._ai_words else None
+
+    def _ai_order(self, assets: list[AssetItem], key: tuple) -> list[AssetItem]:
+        """The files (already filtered) that match, best first. While a search's words are being read, the
+        last result stays."""
+        ids = self.library.ids
+        allowed = frozenset(i for i in (ids.get(str(a.path)) for a in assets) if i is not None)
+        cache = self._ai_cache
+        if cache is not None and cache[:3] == (key, self._vectors_seen, allowed):
+            matches = cache[3]
+        elif key[0] == "like":
+            matches = ai_search.more_like(self.library.vectors, key[1], allowed) or {key[1]: 0.0}
+        elif (vector := self._text_vectors.get(key[1])) is not None:
+            matches = ai_search.search(self.library.vectors, vector, allowed)
+        else:
+            matches = cache[3] if cache is not None and cache[0][0] == "text" else {}
+            return sorted((a for a in assets if ids.get(str(a.path)) in matches), key=lambda a: matches[ids[str(a.path)]])
+        self._ai_cache = (key, self._vectors_seen, allowed, matches)
+        return sorted((a for a in assets if ids.get(str(a.path)) in matches), key=lambda a: matches[ids[str(a.path)]])
+
+    def _show_ai_status(self) -> None:
+        from ui.library_state import ai_ready
+
+        if not ai_ready():
+            self.status_label.setText("AI Search isn't downloaded: click the AI button to download it.")
+            return
+        key = self._ai_key()
+        left = self.library.vectors_todo
+        more = f" Still reading files for it ({left:,} left); results fill in." if left else ""
+        if key is not None and key[0] == "text" and key[1] not in self._text_vectors:
+            self.status_label.setText("AI Search: reading what you typed..." + more)
+        elif key is not None and key[0] == "like" and key[1] not in self.library.vectors:
+            self.status_label.setText("More Like This: reading the file..." + more)
+        elif key is not None:
+            what = "AI Search" if key[0] == "text" else "More Like This"
+            self.status_label.setText(f"{what}: the closest matches, best first." + more)
+
+    def _ensure_ai_search(self) -> bool:
+        """AI Search is there (downloaded now if the user agrees; the library starts reading files then)."""
+        from ui.ai_download import ensure_tool
+        from ui.library_state import ai_ready
+
+        if ai_ready():
+            return True
+        if not ensure_tool("search", self):
+            return False
+        self.library.start_ai_indexing()
+        return True
+
+    def _on_ai_wanted(self) -> None:
+        """The AI button was turned on."""
+        if not self._ensure_ai_search():
+            self.search_bar.set_ai(False)
+            return
+        self._ask_text_vector()
+        self._show_ai_status()
+
+    def _offer_ai(self) -> None:
+        self._on_ai_wanted()
+        self._ai_offering = False
+
+    def _ask_text_vector(self) -> None:
+        """Ask the helper for the vector of the words searched for (one at a time; the newest wins)."""
+        from ui.library_state import ai_ready
+
+        words = self._ai_words
+        if not words or words in self._text_vectors or self._ai_asking is not None or not ai_ready():
+            return
+        self._ai_asking = words
+        run_job(lambda: ai_helper.text_vector(words), lambda vector: self._on_text_vector(words, vector),
+                lambda message: self._on_text_vector(words, None, message))
+
+    def _on_text_vector(self, words: str, vector, error: str = "") -> None:
+        self._ai_asking = None
+        if vector is not None:
+            if len(self._text_vectors) > 200:
+                self._text_vectors.clear()
+            self._text_vectors[words] = vector
+        if self._ai_words != words:  # (typed on meanwhile)
+            self._ask_text_vector()
+            return
+        if vector is None:
+            self.status_label.setText(error)
+            return
+        self._refresh_grid_display()
+        self._show_ai_status()
+
+    def _on_vectors_loaded(self) -> None:
+        self._vectors_seen += 1
+        if self._ai_key() is not None and (self.library.vectors_todo == 0 or self._vectors_seen % 5 == 0):
+            self._refresh_grid_display(keep_view=True)  # (every few batches: the grid doesn't jump about)
+            self._show_ai_status()
+
+    def _on_ai_failed(self, message: str) -> None:
+        self.status_label.setText(f"AI Search stopped reading files: {message}")
+
+    def _like_label(self, asset_id: int) -> str:
+        name = next((Path(path).name for path, i in self.library.ids.items() if i == asset_id), None)
+        return f"More like {name}" if name else "More like a file"
+
+    def _more_like(self, asset: AssetItem) -> None:
+        """Right-click > More Like This: the file and the files with the same kind of content."""
+        if asset.texture_set is not None:
+            asset = asset.texture_set.cover
+        if not self._ensure_ai_search():
+            return
+        asset_id = self.library.id_of(asset)
+        if asset_id is None:
+            self.status_label.setText("More Like This works on files in the library (this one isn't in its database).")
+            return
+        self.filter_mode, self.filter_value = "all", None
+        self.search_bar.set_query_text(f"like:{asset_id}")
+        if asset_id not in self.library.vectors:
+            self.status_label.setText(f"Reading {asset.name}...")
+            self.library.vector_now(asset, self._on_like_read)
+
+    def _on_like_read(self, vector) -> None:
+        self._vectors_seen += 1
+        if vector is None:
+            self.status_label.setText("This file couldn't be read for AI Search (a model needs its thumbnail made first).")
+        self._refresh_grid_display()
+        if vector is not None:
+            self._show_ai_status()
+
+    def _tag_suggestions(self, asset_ids: list[int]) -> list[str]:
+        """Tags of the files most like these (AI Search), for the tag window."""
+        if not len(self.library.vectors):
+            return []
+        tags_of = {i: [t.name for t in tags if not t.is_default] for i, tags in self.library.tags.items()}
+        return ai_search.suggest_tags(self.library.vectors, asset_ids[:50], tags_of)
+
+    def _remove_background_selected(self) -> None:
+        """Right-click > Remove Background...: a cut-out beside each selected picture."""
+        from ui.batch_dialogs import CutoutDialog
+
+        pictures = [a for a in self._selected_files() if a.is_texture]
+        if not pictures:
+            return
+        dialog = CutoutDialog(pictures, self)
+        dialog.exec()
+        made = list(dialog.created)
+        dialog.deleteLater()
+        if made:
+            self.status_label.setText(f"Made {len(made)} cut-out{'s' if len(made) != 1 else ''} (the originals are as they were).")
+            self.library.rescan_folders(sorted({path.parent for path in made}))
 
     def _on_details_loaded(self) -> None:
         if self._query.uses_meta:
@@ -1250,7 +1436,7 @@ class MainWindow(QMainWindow):
 
     def _fill_grid(self) -> None:
         filtered = self._get_filtered_assets()
-        if self.group_sets and self.search_bar.similar_id() is None:  # (Find Similar lists single pictures)
+        if self.group_sets and self.search_bar.similar_id() is None and self._ai_key() is None:  # (they list single files)
             filtered = group_into_sets(filtered, self._texture_sets())
         self.grid_model.set_assets(filtered)
 
@@ -1945,6 +2131,8 @@ class MainWindow(QMainWindow):
             find_similar=(lambda: self._find_similar(asset)) if asset.texture_set is None else None,
             rename=self._rename_selected,
             convert=self._convert_selected,
+            more_like=(lambda: self._more_like(asset)) if ai_search_offered() else None,
+            remove_background=self._remove_background_selected if ai_search_offered() else None,
             send_material=(lambda app_id: self._send_material(asset.texture_set, app_id)) if asset.texture_set is not None else None,
             colors=look.colors if (look := self.library.look_of(asset)) is not None else (),
             search_color=self._search_color,
@@ -1969,7 +2157,7 @@ class MainWindow(QMainWindow):
         if not ids:
             QMessageBox.information(self, "Tags Unavailable", "These files aren't in the tag database yet. Try Refresh.")
             return None
-        dialog = TagAssetsDialog(self.repo, ids, self)
+        dialog = TagAssetsDialog(self.repo, ids, self, suggested=self._tag_suggestions(ids))
         dialog.exec()
         dialog.deleteLater()
         if not dialog.changed:
@@ -2046,8 +2234,16 @@ class MainWindow(QMainWindow):
         self.view_modes.shutdown()  # the separate Artbook window closes with the app
         self.thumbnail_manager.shutdown()
         wait_for_background()
+        ai_helper.close()
         self.artbook_panel.save_now()  # after background jobs, so an older autosave can't land on top
         super().closeEvent(event)
+
+
+def ai_search_offered() -> bool:
+    """The AI tools can run here (they're downloaded when first used)."""
+    from core import ai_tools
+
+    return ai_tools.supported() or os.environ.get(ai_helper.ENGINE_ENV, "").endswith("fake")
 
 
 # ----------------------------------------------------------------------
@@ -2070,6 +2266,11 @@ def main() -> None:
         from core.model_reader import serve
 
         sys.exit(serve(sys.argv[sys.argv.index("--model-reader") + 1]))
+    if "--ai-helper" in sys.argv:
+        # The AI tools at work for the app, in a process of its own (core.ai_helper)
+        from core.ai_helper import serve as serve_ai
+
+        sys.exit(serve_ai(sys.argv[sys.argv.index("--ai-helper") + 1]))
     if "--theme-studio" in sys.argv:
         # The Theme Studio on its own (ui.theme_studio): the app's window isn't made at all
         from ui.theme_studio import run as run_theme_studio

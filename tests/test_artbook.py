@@ -437,7 +437,7 @@ def test_menu_layout(qapp, panel):
         "    Flip Horizontally", "    Flip Vertically",
         "    Reset >", "      All", "      ---", "      Rotation", "      Size", "      Flips", "      Crop", "    ---",
         "    Bring to Front", "    Send to Back", "    ---", "    Delete",
-        "  Upscale...", "  Revert to Original",
+        "  Upscale...", "  Remove Background...", "  Revert to Original",
         "  Arrange >", "    Auto-Arrange",
         "  Align >", "    Left", "    Centers", "    Right", "    Top", "    Middles", "    Bottom", "    ---",
         "    Distribute Horizontally", "    Distribute Vertically", "    ---", "    Stack",

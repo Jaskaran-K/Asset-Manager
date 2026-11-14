@@ -17,15 +17,17 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+import numpy as np
 import shiboken6
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal, Slot
 
-from core import archives, folder_rules
+from core import ai_helper, ai_tools, archives, folder_rules
+from core.ai_search import VectorIndex
 from core.category_rules import tag_names_by_id
 from core.library_snapshot import save_snapshot
 from core.library_watcher import FolderRescan, LibraryWatcher, rescan_folders
 from core.metadata import read_cost, read_details, read_order
-from core.picture_look import Look, read_look
+from core.picture_look import Look, needs_look, read_look
 from core.profiles import current_profile, other_profiles_folders
 from core.scanner import AssetItem, AssetScanner, asset_sort_key
 from core.settings import get_archive_contents, get_file_extensions
@@ -171,6 +173,8 @@ class LibraryState(QObject):
     live_update_failed = Signal(str)
     details_loaded = Signal()  # file details (resolution, length, faces) were read
     looks_loaded = Signal()  # more pictures were looked at (colours, look-alikes)
+    vectors_loaded = Signal()  # more files were read for AI Search (core.ai_search)
+    ai_failed = Signal(str)  # the AI helper failed while reading files (the message says why)
     files_edited = Signal(list)  # str paths whose contents changed: their thumbnails are out of date
 
     def __init__(self, repo: Optional[TagRepository] = None, parent: Optional[QObject] = None):
@@ -186,6 +190,10 @@ class LibraryState(QObject):
         self._meta_generation = 0
         self.looks: dict[int, Look] = {}  # what pictures look like, read after the details
         self.looks_todo = 0  # pictures still to be looked at
+        self.vectors = VectorIndex()  # AI Search's vectors, read once it's downloaded
+        self.vectors_todo = 0  # files still to be read for it
+        self._ai_generation = 0
+        self.thumbnail_size: Callable[[], int] = lambda: 110  # the grid's (a model is read from its thumbnail)
         self._view_generation = 0  # (reset(): results for what was shown before are dropped)
         self.scan_done_once = False  # a real scan has finished (snapshot data is outdated then)
 
@@ -466,6 +474,7 @@ class LibraryState(QObject):
 
         run_in_background(self.repo, load, partial(self._on_meta_loaded, generation), _ignore_result, slow=True)
         self._start_looking(generation)
+        self.start_ai_indexing()
 
     def _on_meta_loaded(self, generation: int, result) -> None:
         if generation != self._meta_generation:
@@ -578,6 +587,112 @@ class LibraryState(QObject):
         run_in_background(self.repo, read, finished, lambda _error: on_done(None))
 
     # ------------------------------------------------------------------
+    # AI Search's vectors (core.ai_search), read once it's downloaded
+    # ------------------------------------------------------------------
+    def start_ai_indexing(self) -> None:
+        """Load the stored vectors, then read the files without one (pictures; models, videos and PDFs from
+        their thumbnails, once they have one). Again after AI Search is downloaded."""
+        self._ai_generation += 1
+        generation = self._ai_generation
+        if not ai_ready():
+            self.vectors_todo = 0
+            return
+        ids = list(self.ids.values())
+        by_path = {str(asset.path): asset for asset in self.assets}
+        size = self.thumbnail_size()
+
+        def load(repo):
+            from core.thumbnail_manager import disk_cache_path
+
+            rows = []
+            for asset_id, path, ext, key in repo.assets_needing_vector(ids):
+                if needs_look(ext):
+                    rows.append((asset_id, path, None, key))
+                    continue
+                asset = by_path.get(path)
+                thumbnail = disk_cache_path(asset, size) if asset is not None else None
+                if thumbnail is not None and thumbnail.is_file():
+                    rows.append((asset_id, path, str(thumbnail), key))
+            rows.sort(key=lambda row: ("|" in row[1], row[1]))  # (inside archives last: they're unpacked first)
+            return VectorIndex(repo.vectors_by_asset(ids)), rows  # (built here: 13,000 take a moment)
+
+        run_in_background(self.repo, load, partial(self._on_vectors_loaded, generation), _ignore_result, slow=AI_LANE)
+
+    def _on_vectors_loaded(self, generation: int, result) -> None:
+        if generation != self._ai_generation:
+            return
+        self.vectors, todo = result
+        self.vectors_todo = len(todo)
+        self.vectors_loaded.emit()
+        self._ai_batch(generation, todo)
+
+    def _ai_batch(self, generation: int, todo: list) -> None:
+        if not todo or generation != self._ai_generation:
+            self.vectors_todo = 0
+            return
+
+        def read(repo):
+            found, done, deadline = {}, 0, time.monotonic() + 1.0
+            with ThreadPoolExecutor(AI_THREADS, thread_name_prefix="ai") as pool:
+                while done < len(todo) and time.monotonic() < deadline:  # (~1 s: a new scan can take over)
+                    chunk = todo[done:done + ai_helper.PICTURE_BATCH]
+                    pixels = list(pool.map(_ai_pixels, chunk))
+                    good = [(row, p) for row, p in zip(chunk, pixels) if p is not None]
+                    if good:
+                        vectors = ai_helper.picture_vectors(np.stack([p for _row, p in good]))
+                        found.update({row[0]: (vector, row[3]) for (row, _p), vector in zip(good, vectors)})
+                    # (a file that can't be read is marked, so it isn't tried again until it changes)
+                    found.update({row[0]: (None, row[3]) for row, p in zip(chunk, pixels) if p is None})
+                    done += len(chunk)
+            if found:
+                repo.store_vectors(found)
+            return found, todo[done:]
+
+        def finished(result) -> None:
+            found, rest = result
+            if generation != self._ai_generation:
+                return
+            self.vectors.update({asset_id: vector for asset_id, (vector, _key) in found.items() if vector is not None})
+            self.vectors_todo = len(rest)
+            if found:
+                self.vectors_loaded.emit()
+            self._ai_batch(generation, rest)
+
+        def failed(message: str) -> None:
+            if generation == self._ai_generation:
+                self.vectors_todo = 0
+                self.ai_failed.emit(message)
+
+        run_in_background(self.repo, read, finished, failed, slow=AI_LANE)
+
+    def vector_now(self, asset: AssetItem, on_done: Callable[[object], None]) -> None:
+        """Read one file for AI Search right away (More Like This on one not read yet); on_done(vector or None)
+        on the UI thread."""
+        asset_id = self.id_of(asset)
+        if asset_id is None or not ai_ready():
+            on_done(None)
+            return
+        from core.tag_repository import ai_key
+        from core.thumbnail_manager import disk_cache_path
+
+        thumbnail = None if asset.is_texture else disk_cache_path(asset, self.thumbnail_size())
+        row = (asset_id, str(asset.path), str(thumbnail) if thumbnail is not None and thumbnail.is_file() else None,
+               ai_key(asset.size_bytes, asset.modified_timestamp))
+
+        def read(repo):
+            pixels = _ai_pixels(row)
+            vector = None if pixels is None else ai_helper.picture_vectors(pixels[None])[0]
+            repo.store_vectors({asset_id: (vector, row[3])})
+            return vector
+
+        def finished(vector) -> None:
+            if vector is not None:
+                self.vectors.update({asset_id: vector})
+            on_done(vector)
+
+        run_in_background(self.repo, read, finished, lambda _error: on_done(None), slow=AI_LANE)
+
+    # ------------------------------------------------------------------
     def shutdown(self) -> None:
         """Stop the scan and the background reading (before the app quits)."""
         if self.scan_worker is not None and shiboken6.isValid(self.scan_worker):
@@ -587,11 +702,32 @@ class LibraryState(QObject):
                 thread.quit()
                 thread.wait(2000)  # (cancelled: it stops after the folder it's in)
         self._meta_generation += 1  # ends the file-details reading chain
+        self._ai_generation += 1
         self.watcher.clear()
 
 
 LOOK_THREADS = 2  # pictures looked at side by side (thumbnails keep the rest of the processor)
 LOOK_LANE = "looks"  # (a background lane of its own: a big 3D model's details can take a minute)
+AI_THREADS = 2  # files read side by side for AI Search
+AI_LANE = "ai"
+
+
+def ai_ready() -> bool:
+    """AI Search is downloaded (or the tests' stand-in is on)."""
+    import os
+
+    return ai_tools.is_installed("search") or os.environ.get(ai_helper.ENGINE_ENV, "").endswith("fake")
+
+
+def _ai_pixels(row):
+    """A file's picture for AI Search (from its thumbnail, for a model), or None if it can't be read."""
+    from core.ai_search import picture_pixels, thumbnail_pixels
+
+    _asset_id, path, thumbnail, _key = row
+    try:
+        return thumbnail_pixels(thumbnail) if thumbnail else picture_pixels(path)
+    except Exception:  # pylint: disable=broad-except  (damaged, too big, unknown kind)
+        return None
 
 
 def _ignore_result(_result) -> None:

@@ -134,8 +134,11 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
     return {"error": f"unknown request {op!r}"}
 
 
-def serve(address: str) -> int:
-    """The helper: answer requests on address until the app goes, or nothing comes for IDLE_SECONDS."""
+def serve(address: str, handler: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
+          idle_seconds: float = IDLE_SECONDS) -> int:
+    """The helper: answer requests on address (with handler: handle by default) until the app goes, or
+    nothing comes for idle_seconds. (core.ai_helper serves its own requests this way too.)"""
+    handler = handler or handle
     key = bytes.fromhex(os.environ.get(KEY_ENV, ""))
     if not key:
         return 2
@@ -147,13 +150,13 @@ def serve(address: str) -> int:
     with connection:
         while True:
             try:
-                if not connection.poll(IDLE_SECONDS):
+                if not connection.poll(idle_seconds):
                     return 0
                 request = connection.recv()
             except (EOFError, OSError):
                 return 0  # (the app went)
             try:
-                reply = handle(request)
+                reply = handler(request)
             except MemoryError:
                 reply = {"error": "memory"}
             except Exception as exc:  # pylint: disable=broad-except
@@ -257,8 +260,11 @@ def helper_command(address: str) -> list[str]:
 class ModelReader:
     """One helper (started when first needed, again after it goes). Calls take turns: one model at a time."""
 
-    def __init__(self, name: str, background: bool):
+    def __init__(self, name: str, background: bool, command: Optional[Callable[[str], list[str]]] = None,
+                 extra_env: Optional[Callable[[], dict[str, str]]] = None):
         self.name = name
+        self.command = command or helper_command  # (core.ai_helper starts its own helper)
+        self.extra_env = extra_env  # (more for its environment: core.ai_helper says where the tools are)
         self.background = background  # (below normal priority: the library's reading never slows the app)
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
@@ -270,14 +276,14 @@ class ModelReader:
     def _start(self) -> None:
         address = rf"\\.\pipe\AssetManager-{os.getpid()}-{self.name}-{uuid.uuid4().hex[:8]}"
         key = os.urandom(16)
-        env = {**os.environ, KEY_ENV: key.hex()}
+        env = {**os.environ, KEY_ENV: key.hex(), **(self.extra_env() if self.extra_env is not None else {})}
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if self.background:
             flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
         root = Path(__file__).resolve().parent.parent
         try:
             process = subprocess.Popen(
-                helper_command(address), env=env, cwd=str(root), creationflags=flags,
+                self.command(address), env=env, cwd=str(root), creationflags=flags,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except OSError as exc:

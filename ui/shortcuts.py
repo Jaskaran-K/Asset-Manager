@@ -99,6 +99,8 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("search.details_media", SEARCH, "dur:<30s  poly:<10k", "Video length, 3D model faces"),
     Shortcut("search.color", SEARCH, "color:red  color:#c04020", "Pictures with that colour on 15% of them or more (the palette button in the search box lists the names, or picks one)"),
     Shortcut("search.similar", SEARCH, "Right-click a picture > Find Similar", "The picture and its look-alikes (resized or re-saved copies), closest first"),
+    Shortcut("search.ai", SEARCH, "Click the AI button in the search box", "AI Search: describe what you're looking for (\"creature skull side view\"); files whose pictures match, best first"),
+    Shortcut("search.like", SEARCH, "Right-click a file > More Like This", "Files with the same kind of content (AI Search), closest first"),
     Shortcut("search.remove_last_chip", SEARCH, "Backspace (empty box)", "Remove the last tag filter", "Backspace"),
     Shortcut("search.clear", SEARCH, "Esc", "Clear the search text and all tag filters", "Esc"),
 

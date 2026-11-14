@@ -175,6 +175,43 @@ def run_self_test(log_path: Optional[str]) -> int:
                     raise RuntimeError(f"a converted picture came out {made.size}")
         return f"a set of {len(request['maps'])} maps found, sent as a material, converted"
 
+    def check_ai_tools():
+        # The AI tools (core.ai_helper): the helper program (this app again, with --ai-helper) must start and
+        # answer through its pipe, from the build as it ships. The stand-in engine answers (the models are
+        # downloaded by the user, not shipped); with AI Search downloaded, the real model answers too.
+        from unittest import mock
+
+        import numpy as np
+        from PIL import Image
+
+        from core import ai_helper, ai_search, ai_tools
+        from ui import ai_download, artbook_upscale, batch_dialogs  # noqa: F401 (the windows: they must be in the build)
+
+        with mock.patch.dict(os.environ, {ai_helper.ENGINE_ENV: "fake"}):
+            try:
+                pixels = np.zeros((2, ai_helper.PICTURE_SIDE, ai_helper.PICTURE_SIDE, 3), np.uint8)
+                pixels[1, ..., 0] = 255
+                vectors = ai_helper.picture_vectors(pixels)
+                red = ai_helper.text_vector("red")
+                picture = Image.new("RGB", (60, 40), (20, 20, 20))
+                picture.paste((230, 230, 230), (20, 10, 40, 30))
+                cut = ai_search.cut_out(picture)
+                pid = ai_helper._reader().request({"op": "ping"}, 30)["pong"]  # pylint: disable=protected-access
+            finally:
+                ai_helper.close()
+        if vectors.shape != (2, ai_helper.VECTOR_SIZE) or not (vectors[1].astype(np.float32) @ red > vectors[0].astype(np.float32) @ red):
+            raise RuntimeError("the AI helper's vectors came back wrong")
+        if pid == os.getpid() or cut.getpixel((2, 2))[3] != 0 or cut.getpixel((30, 20))[3] != 255:
+            raise RuntimeError("the AI helper's cut-out came back wrong")
+        if ai_tools.is_installed("search"):
+            try:
+                ai_helper.text_vector("a skull")
+                device = ai_helper.last_device.get("search")
+            finally:
+                ai_helper.close()
+            return f"the helper answers; AI Search ran on the {device}"
+        return f"the helper answers; ONNX Runtime {ai_tools.RUNTIME_VERSION} and the models download on first use"
+
     def check_model_reader():
         # 3D models are read in a helper program (this app again, with --model-reader): it must start, read a
         # model and send it back, from the build as it ships
@@ -319,6 +356,7 @@ def run_self_test(log_path: Optional[str]) -> int:
     step("rendering", check_render)
     step("upscaling", check_upscale)
     step("model reader", check_model_reader)
+    step("AI tools", check_ai_tools)
     step("colours and look-alikes", check_picture_looks)
     step("texture sets and batch convert", check_texture_sets)
     step("image thumbnails", check_images)

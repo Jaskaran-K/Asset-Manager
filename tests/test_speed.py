@@ -29,6 +29,7 @@ TAGS = 40
 TAG_LINKS = 60_000
 # Seconds (the best of a few runs): 3 times what GitHub's machine took (in brackets: the Tests run of
 # 0.6.11, Python 3.14.10), at least 0.05 s (timer noise on a busy machine). See the module docstring.
+AI_RANK_BUDGET, AI_LIKE_BUDGET, AI_SUGGEST_BUDGET = 0.24, 0.24, 0.24  # (5 x this computer's 0.047 s)
 BUDGETS = {
     "app imports": 2.3,  # (0.752 s)
     "saved scan: write": 0.21,  # (0.068 s)
@@ -44,6 +45,10 @@ BUDGETS = {
     # Batch 5, estimated the same way
     "texture sets: find them": 0.9,  # (not run there yet)
     "texture sets: group the grid": 0.13,  # (not run there yet)
+    # Batch 6, estimated the same way (50,000 files with AI Search vectors)
+    "AI Search: rank every file": AI_RANK_BUDGET,  # (not run there yet)
+    "More Like This: rank every file": AI_LIKE_BUDGET,  # (not run there yet)
+    "tag suggestions: one file": AI_SUGGEST_BUDGET,  # (not run there yet)
 }
 SEARCHES = {  # what's typed: its budget (GitHub's machine)
     "skull": 0.06,  # (0.020 s)
@@ -192,6 +197,28 @@ def test_texture_sets(library):
     sets = found[-1]
     assert len(sets) >= 2000
     timed("texture sets: group the grid", lambda: group_into_sets(assets, sets), BUDGETS["texture sets: group the grid"])
+
+
+def test_ai_search():
+    import numpy as np
+
+    from core import ai_search
+    from core.ai_helper import VECTOR_SIZE
+
+    rng = np.random.default_rng(6)
+    vectors = rng.standard_normal((50_000, VECTOR_SIZE)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    index = ai_search.VectorIndex(dict(enumerate(vectors.astype(np.float16))))
+    allowed = frozenset(range(50_000))
+    query = vectors[7]
+    found = []
+    timed("AI Search: rank every file", lambda: found.append(ai_search.search(index, query, allowed)), BUDGETS["AI Search: rank every file"])
+    assert next(iter(found[-1])) == 7
+    timed("More Like This: rank every file", lambda: found.append(ai_search.more_like(index, 9, allowed)),
+          BUDGETS["More Like This: rank every file"])
+    assert next(iter(found[-1])) == 9
+    tags_of = {i: [f"Tag {i % 20}"] for i in range(0, 50_000, 3)}
+    timed("tag suggestions: one file", lambda: ai_search.suggest_tags(index, [10], tags_of), BUDGETS["tag suggestions: one file"])
 
 
 def test_tag_searches(library):

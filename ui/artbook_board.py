@@ -2613,19 +2613,19 @@ class BoardView(QGraphicsView):
         """The selected images that may be upscaled (not in a locked group)."""
         return [item for item in self._images_in_order() if not self.is_locked(item)] if self.page_id else []
 
-    def upscale_selection(self) -> None:
-        """Open the Upscale window for the selected images."""
-        from ui.artbook_upscale import UpscaleDialog  # (it uses this module's picture loading)
+    def upscale_selection(self, cutout: bool = False) -> None:
+        """Open the Upscale window for the selected images (cutout: the Remove Background window)."""
+        from ui.artbook_upscale import CutoutDialog, UpscaleDialog  # (they use this module's picture loading)
 
         items = self.upscale_candidates()
         if not items:
             return
-        dialog = UpscaleDialog(self, items)
+        dialog = (CutoutDialog if cutout else UpscaleDialog)(self, items)
         dialog.finished.connect(dialog.deleteLater)
         dialog.open()
         self.upscale_dialog = dialog
 
-    def apply_upscales(self, results: dict[str, dict[str, Any]]) -> int:
+    def apply_upscales(self, results: dict[str, dict[str, Any]], what: str = "upscale") -> int:
         """Show upscaled pictures ({item id: {"source", "size", "base" (a small QImage)}}): one undo
         step. Each image remembers the picture it had (Revert to Original). Returns how many changed."""
         items = [(self._items.get(item_id), result) for item_id, result in results.items()]
@@ -2638,7 +2638,7 @@ class BoardView(QGraphicsView):
             original = item.original or {"source": dict(item.source), "size": list(item.natural), "name": item.name}
             pictures = (QPixmap.fromImage(result["base"]), True, None)
             swaps.append((item, *self._picture_swap(item, result["source"], result["size"], item.display_name(), pictures, original)))
-        self.undo_stack.push(_ReplaceManyCommand(swaps, f"upscale {count} image{'s' if count != 1 else ''}"))
+        self.undo_stack.push(_ReplaceManyCommand(swaps, f"{what} {count} image{'s' if count != 1 else ''}"))
         self._schedule_detail()  # (the sharp copies load as usual)
         self.viewport().update()
         return count
@@ -3977,6 +3977,7 @@ class BoardView(QGraphicsView):
             ("Image List", "artbook.image_list", self.toggle_image_list, True, self.image_list_open()),
             ("Selection", selection),
             ("Upscale...", None, self.upscale_selection, bool(self.upscale_candidates())),
+            ("Remove Background...", None, lambda: self.upscale_selection(cutout=True), bool(self.upscale_candidates())),
             ("Revert to Original", None, self.revert_upscales, any(item.original and not self.is_locked(item) for item in images)),
             ("Arrange", arrange),
             ("Align", align),

@@ -6,6 +6,9 @@ differ), one at a time in the background. The comparison shows the original as t
 (left of the line) and the upscaled picture (right): drag the line, zoom with the wheel, drag to move.
 Use Upscaled Pictures puts the ticked ones on the board as one undo step; each image keeps its original
 (Images > Revert to Original). An image upscaled again starts from its original, not from the last result.
+
+CutoutDialog is the same window for Remove Background (BiRefNet, or BEN2 as a second try: core.ai_search): it
+starts from the picture the image shows now (an upscaled one too), and shows the result on a checkerboard.
 """
 
 from __future__ import annotations
@@ -73,6 +76,23 @@ def upscale_picture(page_id: str, source: dict[str, Any], model: str, factor: in
     return {"source": {"path": None, "blob": blob}, "size": size, "base": store._to_qimage(result, BASE_SIDE)}  # pylint: disable=protected-access
 
 
+def cutout_picture(page_id: str, source: dict[str, Any], model: str, progress, should_stop) -> dict[str, Any]:
+    """Remove an image's background and store the result in its page (as upscale_picture); raises
+    ai_helper.AIFailed, Cancelled."""
+    from core import ai_search
+
+    picture = _pil(_decode_saved(page_id, source, upscaler.MAX_SIDE))
+    progress(100, 1000)
+    result = ai_search.cut_out(picture, model)
+    if should_stop():
+        raise Cancelled()
+    progress(900, 1000)
+    buffer = io.BytesIO()
+    result.save(buffer, "PNG", compress_level=6)
+    blob = store.store_blob(page_id, buffer.getvalue(), ".png")
+    return {"source": {"path": None, "blob": blob}, "size": result.size, "base": store._to_qimage(result, BASE_SIDE)}  # pylint: disable=protected-access
+
+
 def _load_pair(page_id: str, original: dict[str, Any], upscaled: Optional[dict[str, Any]]) -> tuple[QImage, Optional[QImage]]:
     before = _decode_saved(page_id, original, upscaler.MAX_SIDE)
     after = store.decode_file(store.blob_path(page_id, upscaled["blob"]), upscaler.MAX_SIDE)[0] if upscaled else None
@@ -93,6 +113,8 @@ class CompareView(QWidget):
         self.before: Optional[QPixmap] = None
         self.after: Optional[QPixmap] = None
         self.message = ""
+        self.after_label = "Upscaled"
+        self.checker_after = False  # (a cut-out: its transparent parts on a checkerboard)
         self.split = 0.5  # where the line is, as a share of the width
         self.zoom = 1.0
         self.center = QPointF(0.5, 0.5)  # the picture's point at the middle of the view (0..1 each way)
@@ -143,11 +165,13 @@ class CompareView(QWidget):
             if self.after is not None:
                 p.save()
                 p.setClipRect(QRectF(line, 0, self.width() - line, self.height()))
+                if self.checker_after:
+                    p.fillRect(target, _checker_brush())
                 p.drawPixmap(target, self.after, QRectF(self.after.rect()))
                 p.restore()
                 self._draw_line(p, line)
                 self._draw_label(p, "Original", left=True)
-                self._draw_label(p, "Upscaled", left=False)
+                self._draw_label(p, self.after_label, left=False)
         if self.message:
             p.setPen(theme_color("text_strong"))
             box = QRectF(self.rect()).adjusted(20, 20, -20, -20)
@@ -243,29 +267,86 @@ class CompareView(QWidget):
         self.center = QPointF(min(1 - half, max(half, self.center.x())), min(1 - half, max(half, self.center.y())))
 
 
+def _checker_brush():
+    from PySide6.QtGui import QBrush
+
+    tile = QPixmap(16, 16)
+    tile.fill(QColor(205, 205, 205))
+    p = QPainter(tile)
+    p.fillRect(0, 0, 8, 8, QColor(160, 160, 160))
+    p.fillRect(8, 8, 8, 8, QColor(160, 160, 160))
+    p.end()
+    return QBrush(tile)
+
+
 # ----------------------------------------------------------------------
 # The window
 # ----------------------------------------------------------------------
 class UpscaleDialog(QDialog):
-    """See the module docstring."""
+    """See the module docstring. The class attributes and the _tool / _work methods are what CutoutDialog
+    changes."""
 
     upscaled = Signal(int)  # how many pictures went on the board
+    TITLE = "Upscale Images"
+    TOOL = "Real-ESRGAN"
+    VERB = "Upscale"
+    DOING = "Upscaling"  # (the status line: "Upscaling skull.png...")
+    WORKING = "Upscaling"  # (a row's status, Stop's tooltip)
+    RESULT = "Upscaled"
+    ICON = "upscale"
+    FROM_ORIGINAL = True  # (an image upscaled again starts from its original)
+    OPTIONS = True  # (kind of picture and size)
+    CHECKER = False  # (the result on a checkerboard: a cut-out's transparent parts show)
+
+    def _tool_installed(self) -> bool:
+        return upscaler.is_installed()
+
+    def _tool_supported(self) -> bool:
+        return upscaler.supported()
+
+    def _tool_bytes(self) -> int:
+        return upscaler.DOWNLOAD.size
+
+    def _tool_install(self, progress, should_stop) -> None:
+        upscaler.install(progress, should_stop)
+
+    def _installer(self):
+        """What downloads the tool, made here on the UI thread (it runs on a worker: nothing it uses may be a
+        widget)."""
+        return self._tool_install
+
+    def _tool_remove(self) -> None:
+        upscaler.remove()
+
+    def _tool_intro(self) -> str:
+        return (f"Real-ESRGAN is free and downloads once ({upscaler.DOWNLOAD.size / 1e6:.0f} MB). It runs on the "
+                "graphics card. Upscaling adds believable detail, not the real thing, so compare before using a picture.")
+
+    def _run_tip(self) -> str:
+        return "Upscale the images selected in the list, with the kind of picture and size chosen"
+
+    def _eligible(self, size) -> bool:
+        return upscaler.target_size(size, max(upscaler.FACTORS)) is not None
+
+    def _work(self, page_id: str, source: dict[str, Any]):
+        model, factor = self.model(), self.factor()
+        return lambda progress, stop: upscale_picture(page_id, source, model, factor, progress, stop)
 
     def __init__(self, board: BoardView, items: list[ImageItem]):
         super().__init__(board)
         self.board = board
         self.page_id = board.page_id
-        self.setWindowTitle("Upscale Images")
+        self.setWindowTitle(self.TITLE)
         self.resize(1100, 720)
         self.rows: list[dict[str, Any]] = []
         for item in items:
-            original = item.original
+            original = item.original if self.FROM_ORIGINAL else None
             source = dict(original["source"]) if original else dict(item.source)
             size = tuple(original["size"]) if original else item.natural
-            eligible = upscaler.target_size(size, max(upscaler.FACTORS)) is not None
+            eligible = self._eligible(size)
             self.rows.append({
                 "item": item, "source": source, "size": size, "eligible": eligible, "result": None,
-                "made_with": "", "status": "Not upscaled yet" if eligible else "Big enough already",
+                "made_with": "", "status": f"Not {self.RESULT.lower()} yet" if eligible else "Big enough already",
             })
         self._queue: list[int] = []
         self._running: Optional[int] = None
@@ -293,7 +374,7 @@ class UpscaleDialog(QDialog):
         self.list.setWordWrap(True)
         self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list.setToolTip("Select the images to upscale (Ctrl or Shift for several). Tick the ones to use")
+        self.list.setToolTip(f"Select the images to {self.VERB.lower()} (Ctrl or Shift for several). Tick the ones to use")
         self.list.currentRowChanged.connect(self._show_row)
         self.list.itemSelectionChanged.connect(self._refresh)
         self.list.itemChanged.connect(self._on_item_changed)
@@ -301,13 +382,18 @@ class UpscaleDialog(QDialog):
         right = QVBoxLayout()
         middle.addLayout(right, 1)
         self.compare = CompareView(self)
+        self.compare.after_label = self.RESULT
+        self.compare.checker_after = self.CHECKER
         right.addWidget(self.compare, 1)
         hint = QLabel("Drag the line to compare. Mouse wheel zooms, drag to move, double-click to fit.", self)
         hint.setObjectName("mutedLabel")
         right.addWidget(hint)
 
-        options = QHBoxLayout()
-        layout.addLayout(options)
+        self.options_box = QWidget(self)
+        options = QHBoxLayout(self.options_box)
+        options.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.options_box)
+        self.options_box.setVisible(self.OPTIONS)
 
         def heading(text: str) -> None:
             label = QLabel(text, self)
@@ -327,16 +413,7 @@ class UpscaleDialog(QDialog):
                 options.addWidget(button)
             return group
 
-        heading("Kind of picture")
-        self.model_choice = choices([(key, name, tip) for key, (_model, name, tip) in upscaler.MODELS.items()], settings["model"])
-        options.addSpacing(14)
-        heading("Size")
-        self.factor_choice = choices([
-            (2, "2x", "Twice as big: gentler, and half the disk space"),
-            (4, "4x", "Four times as big: the most detail"),
-        ], settings["factor"])
-        self.model_choice.buttonClicked.connect(self._on_option_picked)
-        self.factor_choice.buttonClicked.connect(self._on_option_picked)
+        self._build_options(heading, choices, options, settings)
         options.addStretch(1)
 
         self.status = QLabel("", self)
@@ -351,27 +428,39 @@ class UpscaleDialog(QDialog):
 
         buttons = QHBoxLayout()
         layout.addLayout(buttons)
-        self.btn_upscale = QPushButton("Upscale", self)
-        set_icon(self.btn_upscale, "upscale")
+        self.btn_upscale = QPushButton(self.VERB, self)
+        set_icon(self.btn_upscale, self.ICON)
         self.btn_upscale.clicked.connect(self._on_upscale)
         buttons.addWidget(self.btn_upscale)
         self.btn_stop = QPushButton("Stop", self)
-        self.btn_stop.setToolTip("Stop upscaling (pictures already done are kept)")
+        self.btn_stop.setToolTip(f"Stop {self.WORKING.lower()} (pictures already done are kept)")
         self.btn_stop.clicked.connect(self._on_stop)
         buttons.addWidget(self.btn_stop)
         buttons.addStretch(1)
-        self.btn_remove = QPushButton("Remove Real-ESRGAN", self)
-        self.btn_remove.setToolTip("Delete the downloaded Real-ESRGAN (it can be downloaded again)")
+        self.btn_remove = QPushButton(f"Remove {self.TOOL}", self)
+        self.btn_remove.setToolTip(f"Delete the downloaded {self.TOOL} (it can be downloaded again)")
         self.btn_remove.clicked.connect(self._on_remove)
         buttons.addWidget(self.btn_remove)
-        self.btn_apply = QPushButton("Use Upscaled Pictures", self)
-        self.btn_apply.setToolTip("Put the ticked upscaled pictures on the board (one Ctrl+Z; Images > Revert to Original any time)")
+        self.btn_apply = QPushButton(f"Use {self.RESULT} Pictures", self)
+        self.btn_apply.setToolTip(f"Put the ticked {self.RESULT.lower()} pictures on the board (one Ctrl+Z; Images > Revert to Original any time)")
         self.btn_apply.clicked.connect(self._on_apply)
         buttons.addWidget(self.btn_apply)
         close = QPushButton("Cancel", self)
         close.setToolTip("Close without changing the board")
         close.clicked.connect(self.reject)
         buttons.addWidget(close)
+
+    def _build_options(self, heading, choices, options, settings) -> None:
+        heading("Kind of picture")
+        self.model_choice = choices([(key, name, tip) for key, (_model, name, tip) in upscaler.MODELS.items()], settings["model"])
+        options.addSpacing(14)
+        heading("Size")
+        self.factor_choice = choices([
+            (2, "2x", "Twice as big: gentler, and half the disk space"),
+            (4, "4x", "Four times as big: the most detail"),
+        ], settings["factor"])
+        self.model_choice.buttonClicked.connect(self._on_option_picked)
+        self.factor_choice.buttonClicked.connect(self._on_option_picked)
 
     def _fill_list(self) -> None:
         self.list.blockSignals(True)
@@ -425,29 +514,28 @@ class UpscaleDialog(QDialog):
         for group in (self.model_choice, self.factor_choice):
             for button in group.buttons():
                 button.setEnabled(not busy)
-        installed = upscaler.is_installed()
+        installed = self._tool_installed()
         count = len(self._selected_rows())
         if not installed:
-            self.btn_upscale.setText(f"Download Real-ESRGAN ({upscaler.DOWNLOAD.size / 1e6:.0f} MB) and Upscale")
-            self.btn_upscale.setToolTip("Download Real-ESRGAN once (free), then upscale the selected images")
+            self.btn_upscale.setText(f"Download {self.TOOL} ({self._tool_bytes() / 1e6:.0f} MB) and {self.VERB}")
+            self.btn_upscale.setToolTip(f"Download {self.TOOL} once (free), then {self.VERB.lower()} the selected images")
         else:
-            self.btn_upscale.setText(f"Upscale {count} Image{'s' if count != 1 else ''}" if count != 1 else "Upscale")
-            self.btn_upscale.setToolTip("Upscale the images selected in the list, with the kind of picture and size chosen")
-        self.btn_upscale.setEnabled(not busy and count > 0 and upscaler.supported())
+            self.btn_upscale.setText(f"{self.VERB} {count} Image{'s' if count != 1 else ''}" if count != 1 else self.VERB)
+            self.btn_upscale.setToolTip(self._run_tip())
+        self.btn_upscale.setEnabled(not busy and count > 0 and self._tool_supported())
         self.btn_stop.setEnabled(busy)
+        self.btn_remove.setText(f"Remove {self.TOOL}")
+        self.btn_remove.setToolTip(f"Delete the downloaded {self.TOOL} (it can be downloaded again)")
         self.btn_remove.setVisible(installed)
         self.btn_remove.setEnabled(not busy)
         ready = len(self.chosen())
-        self.btn_apply.setText(f"Use {ready} Upscaled Picture{'s' if ready != 1 else ''}" if ready else "Use Upscaled Pictures")
+        self.btn_apply.setText(f"Use {ready} {self.RESULT} Picture{'s' if ready != 1 else ''}" if ready else f"Use {self.RESULT} Pictures")
         self.btn_apply.setEnabled(not busy and ready > 0)
         if not busy and not self.status.text():
-            if not upscaler.supported():
-                self.status.setText("Upscaling is only available on Windows.")
+            if not self._tool_supported():
+                self.status.setText(f"{self.WORKING} is only available on Windows.")
             elif not installed:
-                self.status.setText(
-                    f"Real-ESRGAN is free and downloads once ({upscaler.DOWNLOAD.size / 1e6:.0f} MB). It runs on the "
-                    "graphics card. Upscaling adds believable detail, not the real thing, so compare before using a picture."
-                )
+                self.status.setText(self._tool_intro())
 
     def _say(self, text: str) -> None:
         self.status.setText(text)
@@ -493,7 +581,7 @@ class UpscaleDialog(QDialog):
         for index in self._queue:
             self.rows[index]["status"] = "Waiting..."
             self._show_status(self.list.item(index), self.rows[index])
-        if not upscaler.is_installed():
+        if not self._tool_installed():
             self._start_download()
             return
         self._run_next()
@@ -505,19 +593,19 @@ class UpscaleDialog(QDialog):
         self._downloading = True
         self.progress.setValue(0)
         self.progress.show()
-        self._say("Downloading Real-ESRGAN...")
+        self._say(f"Downloading {self.TOOL}...")
         self._job = UnpackJob()
-        unpack_in_background(upscaler.install, self._on_downloaded, self._on_download_failed, self._on_download_progress, self._job)
+        unpack_in_background(self._installer(), self._on_downloaded, self._on_download_failed, self._on_download_progress, self._job)
         self._refresh()
 
     def _on_download_progress(self, done: int, total: int) -> None:
         self.progress.setValue(int(1000 * done / max(total, 1)))
-        self._say(f"Downloading Real-ESRGAN: {done / 1e6:.0f} of {total / 1e6:.0f} MB")
+        self._say(f"Downloading {self.TOOL}: {done / 1e6:.0f} of {total / 1e6:.0f} MB")
 
     def _on_downloaded(self, _result: object) -> None:
         self._job = None
         self._downloading = False
-        self._say("Real-ESRGAN is ready.")
+        self._say(f"{self.TOOL} is ready.")
         self._run_next()
 
     def _on_download_failed(self, message: str) -> None:
@@ -537,17 +625,16 @@ class UpscaleDialog(QDialog):
         index = self._queue.pop(0)
         self._running = index
         row = self.rows[index]
-        row["status"] = "Upscaling..."
+        row["status"] = f"{self.WORKING}..."
         self._show_status(self.list.item(index), row)
         self.progress.setValue(0)
         self.progress.show()
         left = len(self._queue)
-        self._say(f"Upscaling {row['item'].display_name()}" + (f" ({left} more after it)" if left else "") + "...")
-        page_id, source, model, factor = self.page_id, row["source"], self.model(), self.factor()
+        self._say(f"{self.DOING} {row['item'].display_name()}" + (f" ({left} more after it)" if left else "") + "...")
         made_with = self._made_with()
         self._job = UnpackJob()
         unpack_in_background(
-            lambda progress, stop: upscale_picture(page_id, source, model, factor, progress, stop),
+            self._work(self.page_id, row["source"]),
             lambda result: self._on_upscaled(index, made_with, result),
             lambda message: self._on_failed(index, message),
             lambda done, total: self._on_progress(index, done, total),
@@ -560,7 +647,7 @@ class UpscaleDialog(QDialog):
             return
         self.progress.setValue(int(1000 * done / max(total, 1)))
         row = self.rows[index]
-        row["status"] = f"Upscaling... {100 * done // max(total, 1)}%"
+        row["status"] = f"{self.WORKING}... {100 * done // max(total, 1)}%"
         self._show_status(self.list.item(index), row)
 
     def _on_upscaled(self, index: int, made_with: str, result: dict[str, Any]) -> None:
@@ -574,13 +661,13 @@ class UpscaleDialog(QDialog):
             self._show_row(index)
         if not self._queue:
             done = sum(1 for r in self.rows if r["result"] is not None)
-            self._say(f"Done. Compare each one, untick any you don't want, then Use Upscaled Pictures. ({done} ready)")
+            self._say(f"Done. Compare each one, untick any you don't want, then Use {self.RESULT} Pictures. ({done} ready)")
         self._run_next()
 
     def _on_failed(self, index: int, message: str) -> None:
         self._job = None
         row = self.rows[index]
-        row["status"] = "Couldn't upscale"
+        row["status"] = f"Couldn't {self.VERB.lower()}"
         self._show_status(self.list.item(index), row)
         self._say(message)
         self._reset_waiting()  # (the same thing would stop the rest: a missing graphics card, say)
@@ -588,11 +675,10 @@ class UpscaleDialog(QDialog):
         self._running = None
         self._refresh()
 
-    @staticmethod
-    def _done_text(row: dict[str, Any]) -> str:
+    def _done_text(self, row: dict[str, Any]) -> str:
         """A row's status when nothing's happening to it: what it was upscaled with, or not yet."""
         if row["result"] is None:
-            return "Not upscaled yet"
+            return f"Not {self.RESULT.lower()} yet"
         w, h = row["result"]["size"]
         return f"{row['made_with']}: {w} x {h}"
 
@@ -619,7 +705,7 @@ class UpscaleDialog(QDialog):
         self._refresh()
 
     def _on_remove(self) -> None:
-        upscaler.remove()
+        self._tool_remove()
         self._say("")
         self._refresh()
 
@@ -628,9 +714,9 @@ class UpscaleDialog(QDialog):
         chosen = self.chosen()
         if not chosen or self.board.page_id != self.page_id:
             return
-        count = self.board.apply_upscales(chosen)
+        count = self.board.apply_upscales(chosen, self.VERB.lower())
         self.board.show_message(
-            f"Upscaled {count} image{'s' if count != 1 else ''}. Ctrl+Z, or Images > Revert to Original, brings the original back."
+            f"{self.RESULT} {count} image{'s' if count != 1 else ''}. Ctrl+Z, or Images > Revert to Original, brings the original back."
         )
         self.upscaled.emit(count)
         self.accept()
@@ -642,3 +728,97 @@ class UpscaleDialog(QDialog):
         if self.board.upscale_dialog is self:
             self.board.upscale_dialog = None
         super().done(result)
+
+
+class CutoutDialog(UpscaleDialog):
+    """Remove Background on the board's images (BiRefNet, or BEN2 as a second try: core.ai_search), in the Upscale
+    window, with the model chosen in its options row."""
+
+    TITLE = "Remove Background"
+    VERB = "Remove Background"
+    DOING = "Removing the background of"
+    WORKING = "Removing the background"
+    RESULT = "Cut-out"
+    ICON = "cutout"
+    FROM_ORIGINAL = False  # (the picture it shows now: an upscaled one too)
+    CHECKER = True
+
+    @property
+    def TOOL(self) -> str:  # (the model chosen)  # noqa: N802
+        from core import ai_tools
+
+        return ai_tools.TOOLS[self.model()].model.split(" (")[0]
+
+    def _build_options(self, heading, choices, options, settings) -> None:
+        from core import ai_tools
+        from core.settings import get_cutout_model
+
+        heading("Model")
+        self.model_choice = choices([(key, ai_tools.TOOLS[key].model.split(" (")[0], ai_tools.TOOLS[key].about)
+                                     for key in ai_tools.CUTOUT_MODELS], get_cutout_model())
+        self.factor_choice = QButtonGroup(self)  # (no sizes)
+        self.model_choice.buttonClicked.connect(self._on_option_picked)
+
+    def _on_option_picked(self, _button) -> None:
+        from core.settings import set_cutout_model
+
+        set_cutout_model(self.model())
+        self.status.setText("")
+        self._refresh()
+
+    def _tool_installed(self) -> bool:
+        from core import ai_tools
+
+        return ai_tools.is_installed(self.model())
+
+    def _tool_supported(self) -> bool:
+        from core import ai_tools
+
+        return ai_tools.supported()
+
+    def _tool_bytes(self) -> int:
+        from core import ai_tools
+
+        return ai_tools.needed_bytes(self.model())
+
+    def _tool_install(self, progress, should_stop) -> None:
+        from core import ai_tools
+
+        ai_tools.install([self.model()], progress, should_stop)
+
+    def _installer(self):
+        from core import ai_tools
+
+        model = self.model()  # (read here: the download runs on a worker thread)
+        return lambda progress, should_stop: ai_tools.install([model], progress, should_stop)
+
+    def _tool_remove(self) -> None:
+        from core import ai_helper, ai_tools
+
+        ai_helper.close()
+        ai_tools.remove(self.model())
+
+    def _tool_intro(self) -> str:
+        from core import ai_tools
+
+        tool = ai_tools.TOOLS[self.model()]
+        return (f"{tool.model} is free and downloads once ({ai_tools.needed_bytes(self.model()) / 1e6:.0f} MB). It runs on "
+                f"this computer, on the graphics card when it can. {tool.about}. It keeps the subject: a render, a "
+                "photo of an object, a character; a full scene has no single subject to keep.")
+
+    def _run_tip(self) -> str:
+        return "Remove the background of the images selected in the list (each keeps its original)"
+
+    def _eligible(self, size) -> bool:
+        return True
+
+    def _made_with(self) -> str:
+        from core import ai_helper
+
+        model = self.model()
+        device = ai_helper.last_device.get(model)
+        return f"Cut out by {self.TOOL}" + (f" on the {device}" if device else "")
+
+    def _work(self, page_id: str, source: dict[str, Any]):
+        model = self.model()
+        return lambda progress, stop: cutout_picture(page_id, source, model, progress, stop)

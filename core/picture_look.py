@@ -489,6 +489,31 @@ def _read_member(path: str) -> Look:
             return look_of_pixels(*_from_pil(im))
 
 
+def read_pixels(path: str, side: int = SIDE) -> Pixels:
+    """A picture file, or one inside an archive ("archive|member"), at about side (as read_scaled), with
+    read_look's limits (big ones one at a time; too big ones refused). Raises if it can't be read."""
+    from .archives import SEPARATOR, local_file, member_for_path, read_bytes
+
+    if SEPARATOR in path:
+        member = member_for_path(path)
+        if member is None or member.size > MAX_MEMBER_BYTES:
+            raise ValueError("not readable inside its archive")
+        heavy = member.size > HEAVY_FILE_BYTES
+        if member.base_name.lower().endswith((".psd", ".psb", ".exr", ".hdr")):
+            with local_file(member) as copy:
+                with _one_at_a_time(heavy or _pixel_count(copy, member.base_name) > HEAVY_PIXELS):
+                    return _from_file(copy, member.base_name, side)
+        data = read_bytes(member, limit=MAX_MEMBER_BYTES)
+        with _one_at_a_time(heavy or _pixel_count(data, member.base_name) > HEAVY_PIXELS):
+            with Image.open(io.BytesIO(data)) as im:
+                return _from_pil(im, side)
+    size = os.path.getsize(path)
+    if path.lower().endswith(".exr") and size > MAX_EXR_BYTES:
+        raise ValueError("too big")
+    with _one_at_a_time(size > HEAVY_FILE_BYTES or _pixel_count(path, path) > HEAVY_PIXELS):
+        return _from_file(path, path, side)
+
+
 def needs_look(extension: str) -> bool:
     """Whether files of this type get a look (images)."""
     from .scanner import TEXTURE_EXTENSIONS

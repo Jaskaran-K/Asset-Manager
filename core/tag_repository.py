@@ -145,6 +145,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE assets ADD COLUMN seen_folder TEXT;
     UPDATE assets SET seen_folder = '';
     """,
+    # v9: AI Search's vectors (core.ai_search: SigLIP, 768 float16), read in the background once AI Search is
+    # downloaded; ai_key is meta_key + the model's version (a new model reads every file again).
+    """
+    ALTER TABLE assets ADD COLUMN ai_vector BLOB;
+    ALTER TABLE assets ADD COLUMN ai_key TEXT;
+    """,
 ]
 
 
@@ -236,6 +242,12 @@ def look_key(size: int, mtime: float) -> str:
     from .picture_look import LOOK_VERSION
 
     return f"{meta_key(size, mtime)}:v{LOOK_VERSION}"
+
+
+def ai_key(size: int, mtime: float) -> str:
+    from .ai_tools import TOOLS
+
+    return f"{meta_key(size, mtime)}:{TOOLS['search'].version}"
 
 
 def _is_missing(path: str) -> bool:
@@ -1132,6 +1144,47 @@ class TagRepository:
             conn.executemany(
                 "UPDATE assets SET look_colors = ?, look_hash = ?, look_grey = ?, look_key = ? WHERE id = ?",
                 [(look.colors_text(), look.hash, look.grey, key, asset_id) for asset_id, (look, key) in looks.items()],
+            )
+
+    # ------------------------------------------------------------------
+    # AI Search's vectors (core.ai_search)
+    # ------------------------------------------------------------------
+    def vectors_by_asset(self, asset_ids: Sequence[int]) -> dict:
+        """{id: vector (float16)} of files read since they last changed."""
+        from .ai_search import vector_from
+
+        result = {}
+        for chunk in _chunks(list(asset_ids)):
+            for row in self._conn().execute(
+                f"SELECT id, size, mtime, ai_vector, ai_key FROM assets WHERE ai_key IS NOT NULL AND id IN ({_placeholders(len(chunk))})",
+                chunk,
+            ):
+                if row["ai_key"] == ai_key(row["size"], row["mtime"]) and (vector := vector_from(row["ai_vector"])) is not None:
+                    result[row["id"]] = vector
+        return result
+
+    def assets_needing_vector(self, asset_ids: Sequence[int]) -> list[tuple[int, str, str, str]]:
+        """(id, path, extension, key) of files without a vector since they last changed; pass key back to
+        store_vectors(). (Which of them can be read is up to the caller: a model needs its thumbnail.)"""
+        rows = []
+        for chunk in _chunks(list(asset_ids)):
+            for row in self._conn().execute(
+                f"SELECT id, path, extension, size, mtime, ai_key FROM assets WHERE id IN ({_placeholders(len(chunk))})",
+                chunk,
+            ):
+                key = ai_key(row["size"], row["mtime"])
+                if row["ai_key"] != key:
+                    rows.append((row["id"], row["path"], row["extension"], key))
+        return rows
+
+    def store_vectors(self, vectors: dict) -> None:
+        """Save {asset_id: (vector, key from assets_needing_vector)} (vector None: the file couldn't be read)."""
+        from .ai_search import vector_bytes
+
+        with self._transaction() as conn:
+            conn.executemany(
+                "UPDATE assets SET ai_vector = ?, ai_key = ? WHERE id = ?",
+                [(b"" if vector is None else vector_bytes(vector), key, asset_id) for asset_id, (vector, key) in vectors.items()],
             )
 
     # ------------------------------------------------------------------

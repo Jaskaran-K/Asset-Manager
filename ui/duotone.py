@@ -632,6 +632,40 @@ def _material(p, primary, secondary):
     p.fillPath(_circle(9, 7.6, 1.7), primary)  # its highlight
 
 
+def _spark(cx: float, cy: float, r: float) -> QPainterPath:
+    """A four-pointed spark: long points, a pinched waist."""
+    waist = r * 0.28
+    path = QPainterPath()
+    path.moveTo(cx, cy - r)
+    path.quadTo(cx + waist, cy - waist, cx + r, cy)
+    path.quadTo(cx + waist, cy + waist, cx, cy + r)
+    path.quadTo(cx - waist, cy + waist, cx - r, cy)
+    path.quadTo(cx - waist, cy - waist, cx, cy - r)
+    path.closeSubpath()
+    return path
+
+
+def _ai(p, primary, secondary):
+    """A big spark and two small ones (AI Search, More Like This, tag suggestions)."""
+    _body(p, _spark(10, 13, 8.5), secondary)
+    p.fillPath(_spark(18.5, 5.5, 3.6), primary)
+    p.fillPath(_spark(19, 17.5, 2.4), primary)
+
+
+def _cutout(p, primary, secondary):
+    """A figure lifted off a dashed frame (Remove Background)."""
+    p.setPen(_pen(primary, 1.6))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    pen = p.pen()
+    pen.setDashPattern([1.6, 2.2])
+    p.setPen(pen)
+    p.drawRoundedRect(QRectF(3, 3, 18, 18), 2.5, 2.5)  # where the background was
+    figure = QPainterPath()
+    figure.addEllipse(QRectF(9, 5.5, 6, 6))  # the head
+    figure.addRoundedRect(QRectF(6.5, 12.5, 11, 8.5), 4, 4)  # the shoulders
+    _body(p, figure.simplified(), secondary)
+
+
 IconPainter = Callable[[QPainter, QColor, QColor], None]
 ICONS: dict[str, IconPainter] = {
     "home": _home,
@@ -673,6 +707,7 @@ ICONS: dict[str, IconPainter] = {
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
     "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale, "similar": _similar, "material": _material,
+    "ai": _ai, "cutout": _cutout,
 }
 
 

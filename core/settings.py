@@ -987,3 +987,17 @@ def get_maya_material() -> str:
 
 def set_maya_material(kind: str) -> None:
     _update_config("maya_material", kind if kind in MAYA_MATERIALS else "arnold")
+
+
+def get_cutout_model() -> str:
+    """Remove Background's model, as last chosen (core.ai_tools.CUTOUT_MODELS; BiRefNet at first)."""
+    from .ai_tools import CUTOUT_MODELS
+
+    value = _load_raw_config().get("cutout_model")
+    return value if value in CUTOUT_MODELS else CUTOUT_MODELS[0]
+
+
+def set_cutout_model(model: str) -> None:
+    from .ai_tools import CUTOUT_MODELS
+
+    _update_config("cutout_model", model if model in CUTOUT_MODELS else CUTOUT_MODELS[0])

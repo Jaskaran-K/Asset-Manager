@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import archives, artbook_store, crash_log, render_engine, tag_repository, upscaler, video_tools
+from . import ai_tools, archives, artbook_store, crash_log, render_engine, tag_repository, upscaler, video_tools
 
 GB = 1024 ** 3
 UNPACKED_LIMITS_GB = (1, 2, 5, 10, 20)  # the choices for files unpacked from archives
@@ -40,6 +40,15 @@ AREAS = (
          "remove"),
     Area("upscaler", "Real-ESRGAN (Upscale)", "Downloaded when you first upscaled. Downloaded again if you upscale.",
          "remove"),
+    Area("ai_search", "SigLIP (AI Search, More Like This)",
+         "Downloaded when you first used AI Search. Removing it stops AI Search; what it read is kept in the library.",
+         "remove"),
+    Area("ai_birefnet", "BiRefNet (Remove Background)",
+         "Downloaded when you first removed a background with it. Downloaded again if you do.", "remove"),
+    Area("ai_ben2", "BEN2 (Remove Background, the second try)",
+         "Downloaded when you first removed a background with it. Downloaded again if you do.", "remove"),
+    Area("ai_runtime", "ONNX Runtime (runs the AI tools)",
+         "Downloaded with the first AI tool. Downloaded again when an AI tool is used.", "remove"),
     Area("backups", "Library backups",
          "Copies of the tag database: one a day (the last 7) and before each update (the last 10).", "open"),
     Area("pages", "Artbook pages",
@@ -75,6 +84,10 @@ def folder_of(key: str) -> Path:
         "artbook_small": video_tools.artbook_cache_dir(),
         "luxcore": render_engine._root(),  # pylint: disable=protected-access
         "upscaler": upscaler._root(),  # pylint: disable=protected-access
+        "ai_search": ai_tools.folder_of("search"),
+        "ai_birefnet": ai_tools.folder_of("birefnet"),
+        "ai_ben2": ai_tools.folder_of("ben2"),
+        "ai_runtime": ai_tools.folder_of("runtime"),
         "backups": _backup_dir(),
         "pages": artbook_store.pages_dir(),
     }[key]
@@ -89,6 +102,10 @@ def measure() -> dict[str, int]:
         "artbook_small": folder_bytes(video_tools.artbook_cache_dir()),
         "luxcore": folder_bytes(folder_of("luxcore")),
         "upscaler": folder_bytes(folder_of("upscaler")),
+        "ai_search": folder_bytes(folder_of("ai_search")),
+        "ai_birefnet": folder_bytes(folder_of("ai_birefnet")),
+        "ai_ben2": folder_bytes(folder_of("ai_ben2")),
+        "ai_runtime": folder_bytes(folder_of("ai_runtime")),
         "backups": folder_bytes(_backup_dir()),
         "pages": folder_bytes(artbook_store.pages_dir()),
         "versions": artbook_store.history_bytes(),
@@ -124,10 +141,21 @@ def free(key: str) -> None:
         "artbook_small": lambda: _empty(video_tools.artbook_cache_dir()),
         "luxcore": render_engine.remove,
         "upscaler": upscaler.remove,
+        "ai_search": lambda: _remove_ai("search"),
+        "ai_birefnet": lambda: _remove_ai("birefnet"),
+        "ai_ben2": lambda: _remove_ai("ben2"),
+        "ai_runtime": lambda: _remove_ai("runtime"),
     }
     action = actions.get(key)
     if action is not None:
         action()
+
+
+def _remove_ai(key: str) -> None:
+    from . import ai_helper
+
+    ai_helper.close()  # (its files are open while it runs)
+    ai_tools.remove(key)
 
 
 def size_text(size: Optional[int]) -> str:

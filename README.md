@@ -154,6 +154,27 @@ the app starts from that copy and notes it in the crash log.
   each file or one folder. 16-bit heights and masks stay 16-bit in PNG and TIF; the originals are never changed.
   **Move New Files to Recycle Bin** takes them back.
 
+### AI tools
+Two tools run AI models on this computer (nothing is uploaded). Each is downloaded the first time it's used, and
+**Settings > Storage** removes it. They run on the graphics card through DirectML (any DirectX 12 card: NVIDIA, AMD,
+Intel), or on the processor if there isn't one, in a helper program of their own so a driver crash can't take the
+app with it.
+- **AI Search** (Google's SigLIP, 410 MB with ONNX Runtime): click the **AI button** in the search box and describe
+  what you're looking for ("creature skull side view", "brick wall"): the files whose pictures match come first,
+  not file names. Tags, filters and the sidebar still narrow it down; saved searches keep it on. Your files are
+  read once in the background (again only when they change): pictures, pictures inside archives, and models,
+  videos and PDFs by their thumbnails once they have one.
+  - **More Like This** (right-click a file): files with the same kind of content, closest first (other skulls,
+    other brick walls), where Find Similar finds copies of the same picture.
+  - **Tag suggestions:** the tag window suggests the tags of the most similar files you've already tagged; click
+    one to tick it. They get better the more you tag.
+- **Remove Background**: right-click pictures for a copy beside each with its background removed
+  (`name_cutout.png`, with transparency); in the Artbook, **Images > Remove Background...** shows each cut-out next
+  to the original before it goes on the board (one Ctrl+Z; **Revert to Original** any time). It keeps a subject (a
+  render, a photo of an object, a character): a full scene has none. Two models, each downloaded when first chosen:
+  **BiRefNet** (520 MB with ONNX Runtime; about 1 s a picture on a recent graphics card), the best on most pictures,
+  and **BEN2** (250 MB; 0.3 s), a second try that often gets right what BiRefNet misses. The choice is remembered.
+
 ## The Artbook
 
 The Artbook holds reference boards, called **Pages**: endless canvases you fill with images from the library,

@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF, QWindow
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyleOptionSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -75,6 +76,7 @@ from core.settings import (
 from core.video_tools import PROXY_HEIGHT, ProxyJob, cached_proxy, find_ffmpeg
 from ui import shortcuts
 from ui.animations import AnimatedButton, PlayPauseButton
+from ui.controls import DropButton, ghost_button
 from ui.duotone import set_icon
 
 PREVIEW_SIZE = QSize(192, 108)
@@ -571,7 +573,8 @@ class VideoPlayer(QWidget):
     # ------------------------------------------------------------------
     def _build_controls(self) -> QWidget:
         bar = QWidget()
-        bar.setObjectName("viewerToolbar")
+        bar.setObjectName("videoControls")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         rows = QVBoxLayout(bar)
         rows.setContentsMargins(8, 4, 8, 4)
         rows.setSpacing(2)
@@ -636,38 +639,32 @@ class VideoPlayer(QWidget):
         self.lbl_proxy.hide()
         row.addWidget(self.lbl_proxy)
 
-        self.btn_proxy = media_button(f"{PROXY_HEIGHT}p Proxy", width=96)
-        self.btn_proxy.setCheckable(True)
-        self.btn_proxy.setToolTip(
-            f"Play a {PROXY_HEIGHT}p H.264 preview copy (made with ffmpeg) — "
-            "smoother for high-bitrate or pro-codec footage"
-        )
-        self.btn_proxy.toggled.connect(self._on_proxy_toggled)
-        self.btn_proxy.setVisible(self._enable_proxy)
-        row.addWidget(self.btn_proxy)
-
-        self.btn_speed = media_button(format_rate(self._rate), width=58)
-        self.btn_speed.setToolTip("Playback speed")
+        self.btn_speed = DropButton(None, format_rate(self._rate), "Playback speed")
+        self.btn_speed.setMenu(None)  # (its own popup: a slider and presets)
+        self.btn_speed.setPopupMode(QToolButton.ToolButtonPopupMode.DelayedPopup)
         self.btn_speed.clicked.connect(self._show_speed_popup)
         row.addWidget(self.btn_speed)
 
-        self.btn_loop = media_button("A-B", width=66)
+        self.btn_loop = media_button("A-B", width=54)
         self.btn_loop.setCheckable(True)
         self.btn_loop.clicked.connect(lambda: self.cycle_loop())
         row.addWidget(self.btn_loop)
 
-        self.lbl_skip = lbl_skip = QLabel("Jump")
-        lbl_skip.setObjectName("toolbarLabel")
-        row.addWidget(lbl_skip)
-        self.cb_skip = QComboBox()
+        # The jump time (a hidden combo holds it) and the proxy are in More
+        self.cb_skip = QComboBox(bar)
         for seconds in VIDEO_SKIP_OPTIONS:
             self.cb_skip.addItem(f"{seconds} s", seconds)
         self.cb_skip.setCurrentIndex(max(0, self.cb_skip.findData(self._skip_ms // 1000)))
-        self.cb_skip.setToolTip("Jump time for the back / forward buttons and the Left / Right arrow keys")
-        self.cb_skip.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # keep arrow keys for seeking
+        self.cb_skip.hide()
         self.cb_skip.currentIndexChanged.connect(self._on_skip_changed)
-        row.addWidget(self.cb_skip)
         self._update_skip_tooltips()
+        self.action_proxy = QAction(f"Play a {PROXY_HEIGHT}p Proxy", self)
+        self.action_proxy.setCheckable(True)
+        self.action_proxy.setToolTip(
+            f"Play a {PROXY_HEIGHT}p H.264 preview copy (made with ffmpeg): smoother for high-bitrate or pro-codec footage"
+        )
+        self.action_proxy.toggled.connect(self._on_proxy_toggled)
+        self.action_proxy.setVisible(self._enable_proxy)
 
         self.btn_mute = media_button()
         self.btn_mute.clicked.connect(self.toggle_mute)
@@ -682,6 +679,18 @@ class VideoPlayer(QWidget):
         row.addWidget(self.slider_volume)
         self._update_volume_icon()
 
+        self.btn_more = ghost_button("more", "More: the jump time" + (f", and a {PROXY_HEIGHT}p proxy" if self._enable_proxy else ""))
+        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more = QMenu(self.btn_more)
+        more.setToolTipsVisible(True)
+        self.jump_menu = more.addMenu("Jump Time")
+        self.jump_menu.setToolTipsVisible(True)
+        self.jump_menu.aboutToShow.connect(self._fill_jump_menu)
+        more.addSeparator()
+        more.addAction(self.action_proxy)
+        self.btn_more.setMenu(more)
+        row.addWidget(self.btn_more)
+
         self.btn_fullscreen = media_button(icon=self._icons["fullscreen"])
         self.btn_fullscreen.setToolTip("Fullscreen (F or double-click the video)")
         self.btn_fullscreen.clicked.connect(lambda: self.set_fullscreen(not self._fullscreen))
@@ -689,7 +698,7 @@ class VideoPlayer(QWidget):
 
         # Buttons shouldn't steal focus from the player, or Space / arrows would press them
         for button in (
-            self.btn_back, self.btn_play, self.btn_forward, self.btn_proxy,
+            self.btn_back, self.btn_play, self.btn_forward, self.btn_more,
             self.btn_speed, self.btn_loop, self.btn_mute, self.btn_fullscreen,
         ):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -697,6 +706,17 @@ class VideoPlayer(QWidget):
         self.slider_seek.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.slider_volume.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return bar
+
+    def _fill_jump_menu(self) -> None:
+        """More > Jump Time: how far back / forward the buttons and the arrow keys go."""
+        menu, combo = self.jump_menu, self.cb_skip
+        menu.clear()
+        for index in range(combo.count()):
+            action = menu.addAction(combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == combo.currentIndex())
+            action.setToolTip("Jump time for the back / forward buttons and the Left / Right arrow keys")
+            action.triggered.connect(lambda _checked=False, i=index: combo.setCurrentIndex(i))
 
     def _build_message_panel(self) -> QWidget:
         panel = QWidget()
@@ -930,9 +950,6 @@ class VideoPlayer(QWidget):
         super().resizeEvent(event)
         width = self.width()
         compact, narrow = width < self._COMPACT_WIDTH, width < self._NARROW_WIDTH
-        self.lbl_skip.setVisible(not compact)
-        self.btn_proxy.setText("Proxy" if compact else f"{PROXY_HEIGHT}p Proxy")
-        self.btn_proxy.setFixedWidth(58 if compact else 96)
         self.slider_volume.setFixedWidth(50 if compact else 80)
         self.slider_volume.setVisible(not narrow)  # the speaker button still mutes; M too
         self.lbl_proxy.setText(" PROXY " if compact else f" PROXY {PROXY_HEIGHT}p ")
@@ -1100,7 +1117,7 @@ class VideoPlayer(QWidget):
     def _hide_controls_if_idle(self) -> None:
         playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         over_controls = self.controls.rect().contains(self.controls.mapFromGlobal(QCursor.pos()))
-        popup_open = self._speed_popup.isVisible() or self.cb_skip.view().isVisible()
+        popup_open = self._speed_popup.isVisible() or QApplication.activePopupWidget() is not None
         if not self._fullscreen or not playing or over_controls or popup_open or self.slider_seek.isSliderDown():
             self._hide_timer.start()
             return
@@ -1272,9 +1289,9 @@ class VideoPlayer(QWidget):
         )
 
     def _set_proxy_button(self, checked: bool) -> None:
-        self.btn_proxy.blockSignals(True)
-        self.btn_proxy.setChecked(checked)
-        self.btn_proxy.blockSignals(False)
+        self.action_proxy.blockSignals(True)
+        self.action_proxy.setChecked(checked)
+        self.action_proxy.blockSignals(False)
 
     def _on_proxy_toggled(self, checked: bool) -> None:
         if self._source is None:

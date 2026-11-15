@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QToolButton,
@@ -126,11 +127,14 @@ from ui.sidebar import SidebarHost
 from ui.tag_widgets import TagAssetsDialog, TagSearchBar, run_in_background, run_job, wait_for_background
 from ui.themes import apply_theme, theme_signals
 from ui import title_bar
-from ui.toolbar import CompactToolbar, PathField
+from ui.toolbar import CompactToolbar
 from ui.undo import UndoHistory, UndoStep
 from ui.view_modes import ViewModes, ViewSwitchButton
 from ui.viewer import AssetViewerDialog, ViewerTarget
+from ui.focus_ring import install_focus_ring
 from ui.views import install_view_effects
+from ui.controls import GhostButton, ghost_button, reading_order
+from ui.selection_bar import SelectionActions, SelectionBar
 from self_test import run_self_test
 
 FIND_APPS_AFTER_MS = 2000  # after the window shows: reading every shortcut takes a second or two, off the UI thread
@@ -296,12 +300,7 @@ class MainWindow(QMainWindow):
         # Narrow asset side (Split View): icon-only buttons and a narrower search box
         self.asset_toolbar = CompactToolbar(
             self.asset_panel, self.control_bar,
-            [
-                (self.btn_profile, ""), (self.btn_open_folder, "Open Folder"), (self.btn_library, "Library"),
-                (self.btn_back, "Back"),
-                (self.btn_refresh, "Refresh"),
-                (self.btn_view_asset, "Preview"), (self.btn_tag, "Tag"), (self.btn_tools, "Tools"),
-            ],
+            [(self.btn_profile, ""), (self.btn_library, "Library"), (self.btn_back, "Back")],
             on_change=self._on_toolbar_compact,
         )
         self._profile_id = profiles.current_profile().id
@@ -335,17 +334,31 @@ class MainWindow(QMainWindow):
         controls = QWidget()
         layout = QHBoxLayout(controls)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(4)
         self.btn_view = ViewSwitchButton(modes)
         layout.addWidget(self.btn_view)
-        self.btn_settings = QPushButton("Settings")
-        set_icon(self.btn_settings, "settings")
-        self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_settings.setToolTip("Settings (Ctrl+,)")
+        self.btn_settings = ghost_button("settings", "Settings (Ctrl+,)")
         self.btn_settings.setShortcut(shortcuts.sequence("main.settings"))
         self.btn_settings.clicked.connect(self._open_settings)
         layout.addWidget(self.btn_settings)
         return controls
+
+    def focusNextPrevChild(self, next_child: bool) -> bool:
+        """Tab in the asset side goes as you read it: the top bar left to right, then the sidebar, then the grid
+        (and the selection bar under it). The focus chain itself follows the order things were made in."""
+        current = QApplication.focusWidget()
+        if current is None or not self.asset_panel.isVisible() or not self.asset_panel.isAncestorOf(current):
+            return super().focusNextPrevChild(next_child)
+        order = reading_order(self.control_bar, self.sidebar.panel if self.sidebar.is_open() else None, self.sidebar.content)
+        if current not in order:
+            return super().focusNextPrevChild(next_child)
+        step = order.index(current) + (1 if next_child else -1)
+        if not 0 <= step < len(order) and self.artbook_panel.isVisible():
+            return super().focusNextPrevChild(next_child)  # (on to the Artbook beside it)
+        order[step % len(order)].setFocus(
+            Qt.FocusReason.TabFocusReason if next_child else Qt.FocusReason.BacktabFocusReason
+        )
+        return True
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -396,27 +409,26 @@ class MainWindow(QMainWindow):
             self.list_grid.viewport().update()
 
     def _build_control_bar(self) -> QWidget:
-        """Build top toolbar with folder picker, library toggle, refresh, preview, search, and settings."""
+        """The top bar (quiet: borderless buttons): sidebar, where you are (profile / library or folder), the
+        search, More (Open Folder, Refresh, the tools), and the window's View and Settings. Preview and Tag are
+        on the selection bar, which shows while files are selected (ui.selection_bar)."""
         bar = QWidget()
         bar.setObjectName("controlBar")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(4)
         self.control_bar = bar
 
         # Shows / hides the sidebar
-        self.btn_sidebar = QPushButton()
-        set_icon(self.btn_sidebar, "menu", size=18)
-        self.btn_sidebar.setCheckable(True)
-        self.btn_sidebar.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_sidebar.setToolTip("Show / hide the sidebar (Ctrl+B)")
+        self.btn_sidebar = ghost_button("menu", "Show / hide the sidebar (Ctrl+B)", checkable=True)
         self.btn_sidebar.clicked.connect(lambda: self.sidebar.toggle())
         layout.addWidget(self.btn_sidebar)
+        layout.addSpacing(4)
 
-        # Profile: which library (folders, file types, categories, collections) is shown (core.profiles)
-        self.btn_profile = QPushButton()
-        set_icon(self.btn_profile, "profile")
-        self.btn_profile.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Where you are: the profile (which library: folders, file types, categories, collections; core.profiles)...
+        self.btn_profile = ghost_button("profile", "", "")
+        self.btn_profile.setProperty("place", True)
+        self.btn_profile.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.profile_menu = QMenu(self.btn_profile)
         self.profile_menu.setToolTipsVisible(True)
         self.profile_menu.aboutToShow.connect(self._fill_profile_menu)
@@ -426,20 +438,15 @@ class MainWindow(QMainWindow):
         self.action_profiles.setShortcut(shortcuts.sequence("main.profiles"))
         self.action_profiles.triggered.connect(self.btn_profile.showMenu)
         self.addAction(self.action_profiles)
+        place_sep = QLabel("/")
+        place_sep.setObjectName("placeSep")
+        layout.addWidget(place_sep)
 
-        # "Open Folder" button: browse a single folder outside the library
-        self.btn_open_folder = QPushButton("Open Folder")
-        set_icon(self.btn_open_folder, "folder", "light")
-        self.btn_open_folder.setObjectName("primaryBtn")
-        self.btn_open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_open_folder.setToolTip("Browse a single folder without adding it to the library")
-        self.btn_open_folder.clicked.connect(self._on_choose_folder)
-        layout.addWidget(self.btn_open_folder)
-
-        # "Library" split button: the main part returns to the library (all library folders);
-        # its menu also adds / removes the folder being browsed
-        self.btn_library = QToolButton()
-        self.btn_library.setObjectName("splitBtn")
+        # ... and what of it is shown: the library (all its folders), a folder opened on its own, or an archive.
+        # The main part goes back to the library; the arrow has Open Folder and the library's options.
+        self.btn_library = GhostButton()
+        self.btn_library.setObjectName("ghostSplit")
+        self.btn_library.setProperty("place", True)
         self.btn_library.setText("Library")
         self.btn_library.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.btn_library.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -452,6 +459,11 @@ class MainWindow(QMainWindow):
         self.action_library.setToolTip("Show assets from all library folders (Settings > Folders)")
         set_icon(self.action_library, "home")
         self.action_library.triggered.connect(self._load_library)
+        self.action_open_folder = QAction("Open Folder...", self)
+        set_icon(self.action_open_folder, "folder")
+        self.action_open_folder.setToolTip("Browse a single folder without adding it to the library")
+        self.action_open_folder.triggered.connect(self._on_choose_folder)
+        library_menu.addAction(self.action_open_folder)
         self.action_library_toggle = library_menu.addAction("Add to Library")
         set_icon(self.action_library_toggle, "star")
         self.action_library_toggle.triggered.connect(self._on_toggle_library_folder)
@@ -478,52 +490,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_library)
 
         # "Back": leaves an opened archive (shown only then)
-        self.btn_back = QPushButton("Back")
-        set_icon(self.btn_back, "back")
-        self.btn_back.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_back.setToolTip("Leave this archive: back to where you were (Backspace)")
+        self.btn_back = ghost_button("back", "Leave this archive: back to where you were (Backspace)", "Back", 16)
         self.btn_back.clicked.connect(self._leave_archive)
         self.btn_back.hide()
         layout.addWidget(self.btn_back)
+        layout.addStretch(1)
 
-        # "Refresh" button
-        self.btn_refresh = QPushButton("Refresh")
-        set_icon(self.btn_refresh, "refresh")
-        self.btn_refresh.setToolTip("Scan the folders again (changes are also picked up automatically while the app is open)")
-        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_refresh.clicked.connect(self._rescan_current_folder)
-        layout.addWidget(self.btn_refresh)
-
-        # "Preview" button
-        self.btn_view_asset = QPushButton("Preview")
-        set_icon(self.btn_view_asset, "eye", "light")
-        self.btn_view_asset.setObjectName("viewBtn")
-        self.btn_view_asset.setEnabled(False)
-        self.btn_view_asset.setToolTip("Open lightweight viewer for selected asset (or press Space)")
-        self.btn_view_asset.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_view_asset.clicked.connect(self._open_viewer_for_selected)
-        layout.addWidget(self.btn_view_asset)
-
-        # "Tag" button: tag the selected files
-        self.btn_tag = QPushButton("Tag")
-        set_icon(self.btn_tag, "tag")
-        self.btn_tag.setEnabled(False)
-        self.btn_tag.setToolTip("Add or remove tags on the selected files (Ctrl+T)")
-        self.btn_tag.setShortcut(shortcuts.sequence("main.tag"))
-        self.btn_tag.setCursor(Qt.CursorShape.PointingHandCursor)
-        # lambda: clicked passes a "checked" bool that must not land in the assets argument
-        self.btn_tag.clicked.connect(lambda: self._open_tag_dialog())
-        layout.addWidget(self.btn_tag)
-
-        # Path display field (a long path is shortened in the middle; the tooltip has all of it)
-        self.txt_path = PathField()
-        self.txt_path.setPlaceholderText("No library folders. Add some in Settings > Folders, or click 'Open Folder'...")
-        layout.addWidget(self.txt_path, 1)
-
-        # Search: file names plus tag filter chips (tag:name)
+        # Search: file names plus tag filter chips (tag:name), AI Search and colours inside it
         self.search_bar = TagSearchBar()
         self.search_bar.setMinimumWidth(280)
-        self.search_bar.setMaximumWidth(560)
+        self.search_bar.setMaximumWidth(600)
+        self.search_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_bar.changed.connect(self._on_search_changed)
         self.search_bar.save_requested.connect(self._on_save_search)
         self.search_bar.similar_label = self._similar_label
@@ -532,26 +509,42 @@ class MainWindow(QMainWindow):
         self.search_bar.unknown_tag.connect(
             lambda name: self.status_label.setText(f'No tag named "{name}". Create it in Settings > Tags.')
         )
-        layout.addWidget(self.search_bar)
+        layout.addWidget(self.search_bar, 3)
+        layout.addStretch(1)
 
-        # Tools: library maintenance
-        self.btn_tools = QPushButton("Tools")
-        set_icon(self.btn_tools, "tools")
-        self.btn_tools.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_tools.setToolTip("Find duplicates; back up, restore, export or import your tags")
-        self.btn_tools.setMenu(self._build_tools_menu())
-        layout.addWidget(self.btn_tools)
+        # More: Open Folder, Refresh, and the tools (undo / redo, duplicates, tags, backups)
+        self.action_refresh = QAction("Refresh", self)
+        set_icon(self.action_refresh, "refresh")
+        self.action_refresh.setToolTip("Scan the folders again (changes are also picked up automatically while the app is open)")
+        self.action_refresh.triggered.connect(self._rescan_current_folder)
+        self.btn_more = ghost_button("more", "More: Open Folder, Refresh, find duplicates, back up or restore your tags")
+        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_more.setMenu(self._build_more_menu())
+        layout.addWidget(self.btn_more)
+
+        # Tag the selected files (Ctrl+T; also on the selection bar and in the right-click menu)
+        self.action_tag = QAction("Tag", self)
+        self.action_tag.setShortcut(shortcuts.sequence("main.tag"))
+        self.action_tag.triggered.connect(lambda: self._open_tag_dialog() if self._selected_assets() else None)
+        self.addAction(self.action_tag)
 
         # The window's View / Settings buttons sit here unless the Artbook is on the right
         self.asset_toolbar_slot = QHBoxLayout()
-        self.asset_toolbar_slot.setSpacing(10)
+        self.asset_toolbar_slot.setSpacing(4)
         layout.addLayout(self.asset_toolbar_slot)
 
         return bar
 
-    def _build_tools_menu(self) -> QMenu:
+    def _build_more_menu(self) -> QMenu:
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
+        menu.addAction(self.action_open_folder)
+        menu.addAction(self.action_refresh)
+        menu.addSeparator()
+        self._fill_tools_menu(menu)
+        return menu
+
+    def _fill_tools_menu(self, menu: QMenu) -> None:
         # Undo / redo for tags, favorites and ratings; added to the window too, so the keys work anywhere
         self.action_undo = QAction("Undo", self)
         self.action_undo.setShortcut(shortcuts.sequence("main.undo"))
@@ -565,7 +558,6 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         self._update_undo_actions()
         self.library_tools.add_to(menu)
-        return menu
 
     def _update_undo_actions(self) -> None:
         undo, redo = self.undo_history.next_undo(), self.undo_history.next_redo()
@@ -698,6 +690,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.lbl_empty_state)
         layout.addWidget(self.list_grid)
         self.list_grid.hide()
+
+        # The selected files' main actions, floating at the bottom while any are selected
+        self.selection_bar = SelectionBar(container, SelectionActions(
+            preview=self._open_viewer_for_selected,
+            tag=self._open_tag_dialog_for_selection,
+            favorite=self._toggle_favorite,
+            fill_send_menu=self._fill_selection_send_menu,
+            find_similar=self._find_similar_selected,
+            more_menu=self._selection_menu,
+            clear=self.list_grid.clearSelection,
+        ))
         self.welcome_panel.hide()
 
         return container
@@ -885,28 +888,28 @@ class MainWindow(QMainWindow):
             self.asset_toolbar.update()  # (the toolbar's contents changed)
         if self.archive_return is not None:
             archive = self.archive_return.archive
-            self.txt_path.set_path_text(str(archive))
-            self.txt_path.setToolTip(f"Inside {archive}\nBack or Backspace returns to where you were.")
+            self._show_place(archive.name, "archive")
             toggle.setText("Add to Library")
             toggle.setToolTip("An archive can't be a library folder; its files are part of the library's folder")
             toggle.setEnabled(False)
             set_icon(toggle, "star")
-            self.btn_library.setToolTip("Back to your library (every folder in Settings > Folders)")
+            self.btn_library.setToolTip(
+                f"Inside {archive}\nBack or Backspace returns to where you were; click here for your library."
+            )
         elif in_library_mode:
             folders = get_scan_folders()
-            self.txt_path.set_path_text("; ".join(str(f) for f in folders))
-            self.txt_path.setToolTip("\n".join(str(f) for f in folders))
+            self._show_place("Library", "home")
+            listed = "\n".join(f"    {f}" for f in folders) or "    (none yet: Settings > Folders)"
             self.btn_library.setToolTip(
                 "Showing your library: every folder in Settings > Folders. Click to scan it again.\n"
-                "Use Open Folder to look at another folder; the arrow can then add it to the library."
+                f"{listed}\nThe arrow: Open Folder to look at another folder, and the library's options."
             )
             toggle.setText("Add to Library")
             toggle.setToolTip("Open a folder first (Open Folder), then add it here")
             toggle.setEnabled(False)
             set_icon(toggle, "star")
         else:
-            self.txt_path.set_path_text(str(self.browse_folder))
-            self.txt_path.setToolTip(str(self.browse_folder))
+            self._show_place(self.browse_folder.name or str(self.browse_folder), "folder")
             toggle.setEnabled(True)
             if is_scan_folder(self.browse_folder):
                 toggle.setText("Remove from Library")
@@ -919,13 +922,18 @@ class MainWindow(QMainWindow):
                 set_icon(toggle, "star")
                 state = "This folder isn't in the library."
             self.btn_library.setToolTip(
-                f"Back to your library (every folder in Settings > Folders).\n{state} "
-                "Click the arrow to add or remove it."
+                f"{self.browse_folder}\n{state} The arrow adds or removes it.\n"
+                "Click for your library (every folder in Settings > Folders)."
             )
         # Highlighted while the library is what's shown
         self.btn_library.setProperty("active", in_library_mode)
         self.btn_library.style().unpolish(self.btn_library)
         self.btn_library.style().polish(self.btn_library)
+
+    def _show_place(self, label: str, icon: str) -> None:
+        """The place button: what's shown (Library, a folder's name, an archive's name)."""
+        set_icon(self.btn_library, icon, size=16)
+        self.asset_toolbar.set_text(self.btn_library, label)
 
     def _on_toggle_library_folder(self) -> None:
         """Add or remove the browsed folder from the library folders."""
@@ -1036,15 +1044,15 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Scanning '{folders[0]}'...")
         else:
             self.status_label.setText(f"Scanning {len(folders)} library folders...")
-        self.btn_open_folder.setEnabled(False)
-        self.btn_refresh.setEnabled(False)
+        self.action_open_folder.setEnabled(False)
+        self.action_refresh.setEnabled(False)
         self.library.start_scan(folders, get_file_extensions(), save_snapshot=save_snapshot)
 
     def _on_scan_finished(self, report: ScanReport) -> None:
         """Show a finished scan: sidebar counts, the status line, and the grid."""
         self._opening_archive = False
-        self.btn_open_folder.setEnabled(True)
-        self.btn_refresh.setEnabled(True)
+        self.action_open_folder.setEnabled(True)
+        self.action_refresh.setEnabled(True)
         self._update_sidebar_counts()
         self._reload_tag_suggestions()
 
@@ -1093,8 +1101,8 @@ class MainWindow(QMainWindow):
     def _on_scan_failed(self, error_msg: str) -> None:
         """Handle scanning failure."""
         self._opening_archive = False
-        self.btn_open_folder.setEnabled(True)
-        self.btn_refresh.setEnabled(True)
+        self.action_open_folder.setEnabled(True)
+        self.action_refresh.setEnabled(True)
         self.status_label.setText(f"Scan failed: {error_msg}")
 
     def _on_files_edited(self, paths: list[str]) -> None:
@@ -1502,8 +1510,6 @@ class MainWindow(QMainWindow):
                     "No assets match the active filter."
                 )
             self.status_info.setText("0 assets shown")
-            self.btn_view_asset.setEnabled(False)
-            self.btn_tag.setEnabled(False)
             return
 
         self.lbl_empty_state.hide()
@@ -1613,8 +1619,12 @@ class MainWindow(QMainWindow):
     def _on_item_selection_changed(self, *_args) -> None:
         """Update status bar and preview button state based on selection."""
         selected = self._selected_assets()
-        self.btn_view_asset.setEnabled(len(selected) == 1)
-        self.btn_tag.setEnabled(bool(selected))
+        first = selected[0] if selected else None
+        self.selection_bar.show_selection(
+            len(selected),
+            can_similar=len(selected) == 1 and first.is_texture and first.texture_set is None,
+            can_send=any(f.path.suffix.lower() in artbook_store.IMAGE_EXTENSIONS for f in files_of(selected)),
+        )
 
         if not selected:
             self.status_label.setText(f"Showing {self.grid_model.rowCount()} assets")
@@ -1767,8 +1777,8 @@ class MainWindow(QMainWindow):
         self.browse_folder = back.browse_folder
         self.library.restore_view(back.view)
         self._update_library_controls()
-        self.btn_open_folder.setEnabled(True)
-        self.btn_refresh.setEnabled(True)
+        self.action_open_folder.setEnabled(True)
+        self.action_refresh.setEnabled(True)
         self.search_bar.set_query_text(back.search)
         self._update_sidebar_counts()
         self._refresh_grid_display()
@@ -2152,6 +2162,36 @@ class MainWindow(QMainWindow):
         asset: Optional[AssetItem] = index.data(ASSET_ROLE) if index.isValid() else None
         if not asset:
             return
+        menu = self._asset_menu(asset)
+        menu.exec(self.list_grid.mapToGlobal(pos))
+        menu.deleteLater()  # (its actions belong to it: nothing is left behind on the window)
+
+    def _selection_menu(self) -> QMenu:
+        """The selection bar's More: the right-click menu of the current (or first selected) file."""
+        current = self.list_grid.currentIndex()
+        asset = current.data(ASSET_ROLE) if current.isValid() and self.list_grid.selectionModel().isSelected(current) else None
+        if asset is None:
+            selected = self._selected_assets()
+            asset = selected[0] if selected else None
+        if asset is None:
+            return QMenu(self)
+        return self._asset_menu(asset)
+
+    def _open_tag_dialog_for_selection(self) -> None:
+        self._open_tag_dialog()
+
+    def _find_similar_selected(self) -> None:
+        selected = self._selected_assets()
+        if len(selected) == 1:
+            self._find_similar(selected[0])
+
+    def _fill_selection_send_menu(self, menu: QMenu) -> None:
+        """Send to Artbook on the selection bar: a new page, or any page (the selected pictures)."""
+        paths = [f.path for f in self._selected_files() if f.path.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
+        self.artbook_sender.fill_artbook_menu(menu, lambda page_id: self.artbook_sender.send_files(self._send_files(paths), page_id))
+
+    def _asset_menu(self, asset: AssetItem) -> QMenu:
+        """The right-click menu for a card (the caller shows it, then frees it)."""
         actions = AssetMenuActions(
             open_viewer=lambda: self._open_viewer(asset),
             reveal=lambda: self._reveal_in_explorer(asset.archive.archive if asset.in_archive else asset.path),
@@ -2176,9 +2216,7 @@ class MainWindow(QMainWindow):
             source_page=self.repo.web_page_of(asset.path) if not asset.in_archive and asset.texture_set is None else None,
         )
         marks = [self.library.marks.get(i, NO_MARKS) for i in self._selected_asset_ids()]
-        menu = build_asset_menu(self, asset, self._selected_files(), marks, actions, self.artbook_sender)
-        menu.exec(self.list_grid.mapToGlobal(pos))
-        menu.deleteLater()  # (its actions belong to it: nothing is left behind on the window)
+        return build_asset_menu(self, asset, self._selected_files(), marks, actions, self.artbook_sender)
 
     # ------------------------------------------------------------------
     # Tagging
@@ -2371,6 +2409,7 @@ def main() -> None:
     set_frost(get_glass_frost())
     install_popup_animations(app)
     install_view_effects(app)
+    install_focus_ring(app)
     title_bar.install(app)  # title bars in the theme's colours, not Windows' light / dark
     main_thread_gc.install(app)  # a collection on a worker thread can free UI objects there, and crash
     scroll_bar_watch.install(app)  # logs which view had its scroll bar freed under it (a crash that follows)

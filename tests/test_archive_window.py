@@ -59,7 +59,8 @@ def test_looking_inside_a_zip_and_back(library, qapp):
 
     window._on_item_double_clicked(window.grid_model.index(0))
     assert pump(qapp, lambda: scanned(window) and names_in_grid(window) == ["lesson.mp4", "moss.png", "rock.png"])
-    assert window.btn_back.isVisible() and window.txt_path.toolTip().startswith("Inside")
+    assert window.btn_back.isVisible() and window.btn_library.toolTip().startswith("Inside")
+    assert window.btn_library.text() == "pack.zip"  # (where you are: the archive)
     assert window.search_bar.text() == ""
     assert "pack.zip" in window._asset_tooltip(asset_named(window, "rock.png"))
 

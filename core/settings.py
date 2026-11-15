@@ -4,7 +4,7 @@ Persists user preferences to ~/.3d_asset_manager_config.json:
 - scan_folders:     library folders scanned on startup / refresh
 - file_extensions:  file types the scanner picks up
 - categories:       sidebar main categories, their subcategories, file types, tags, colors and icons
-- theme:            UI theme id ("dark", "light", "dark_purple", "neon_cyan")
+- theme:            UI theme id ("dark", "light", "sand", "dark_purple", "neon_cyan")
 - thumbnail_size:   grid thumbnail size in pixels
 - ffmpeg_path:      ffmpeg executable for video proxies / poster frames (blank = search PATH)
 - media_backend:    Qt multimedia backend ("auto", "ffmpeg", "windows"); applied on restart
@@ -62,7 +62,7 @@ CONFIG_FILE_PATH: Path = Path.home() / ".3d_asset_manager_config.json"
 CATEGORY_ICONS_DIR: Path = Path.home() / ".3d_asset_manager" / "category_icons"
 MAX_CATEGORY_ICON_BYTES = 1024 * 1024
 
-THEME_IDS = ("dark", "light", "dark_purple", "neon_cyan")
+THEME_IDS = ("dark", "light", "sand", "dark_purple", "neon_cyan")
 DEFAULT_THEME = "dark"
 THUMBNAIL_SIZE_RANGE = (64, 256)
 DEFAULT_THUMBNAIL_SIZE = 110
@@ -989,6 +989,15 @@ def get_maya_material() -> str:
 
 def set_maya_material(kind: str) -> None:
     _update_config("maya_material", kind if kind in MAYA_MATERIALS else "arnold")
+
+
+def get_viewer_details() -> bool:
+    """The viewer's details card is shown (Info, Ctrl+I): remembered from the last time it was switched."""
+    return _load_raw_config().get("viewer_details") is True
+
+
+def set_viewer_details(shown: bool) -> None:
+    _update_config("viewer_details", bool(shown))
 
 
 WEB_FOLDER_NAME = "Web Images"

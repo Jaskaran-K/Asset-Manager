@@ -12,25 +12,23 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QRadioButton,
     QSpinBox,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
-    QVBoxLayout,
     QWidget,
 )
 
 from core import batch_convert, batch_rename
 from core.scanner import AssetItem
 from core.texture_sets import TextureSet
+from ui.controls import DialogFrame, section_heading, segmented
 from ui.duotone import set_icon
 from ui.tag_widgets import run_job
 
@@ -61,14 +59,17 @@ class RenameDialog(QDialog):
         self.assets = list(assets)
         self.sets_of = sets_of or {}
         self._plan = batch_rename.RenamePlan()
-        self.setWindowTitle(f"Rename {len(self.assets)} File{'s' if len(self.assets) != 1 else ''}")
-        self.resize(860, 620)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        form = QFormLayout()
+        count = f"{len(self.assets)} File{'s' if len(self.assets) != 1 else ''}"
+        self.setWindowTitle(f"Rename {count}")
+        self.resize(860, 640)
+        frame = DialogFrame(self, f"Rename {count}", "New names from a pattern. Each file's new name is listed "
+                                                     "before anything changes, and Ctrl+Z undoes it.")
+        layout = frame.body
+        layout.addWidget(section_heading("Pattern"))
         self.txt_pattern = QLineEdit("{set}_{map}" if self.sets_of else "{name}")
         self.txt_pattern.setToolTip("The new names: words in braces are filled in for each file (its type stays)")
-        form.addRow("Pattern", _pattern_row(self.txt_pattern, self))
+        layout.addLayout(_pattern_row(self.txt_pattern, self))
+        layout.addWidget(section_heading("Find and replace"))
         find_row = QHBoxLayout()
         self.txt_find = QLineEdit()
         self.txt_find.setPlaceholderText("Find (letter case ignored)")
@@ -78,7 +79,7 @@ class RenameDialog(QDialog):
         self.txt_replace.setToolTip("What it becomes (empty: it's taken out)")
         find_row.addWidget(self.txt_find)
         find_row.addWidget(self.txt_replace)
-        form.addRow("Find and replace", find_row)
+        layout.addLayout(find_row)
         options = QHBoxLayout()
         self.cmb_map = QComboBox()
         for key, label in batch_rename.MAP_STYLE_NAMES.items():
@@ -95,35 +96,26 @@ class RenameDialog(QDialog):
         options.addWidget(QLabel("Map words"))
         options.addWidget(self.cmb_map)
         options.addWidget(self.cmb_case)
+        options.addSpacing(12)
         options.addWidget(QLabel("{n} starts at"))
         options.addWidget(self.spin_start)
         options.addStretch(1)
-        form.addRow("", options)
-        layout.addLayout(form)
+        layout.addWidget(section_heading("Options"))
+        layout.addLayout(options)
 
+        layout.addWidget(section_heading("Preview"))
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Now", "Becomes", "Note"])
         self.tree.setRootIsDecorated(False)
         self.tree.setColumnWidth(0, 290)
         self.tree.setColumnWidth(1, 290)
         layout.addWidget(self.tree, 1)
-        self.lbl_summary = QLabel()
+        footer = frame.add_footer("Rename", "Rename the files as listed (Ctrl+Z undoes it)",
+                                  cancel_tip="Close without renaming anything")
+        self.lbl_summary = footer.add_status(QLabel())
         self.lbl_summary.setObjectName("pageHint")
         self.lbl_summary.setWordWrap(True)
-        layout.addWidget(self.lbl_summary)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.setToolTip("Close without renaming anything")
-        cancel.clicked.connect(self.reject)
-        self.btn_ok = QPushButton("Rename")
-        self.btn_ok.setObjectName("primaryBtn")
-        self.btn_ok.setToolTip("Rename the files as listed (Ctrl+Z undoes it)")
-        self.btn_ok.clicked.connect(self.accept)
-        buttons.addWidget(cancel)
-        buttons.addWidget(self.btn_ok)
-        layout.addLayout(buttons)
-
+        self.btn_ok = footer.btn_primary
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(150)
@@ -174,11 +166,13 @@ class ConvertDialog(QDialog):
         self._plan = batch_convert.ConvertPlan()
         self._running = False
         self._stop = False
-        self.setWindowTitle(f"Convert and Resize {len(self.assets)} Picture{'s' if len(self.assets) != 1 else ''}")
-        self.resize(900, 660)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        form = QFormLayout()
+        count = f"{len(self.assets)} Picture{'s' if len(self.assets) != 1 else ''}"
+        self.setWindowTitle(f"Convert and Resize {count}")
+        self.resize(900, 700)
+        frame = DialogFrame(self, f"Convert and Resize {count}", "Makes new copies, of another type or smaller. The "
+                                                                 "originals are never changed.")
+        layout = frame.body
+        layout.addWidget(section_heading("Make"))
         what = QHBoxLayout()
         self.cmb_format = QComboBox()
         self.cmb_format.addItem("Same type (others as PNG)", "same")
@@ -201,44 +195,55 @@ class ConvertDialog(QDialog):
         for widget in (self.cmb_format, self.cmb_size, self.spin_size, self.chk_pot):
             what.addWidget(widget)
         what.addStretch(1)
-        form.addRow("Make", what)
+        layout.addLayout(what)
         note = QLabel("PNG and TIF keep 16-bit heights and masks (and PNG 16-bit colour from PSD and EXR); JPG and TGA are "
-                      "8-bit. EXR values are clipped to 0-1. The originals are never changed.")
-        note.setObjectName("mutedLabel")
+                      "8-bit. EXR values are clipped to 0-1.")
+        note.setObjectName("pageHint")
         note.setWordWrap(True)
-        form.addRow("", note)
+        layout.addWidget(note)
 
-        where = QVBoxLayout()
-        sub_row = QHBoxLayout()
-        self.radio_sub = QRadioButton("In a folder next to each file, named", self)
-        self.radio_sub.setChecked(True)
-        self.radio_sub.setToolTip("A subfolder beside every picture (beside its archive, for one inside an archive)")
+        layout.addWidget(section_heading("Save to"))
+        where = QHBoxLayout()
+        track, self._where_group = segmented([
+            ("sub", "Next to each file", "A subfolder beside every picture (beside its archive, for one inside an archive)"),
+            ("folder", "All in one folder", "Every new file in one folder you choose"),
+        ], "sub", self)
+        track.setFixedWidth(280)
+        self.radio_sub, self.radio_folder = self._where_group.buttons()
+        where.addWidget(track)
+        self.sub_row = QWidget(self)
+        sub_row = QHBoxLayout(self.sub_row)
+        sub_row.setContentsMargins(0, 0, 0, 0)
+        sub_row.addWidget(QLabel("in a folder named"))
         self.txt_sub = QLineEdit("converted")
         self.txt_sub.setToolTip("The subfolder's name")
-        sub_row.addWidget(self.radio_sub)
         sub_row.addWidget(self.txt_sub, 1)
-        where.addLayout(sub_row)
-        folder_row = QHBoxLayout()
-        self.radio_folder = QRadioButton("All in one folder", self)
-        self.radio_folder.setToolTip("Every new file in one folder you choose")
+        where.addWidget(self.sub_row, 1)
+        self.folder_row = QWidget(self)
+        folder_row = QHBoxLayout(self.folder_row)
+        folder_row.setContentsMargins(0, 0, 0, 0)
         self.txt_folder = QLineEdit()
         self.txt_folder.setPlaceholderText("Choose a folder")
+        self.txt_folder.setToolTip("The folder for every new file")
         browse = QPushButton("Browse...")
         browse.setToolTip("Choose the folder for the new files")
         browse.clicked.connect(self._browse)
-        folder_row.addWidget(self.radio_folder)
         folder_row.addWidget(self.txt_folder, 1)
         folder_row.addWidget(browse)
-        where.addLayout(folder_row)
-        form.addRow("Where", where)
+        where.addWidget(self.folder_row, 1)
+        self.folder_row.setVisible(False)
+        self.radio_folder.toggled.connect(self._on_where)
+        layout.addLayout(where)
+
+        layout.addWidget(section_heading("Names"))
         self.txt_pattern = QLineEdit("{name}")
         self.txt_pattern.setToolTip("Names of the new files (as in Rename: words in braces are filled in)")
-        form.addRow("Names", _pattern_row(self.txt_pattern, self))
+        layout.addLayout(_pattern_row(self.txt_pattern, self))
         self.chk_replace = QCheckBox("Replace files of the same name (never an original)", self)
         self.chk_replace.setToolTip("Write over files already in the target folder (from an earlier conversion)")
-        form.addRow("", self.chk_replace)
-        layout.addLayout(form)
+        layout.addWidget(self.chk_replace)
 
+        layout.addWidget(section_heading("Preview"))
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Picture", "New file", "Note"])
         self.tree.setRootIsDecorated(False)
@@ -248,28 +253,16 @@ class ConvertDialog(QDialog):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
-        self.lbl_summary = QLabel()
-        self.lbl_summary.setObjectName("pageHint")
-        self.lbl_summary.setWordWrap(True)
-        layout.addWidget(self.lbl_summary)
-        buttons = QHBoxLayout()
-        self.btn_trash = QPushButton("Move New Files to Recycle Bin")
+        footer = frame.add_footer("Convert", "Make the new files as listed", cancel="Close",
+                                  cancel_tip="Close (the new files stay)", on_primary=self._start)
+        self.btn_trash = footer.add_extra(QPushButton("Move New Files to Recycle Bin"))
         self.btn_trash.setToolTip("Take back what was made here (the new files go to the Recycle Bin)")
         self.btn_trash.clicked.connect(self._trash_created)
         self.btn_trash.setVisible(False)
-        buttons.addWidget(self.btn_trash)
-        buttons.addStretch(1)
-        self.btn_close = QPushButton("Close")
-        self.btn_close.setToolTip("Close (the new files stay)")
-        self.btn_close.clicked.connect(self.accept)
-        self.btn_ok = QPushButton("Convert")
-        self.btn_ok.setObjectName("primaryBtn")
-        self.btn_ok.setToolTip("Make the new files as listed")
-        self.btn_ok.clicked.connect(self._start)
-        buttons.addWidget(self.btn_close)
-        buttons.addWidget(self.btn_ok)
-        layout.addLayout(buttons)
-
+        self.lbl_summary = footer.add_status(QLabel())
+        self.lbl_summary.setObjectName("pageHint")
+        self.lbl_summary.setWordWrap(True)
+        self.btn_close, self.btn_ok = footer.btn_cancel, footer.btn_primary
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(150)
@@ -291,6 +284,10 @@ class ConvertDialog(QDialog):
         if side and side > 0 and self.txt_sub.text() in ("converted", *(batch_convert.size_name(s) for s in batch_convert.SIZES if s)):
             self.txt_sub.setText(batch_convert.size_name(side))  # ("2K": a folder named after the size)
         self._timer.start()
+
+    def _on_where(self) -> None:
+        self.sub_row.setVisible(self.radio_sub.isChecked())
+        self.folder_row.setVisible(self.radio_folder.isChecked())
 
     def _browse(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Folder for the New Files", self.txt_folder.text() or str(Path.home()))
@@ -429,21 +426,19 @@ class CutoutDialog(QDialog):
         self._running = False
         self._stop = False
         count = len(self.assets)
-        self.setWindowTitle(f"Remove Background from {count} Picture{'s' if count != 1 else ''}")
-        self.resize(820, 520)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        note = QLabel("Each picture gets a copy with its background removed, beside it (a PNG with transparency). "
-                      "The pictures themselves don't change. It works on pictures with a subject: a render, a photo "
-                      "of an object, a character. A full scene has no single subject to keep.")
-        note.setObjectName("pageHint")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        title = f"Remove Background from {count} Picture{'s' if count != 1 else ''}"
+        self.setWindowTitle(title)
+        self.resize(820, 560)
+        frame = DialogFrame(self, title, "Each picture gets a copy with its background removed, beside it (a PNG with "
+                                         "transparency); the pictures themselves don't change. It works on pictures "
+                                         "with a subject: a render, a photo of an object, a character. A full scene has "
+                                         "no single subject to keep.")
+        layout = frame.body
         from core import ai_tools
         from core.settings import get_cutout_model
 
+        layout.addWidget(section_heading("Model"))
         model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Model"))
         self.cmb_model = QComboBox()
         for key in ai_tools.CUTOUT_MODELS:
             tool = ai_tools.TOOLS[key]
@@ -454,6 +449,7 @@ class CutoutDialog(QDialog):
         model_row.addWidget(self.cmb_model)
         model_row.addStretch(1)
         layout.addLayout(model_row)
+        layout.addWidget(section_heading("Pictures"))
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Picture", "New file", "Note"])
         self.tree.setRootIsDecorated(False)
@@ -466,29 +462,21 @@ class CutoutDialog(QDialog):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
-        self.lbl_summary = QLabel(f"{count} new file{'s' if count != 1 else ''} will be made.")
-        self.lbl_summary.setObjectName("pageHint")
-        self.lbl_summary.setWordWrap(True)
-        layout.addWidget(self.lbl_summary)
-        buttons = QHBoxLayout()
-        self.btn_trash = QPushButton("Move New Files to Recycle Bin")
+        footer = frame.add_footer(
+            "Remove Backgrounds" if count != 1 else "Remove Background",
+            "Make the cut-outs as listed (the model downloads the first time it's used)",
+            cancel="Close", cancel_tip="Close (the new files stay)", on_primary=self._start,
+        )
+        self.btn_trash = footer.add_extra(QPushButton("Move New Files to Recycle Bin"))
         self.btn_trash.setToolTip("Take back what was made here (the new files go to the Recycle Bin)")
         self.btn_trash.clicked.connect(self._trash_created)
         self.btn_trash.setVisible(False)
-        buttons.addWidget(self.btn_trash)
-        buttons.addStretch(1)
-        self.btn_close = QPushButton("Close")
-        self.btn_close.setToolTip("Close (the new files stay)")
-        self.btn_close.clicked.connect(self.accept)
-        self.btn_ok = QPushButton("Remove Backgrounds" if count != 1 else "Remove Background")
-        set_icon(self.btn_ok, "cutout")
-        self.btn_ok.setObjectName("primaryBtn")
-        self.btn_ok.setToolTip("Make the cut-outs as listed (the model downloads the first time it's used)")
+        self.lbl_summary = footer.add_status(QLabel(f"{count} new file{'s' if count != 1 else ''} will be made."))
+        self.lbl_summary.setObjectName("pageHint")
+        self.lbl_summary.setWordWrap(True)
+        self.btn_close, self.btn_ok = footer.btn_cancel, footer.btn_primary
+        set_icon(self.btn_ok, "cutout", "on_accent")
         self.btn_ok.setEnabled(count > 0)
-        self.btn_ok.clicked.connect(self._start)
-        buttons.addWidget(self.btn_close)
-        buttons.addWidget(self.btn_ok)
-        layout.addLayout(buttons)
 
     def model(self) -> str:
         return self.cmb_model.currentData()

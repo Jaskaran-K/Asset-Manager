@@ -278,7 +278,7 @@ def test_a_new_profile_from_the_menu_starts_empty_or_as_a_copy(two_libraries, qa
     monkeypatch.setattr(profile_dialogs.NewProfileDialog, "exec", answer("painter", copy=True))
     dialog = profile_dialogs.NewProfileDialog(profiles.current_profile(), window)
     dialog.txt_name.setText("painter")
-    assert not dialog.buttons.button(dialog.buttons.StandardButton.Ok).isEnabled() and "already" in dialog.lbl_error.text()
+    assert not dialog.btn_create.isEnabled() and "already" in dialog.lbl_error.text()
     dialog.deleteLater()
     window.close()
 

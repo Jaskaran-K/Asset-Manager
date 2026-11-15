@@ -10,10 +10,11 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QPushButton, QToolButton
+from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QToolButton
 
 from ui import shortcuts
 from ui.artbook_note_bar import ColorButton
+from ui.controls import GhostButton, fit_popup, ghost_button, soft_shadow
 from ui.duotone import set_icon
 
 if TYPE_CHECKING:
@@ -31,8 +32,9 @@ class DrawBar(QFrame):
         self.setObjectName("drawBar")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setSpacing(3)
+        soft_shadow(self)
         self.btn_color = ColorButton("edit", "Pen colour", board.set_pen_color, None, self.avoid_rect)
         layout.addWidget(self.btn_color)
         self.size_box = QComboBox()
@@ -41,8 +43,9 @@ class DrawBar(QFrame):
         for size in PEN_SIZES:
             self.size_box.addItem(f"{size} px", size)
         self.size_box.activated.connect(self._on_size_picked)
+        fit_popup(self.size_box)
         layout.addWidget(self.size_box)
-        self.btn_smooth = QToolButton()
+        self.btn_smooth = GhostButton()
         set_icon(self.btn_smooth, "smooth", size=16)
         self.btn_smooth.setCheckable(True)
         self.btn_smooth.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -50,7 +53,7 @@ class DrawBar(QFrame):
         self.btn_smooth.setToolTip("Smoothing: steadies lines drawn with a mouse, as with a pen (on / off)")
         self.btn_smooth.clicked.connect(board.toggle_smoothing)
         layout.addWidget(self.btn_smooth)
-        self.btn_eraser = QToolButton()
+        self.btn_eraser = GhostButton()
         set_icon(self.btn_eraser, "eraser", size=16)
         self.btn_eraser.setCheckable(True)
         self.btn_eraser.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -58,10 +61,8 @@ class DrawBar(QFrame):
         self.btn_eraser.setToolTip(f"Eraser ({shortcuts.get('artbook.eraser').keys}): drag over strokes to remove them")
         self.btn_eraser.clicked.connect(board.toggle_eraser)
         layout.addWidget(self.btn_eraser)
-        self.btn_done = QPushButton("Done")
+        self.btn_done = ghost_button("check", f"Done: stop drawing ({shortcuts.get('artbook.draw').keys} or Esc)", "Done")
         self.btn_done.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.btn_done.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_done.setToolTip(f"Stop drawing ({shortcuts.get('artbook.draw').keys} or Esc)")
         self.btn_done.clicked.connect(board.stop_draw)
         layout.addWidget(self.btn_done)
         self.adjustSize()

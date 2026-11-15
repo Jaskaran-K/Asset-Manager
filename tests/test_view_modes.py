@@ -118,11 +118,11 @@ def test_narrow_asset_side_gets_a_compact_toolbar(window, qapp):
     window.view_splitter.setSizes([1, total - 1])  # as narrow as it goes
     pump(qapp)
     assert window.asset_toolbar.compact
-    assert window.btn_refresh.text() == "" and window.btn_refresh.toolTip()  # icon only, tooltip kept
+    assert window.btn_library.text() == "" and window.btn_library.toolTip()  # icon only, tooltip kept
     assert window.asset_panel.width() >= window.asset_panel.minimumWidth() > 0  # not squashed past compact
     window.view_modes.set_mode("asset")
     pump(qapp)
-    assert not window.asset_toolbar.compact and window.btn_refresh.text() == "Refresh"
+    assert not window.asset_toolbar.compact and window.btn_library.text() == "Library"
 
 
 def test_view_state_setting_is_validated(isolated_user_data):

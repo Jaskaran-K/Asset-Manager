@@ -114,6 +114,50 @@ THEMES: dict[str, dict[str, str]] = {
         "glass_tint": "#bcf9fafb", "glass_edge": "#1f000000", "texture_ink": "#1e293b",
         "board_area": "#bfffffff",
     },
+    "sand": {  # (a warm light theme with an amber accent: dark text on its filled buttons, see on_accent)
+        "label": "Sand",
+        "window_bg": "#f4efe6",
+        "surface": "#fbf8f2",
+        "surface_alt": "#f7f2e9",
+        "sidebar_bg": "#f7f2e9",
+        "grid_bg": "#efe8dc",
+        "border": "#e4dacb",
+        "text": "#3b2f22",
+        "text_strong": "#24190e",
+        "text_muted": "#6e5f4c",
+        "text_faint": "#8a7a66",
+        "button": "#fbf8f2",
+        "button_border": "#d9cdb9",
+        "button_hover": "#f1e9dc",
+        "button_border_hover": "#b8a78e",
+        "button_pressed": "#e7dccb",
+        "button_disabled": "#f1ebe1",
+        "input_bg": "#fffdf9",
+        "input_border": "#d9cdb9",
+        "hover": "#ebe1d1",
+        "accent": "#f5b13d",
+        "accent_border": "#e09a20",
+        "accent_hover": "#f0a325",
+        "accent_soft": "#fbe6bd",
+        "accent_text": "#a8630a",
+        "card": "#fbf8f2",
+        "card_border": "#e4dacb",
+        "card_hover": "#f7f2e9",
+        "card_hover_border": "#b8a78e",
+        "card_selected": "#fbe6bd",
+        "card_selected_text": "#6b3d05",
+        "scroll_track": "#efe8dc",
+        "scroll_handle": "#d2c5b0",
+        "scroll_handle_hover": "#b8a78e",
+        "danger": "#c2410c",
+        "warn_text": "#9a2a0c", "warn_bg": "#fdf0ea", "warn_border": "#f6cdb9",
+        "note_text": "#8a4b06", "note_bg": "#fdf5e3", "note_border": "#f3d99b",
+        "info_text": "#1e4f8a", "info_bg": "#eef4fb", "info_border": "#c3d7ef",
+        "thumb_card": "#f1ebe1", "thumb_border": "#e4dacb",
+        "thumb_badge": "#fffdf9", "thumb_badge_text": "#3b2f22",
+        "glass_tint": "#bcf7f2e9", "glass_edge": "#1f000000", "texture_ink": "#3b2f22",
+        "board_area": "#bffffdf9",
+    },
     "dark_purple": {
         "label": "Dark Purple",
         "window_bg": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #241338, stop:0.55 #160d26, stop:1 #0c0716)",
@@ -238,7 +282,10 @@ QPushButton:pressed { background-color: $button_pressed; }
 QPushButton:checked { background-color: $accent_soft; border-color: $accent; color: $card_selected_text; }
 QPushButton:disabled { color: $text_faint; background-color: $button_disabled; border-color: $border; }
 
-#primaryBtn { background-color: $accent; border: 1px solid $accent_border; color: #ffffff; font-weight: bold; }
+/* Keyboard focus is the accent ring around a control (ui.focus_ring), not Qt's dotted box inside it */
+QPushButton, QToolButton, QCheckBox, QRadioButton, QTabBar, QSlider { outline: none; }
+
+#primaryBtn { background-color: $accent; border: 1px solid $accent_border; color: $on_accent; font-weight: bold; }
 #primaryBtn:hover { background-color: $accent_hover; }
 /* Split button (main part + a menu arrow), e.g. Library */
 QToolButton#splitBtn {
@@ -282,12 +329,12 @@ QComboBox QAbstractItemView {
     border: 1px solid $border;
     padding: 4px;
     outline: 0;
-    selection-background-color: $accent;
-    selection-color: #ffffff;
+    selection-background-color: $hover;
+    selection-color: $text_strong;
 }
-QComboBox QAbstractItemView::item { min-height: 26px; padding: 0px 8px; border-radius: 4px; }
+QComboBox QAbstractItemView::item { min-height: 26px; padding: 0px 8px; border-radius: 6px; }
 QComboBox QAbstractItemView::item:hover { background-color: $hover; }
-QComboBox QAbstractItemView::item:selected { background-color: $accent; color: #ffffff; }
+QComboBox QAbstractItemView::item:selected { background-color: $hover; color: $text_strong; }
 QPlainTextEdit {
     background-color: $input_bg;
     border: 1px solid $input_border;
@@ -297,7 +344,13 @@ QPlainTextEdit {
     font-family: Consolas, "Courier New", monospace;
 }
 QPlainTextEdit[invalid="true"] { border: 1px solid $danger; }
-#pdfTab { padding: 5px 4px; min-width: 0px; }
+#pdfTab { padding: 5px 4px; min-width: 0px; }  /* (the Theme Studio's preview) */
+#pdfBar { background: $surface; border-bottom: 1px solid $border; }
+#findPill { background: $input_bg; border: 1px solid $input_border; border-radius: 16px; }
+#findPill[focused="true"] { border-color: $accent_border; }
+#findPill QLineEdit { background: transparent; border: none; padding: 4px 2px; }
+#findPill QToolButton#ghost { border-radius: 12px; padding: 3px; }
+#pdfSidebar QToolButton#seg { padding: 4px 6px; }
 QCheckBox, QRadioButton { spacing: 8px; }
 QCheckBox::indicator, QRadioButton::indicator {
     width: 14px; height: 14px; border: 1px solid $input_border; background-color: $input_bg;
@@ -319,18 +372,84 @@ QGroupBox::title {
 }
 #guideText { background-color: $input_bg; border: 1px solid $input_border; border-radius: 8px; padding: 10px 14px; color: $text; }
 
-QMenu { background-color: $surface; border: 1px solid $border; padding: 4px; }
-QMenu::item { padding: 6px 18px; border-radius: 4px; }
-QMenu::item:selected { background-color: $accent; color: #ffffff; }
+/* Menus: Windows rounds their corners and draws the border and shadow (ui.animations: round_popup) */
+QMenu { background-color: $raised; border: $menu_border; padding: 6px 5px; }
+QMenu::item { padding: 6px 26px 6px 12px; border-radius: 6px; margin: 1px 0px; }
+QMenu::item:selected { background-color: $hover; color: $text_strong; }
+QMenu::icon { padding-left: 10px; }
+QMenu::icon:checked { background: $accent_soft; border: 1px solid $accent; border-radius: 5px; }
+QMenu::right-arrow { margin-right: 8px; }
 /* Actions that can't be done right now: greyed out, and no highlight when hovered */
 QMenu::item:disabled { color: $text_faint; }
 QMenu::item:disabled:selected { background-color: transparent; color: $text_faint; }
-QMenu::separator { height: 1px; background: $border; margin: 4px 6px; }
+QMenu::separator { height: 1px; background: $border; margin: 5px 10px; }
 
 QSplitter::handle { background-color: $border; }
 
 /* Main window */
 #controlBar { background: $surface; border-bottom: 1px solid $border; }
+
+/* Ghost buttons (ui.controls): no border until hovered; filled with the accent while on */
+QToolButton#ghost, QToolButton#ghostText, QToolButton#ghostSplit {
+    background: transparent; border: 1px solid transparent; border-radius: 8px; color: $text;
+}
+QToolButton#ghost { padding: 5px; }
+QToolButton#ghostText { padding: 5px 10px 5px 8px; font-weight: 500; }
+QToolButton#ghostSplit { padding: 5px 22px 5px 8px; font-weight: 500; }
+QToolButton#ghost:hover, QToolButton#ghostText:hover, QToolButton#ghostSplit:hover { background: $hover; }
+QToolButton#ghost:pressed, QToolButton#ghostText:pressed, QToolButton#ghostSplit:pressed { background: $button_pressed; }
+QToolButton#ghost:checked, QToolButton#ghostText:checked { background: $accent_soft; color: $card_selected_text; }
+QToolButton#ghost:disabled, QToolButton#ghostText:disabled, QToolButton#ghostSplit:disabled { color: $text_faint; }
+QToolButton#ghost::menu-indicator, QToolButton#ghostText::menu-indicator { image: none; width: 0px; }
+QToolButton#ghostSplit::menu-button {
+    width: 16px; border: none; border-top-right-radius: 8px; border-bottom-right-radius: 8px;
+}
+QToolButton#ghostSplit::menu-button:hover { background: $hover; }
+QToolButton#ghostSplit[active="true"] { color: $text_strong; }
+#placeSep { color: $text_faint; padding: 0px 1px; }
+QToolButton[place="true"] { font-weight: 600; }
+QFrame#barSep { background: $border; border: none; }
+
+/* A dropdown without a box (ui.controls.DropButton): the choice's name, a chevron painted at its right */
+QToolButton#ghostDrop {
+    background: transparent; border: 1px solid transparent; border-radius: 8px; color: $text;
+    padding: 5px 24px 5px 8px; font-weight: 500;
+}
+QToolButton#ghostDrop:hover { background: $hover; }
+QToolButton#ghostDrop:pressed { background: $button_pressed; }
+QToolButton#ghostDrop:disabled { color: $text_faint; }
+QToolButton#ghostDrop::menu-indicator { image: none; width: 0px; }
+
+/* Side by side choices in a soft track (ui.controls.segmented) */
+#segment { background: $track; border-radius: 9px; }
+QToolButton#seg {
+    background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 4px 10px;
+    color: $text_muted; font-weight: 500;
+}
+QToolButton#seg:hover { color: $text; }
+QToolButton#seg:checked { background: $accent_soft; border-color: $accent; color: $card_selected_text; }
+QToolButton#seg:disabled { color: $text_faint; }
+
+/* A window's panel of settings beside its picture (the material and Render windows) */
+#sidePanel { background: $sidebar_bg; border: none; border-left: 1px solid $border; }
+#floatingBar QLabel#toolbarLabel { padding: 0px 2px 0px 6px; }
+
+/* The search box: a pill with its buttons inside (ui.tag_widgets.TagSearchBar) */
+#tagSearchBar { background: $input_bg; border: 1px solid $input_border; border-radius: 17px; }
+#tagSearchBar[focused="true"] { border-color: $accent_border; }
+#tagSearchBar QLineEdit#tagSearchEdit { background: transparent; border: none; padding: 6px 2px; }
+#tagSearchBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 13px; padding: 3px; }
+#tagSearchBar QToolButton:hover { background: $hover; }
+#tagSearchBar QToolButton:checked { background: $accent_soft; }
+
+/* Floating bars (ui.controls.FloatingBar): the selection bar, a viewer's tools */
+#floatingBar { background: $raised; border: 1px solid $border; border-radius: 14px; }
+#floatingBar QLabel#floatingCount { color: $text_strong; font-weight: 600; padding: 0px 8px 0px 6px; }
+#floatingCard { background: $raised; border: 1px solid $border; border-radius: 14px; }
+#floatingCardScroll, #floatingCardScroll > QWidget > QWidget { background: transparent; }
+#detailsDock { background: $sidebar_bg; border: none; border-left: 1px solid $border; }
+#detailsDock > QWidget > QWidget { background: transparent; }
+#viewerMeta { color: $text_muted; }
 
 QTreeWidget {
     background: $sidebar_bg;
@@ -352,7 +471,7 @@ QListWidget {
     outline: 0;
 }
 QListWidget::item { border-radius: 4px; padding: 5px 8px; }
-QListWidget::item:selected { background-color: $accent; color: #ffffff; }
+QListWidget::item:selected { background-color: $accent_soft; color: $card_selected_text; }
 
 #assetGrid {
     background: $grid_bg;
@@ -387,13 +506,18 @@ QListWidget::item:selected { background-color: $accent; color: #ffffff; }
 #artbookBoard { background: $grid_bg; }
 #panelTitle { color: $text_strong; font-size: 14px; font-weight: bold; }
 #boardHint { color: $text_faint; font-size: 14px; background: transparent; }
-#noteBar, #groupBar, #drawBar { background-color: $surface; border: 1px solid $border; border-radius: 8px; }
-#noteBar QToolButton, #groupBar QToolButton, #drawBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px; color: $text; }
-#noteBar QToolButton:hover, #groupBar QToolButton:hover, #drawBar QToolButton:hover { background: $hover; }
-#noteBar QToolButton:checked, #groupBar QToolButton:checked, #drawBar QToolButton:checked { background: $accent_soft; border-color: $accent; }
-#noteBar QComboBox, #drawBar QComboBox { padding: 2px 6px; }
+/* The board's bars (note, drawing, group): soft floating bars, like the viewers' (a shadow from ui.controls) */
+#noteBar, #groupBar, #drawBar, #imageBar { background-color: $raised; border: 1px solid $border; border-radius: 12px; }
+#noteBar QToolButton, #groupBar QToolButton, #drawBar QToolButton, #imageBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 3px; color: $text; }
+#noteBar QToolButton:hover, #groupBar QToolButton:hover, #drawBar QToolButton:hover, #imageBar QToolButton:hover { background: $hover; }
+#noteBar QToolButton:checked, #groupBar QToolButton:checked, #drawBar QToolButton:checked, #imageBar QToolButton:checked { background: $accent_soft; border-color: transparent; }
+#drawBar QToolButton#ghostText, #imageBar QToolButton#ghostText { padding: 3px 9px 3px 7px; font-weight: 500; }
+#imageBar QToolButton#ghostDrop { padding: 3px 22px 3px 7px; font-weight: 500; }
+#imageBar QToolButton::menu-indicator { image: none; width: 0px; }
+#noteBar QComboBox, #drawBar QComboBox { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 3px 6px; }
+#noteBar QComboBox:hover, #drawBar QComboBox:hover { background: $hover; }
 #noteBarDivider { background: $border; }
-#imageList { background-color: $surface; border: 1px solid $border; border-radius: 10px; }
+#imageList { background-color: $raised; border: 1px solid $border; border-radius: 14px; }
 #imageListTitle { color: $text_muted; font-size: 11px; font-weight: bold; letter-spacing: 1px; }
 #imageList QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px; }
 #imageList QToolButton:hover { background: $hover; }
@@ -426,6 +550,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 /* Settings dialog */
 #settingsNav { background: $sidebar_bg; border: none; border-right: 1px solid $border; padding: 8px 4px; }
+#settingsNav::item { padding: 3px 8px; margin: 1px 4px; }
 #categoryTree { background: $input_bg; border: 1px solid $input_border; border-radius: 6px; padding: 4px; }
 #pageTitle { font-size: 18px; font-weight: bold; color: $text_strong; }
 #sectionTitle { font-size: 14px; font-weight: bold; color: $text_strong; }
@@ -438,6 +563,15 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #footerWarning { color: $warn_text; }
 #themeCard { padding: 10px 14px; text-align: left; }
 #textureCard { padding: 6px 10px; text-align: left; }
+/* Settings pages as cards, under small caps headings; the dialog standard (ui.controls) */
+#settingCard { background: $raised; border: 1px solid $border; border-radius: 10px; }
+#settingCard QLabel { background: transparent; }
+#cardTitle { color: $text_strong; font-weight: 600; }
+#sectionHeading { color: $text_faint; font-size: 11px; font-weight: bold; letter-spacing: 1px; padding-top: 10px; }
+#settingsScroll, #settingsScroll > QWidget > QWidget { background: transparent; }
+#dialogHeader, #dialogBody { background: transparent; }
+#dialogTitle { color: $text_strong; font-size: 16px; font-weight: 600; }
+#dialogFooter { background: $surface; border-top: 1px solid $border; }
 
 /* Asset viewer */
 #headerBar { background: $surface; border-bottom: 1px solid $border; }
@@ -446,7 +580,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #bottomBar { background: $surface; border-top: 1px solid $border; }
 #viewerToolbar { background: $surface_alt; border-bottom: 1px solid $border; }
 #viewerTitle { color: $text_strong; }
-#formatBadge { background-color: $accent; color: #ffffff; border-radius: 4px; padding: 2px 8px; font-weight: bold; font-size: 11px; }
+#formatBadge { background-color: $accent_soft; color: $text_strong; border-radius: 6px; padding: 1px 7px; font-weight: 600; font-size: 11px; }
 #toolbarLabel { color: $text_muted; font-size: 12px; }
 #hintLabel { color: $text_faint; font-size: 11px; }
 #inspectorHeader { color: $accent_text; letter-spacing: 1px; }
@@ -470,12 +604,13 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
     background-color: $accent; border: 1px solid $accent_border; border-radius: 19px; padding: 0px;
 }
 #playBtn:disabled { background-color: $button_disabled; border-color: $border; }
+#videoControls { background: $surface; border-top: 1px solid $border; }
 #speedPopup { background-color: $input_bg; border: 1px solid $border; border-radius: 10px; }  /* solid: it floats over video */
 #speedValue { color: $accent_text; font-weight: bold; }
 #speedPreset, #speedPreset:hover, #speedPreset:pressed {
     background: transparent; border: none; border-radius: 6px; padding: 5px 10px; text-align: left;
 }
-#speedPreset:checked { background-color: $accent; color: #ffffff; font-weight: bold; }
+#speedPreset:checked { background-color: $accent; color: $on_accent; font-weight: bold; }
 """)
 
 # Background texture tile (ui.backgrounds), tiled behind dialogs and the main window's grid area.
@@ -526,9 +661,75 @@ def build_stylesheet(theme_id: str, texture_id: str = "none") -> str:
     return stylesheet_from(tokens, tile_path(texture_id, QColor(tokens["texture_ink"])))
 
 
+def contrast(a: QColor, b: QColor) -> float:
+    """WCAG contrast ratio of two colours (1 to 21)."""
+    def luminance(color: QColor) -> float:
+        def channel(c: float) -> float:
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        return 0.2126 * channel(color.redF()) + 0.7152 * channel(color.greenF()) + 0.0722 * channel(color.blueF())
+
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def on_accent(tokens: dict[str, str]) -> str:
+    """Text and icon details on the accent (filled buttons, ticks): white, unless the accent is too pale
+    for it (under 3:1, e.g. Sand's amber); then the theme's darkest text."""
+    accent = parse_color(tokens["accent"])
+    if not accent.isValid() or contrast(QColor("#ffffff"), accent) >= 3.0:
+        return "#ffffff"
+    strong = parse_color(tokens["text_strong"])
+    return strong.name() if strong.isValid() and strong.lightness() < 100 else "#111111"
+
+
+def track(tokens: dict[str, str]) -> str:
+    """The soft track behind side by side choices (ui.controls.segmented): a little darker than what it's on (a
+    recess, on a dark theme), or a faint wash of the theme's text (a light one). Either way the choices' muted
+    text keeps its contrast; the hover colour was used, and Neon Cyan's bright one hid them."""
+    window = parse_color(tokens["window_bg"])
+    if not window.isValid() or window.lightness() < 128:
+        return "rgba(0, 0, 0, 0.22)"
+    strong = parse_color(tokens["text_strong"])
+    if not strong.isValid():
+        return tokens["hover"]
+    return f"rgba({strong.red()}, {strong.green()}, {strong.blue()}, 0.06)"
+
+
+def with_derived(tokens: dict[str, str]) -> dict[str, str]:
+    """tokens plus the ones worked out from them when a theme doesn't set them (a Theme Studio theme, one
+    made before they existed): raised, the solid colour of floating bars, menus and cards over the window
+    (a dark theme's button colour; a light one's surface without its see-through); on_accent and track."""
+    extra = {}
+    if not tokens.get("on_accent"):
+        extra["on_accent"] = on_accent(tokens)
+    if not tokens.get("track"):
+        extra["track"] = track(tokens)
+    if tokens.get("raised") and tokens.get("menu_border"):
+        return {**tokens, **extra} if extra else tokens
+    from ui.animations import windows_rounds_popups
+
+    menu_border = "none" if windows_rounds_popups() else f"1px solid {tokens['border']}"
+    if tokens.get("raised"):
+        return {**tokens, **extra, "menu_border": menu_border}
+    window = parse_color(tokens["window_bg"])
+    if not window.isValid() or window.lightness() < 128:
+        raised = tokens["button"]
+    else:
+        surface = parse_color(tokens["surface"])
+        if surface.isValid() and surface.alpha() < 255:
+            a = surface.alphaF()
+            surface = QColor(
+                round(surface.red() * a + window.red() * (1 - a)), round(surface.green() * a + window.green() * (1 - a)),
+                round(surface.blue() * a + window.blue() * (1 - a)),
+            )
+        raised = surface.name() if surface.isValid() else tokens["button"]
+    return {**tokens, **extra, "raised": raised, "menu_border": menu_border}
+
+
 def stylesheet_from(tokens: dict[str, str], tile=None) -> str:
     """The stylesheet for a full set of tokens, with a background tile (a PNG path) or none.
     (Also what the Theme Studio previews with: ui.theme_studio.)"""
+    tokens = with_derived(tokens)
     sheet = APP_QSS_TEMPLATE.substitute(tokens)
     images = style_images(tokens)
     if images is not None:
@@ -548,7 +749,7 @@ def style_images(tokens: dict[str, str]) -> Optional[dict[str, Path]]:
     pictures = {
         "arrow": ("arrow", _solid(tokens["text_muted"], "#9ca3af")),
         "arrow_disabled": ("arrow", _solid(tokens["text_faint"], "#6b7280")),
-        "tick": ("tick", QColor("#ffffff")),  # (on the accent, like the menu highlight's text)
+        "tick": ("tick", QColor(tokens.get("on_accent") or on_accent(tokens))),  # (on the accent, like a filled button's text)
     }
     paths = {}
     try:
@@ -629,7 +830,7 @@ def parse_color(value: str) -> QColor:
 
 def theme_color(name: str) -> QColor:
     """A color token of the current theme (for widgets that paint themselves)."""
-    return parse_color(theme_tokens(_current_theme_id)[name])
+    return parse_color(with_derived(theme_tokens(_current_theme_id))[name])
 
 
 def _solid(color: str, fallback: str) -> QColor:

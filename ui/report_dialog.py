@@ -9,10 +9,11 @@ from typing import Optional
 
 from PySide6.QtCore import QStandardPaths, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDialog, QFileDialog, QLabel, QWidget
 
 from core import problem_report
 from ui import file_actions
+from ui.controls import DialogFrame, ghost_button, section_heading
 from ui.tag_widgets import run_job
 
 
@@ -21,11 +22,13 @@ class ReportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Report a Problem")
         self.setMinimumWidth(520)
-        layout = QVBoxLayout(self)
+        frame = DialogFrame(self, "Report a Problem", "Makes a zip you can send with a bug report, or keep. "
+                                                      "Nothing is uploaded.")
+        layout = frame.body
+        layout.addWidget(section_heading("In the report"))
         intro = QLabel(
-            "Makes a zip you can send with a bug report, or keep. <b>Nothing is uploaded.</b><br><br>"
-            "In it: the app's and Windows' versions; your processor, memory and graphics card; how big the "
-            "library is (counts only, no file or tag names); and the crash and session logs."
+            "The app's and Windows' versions; your processor, memory and graphics card; how big the library is (counts "
+            "only, no file or tag names); and the crash and session logs."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -36,22 +39,14 @@ class ReportDialog(QDialog):
         self.lbl_status.setObjectName("pageHint")
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
-        buttons = QHBoxLayout()
-        self.btn_save = QPushButton("Save Report...", self)
-        self.btn_save.setObjectName("primaryBtn")
-        self.btn_save.setToolTip("Choose where to save the zip, then show it in Explorer")
-        self.btn_save.clicked.connect(self._on_save)
-        self.btn_issue = QPushButton("Open a GitHub Issue", self)
-        self.btn_issue.setToolTip("Open a new issue on GitHub in the browser, with the version filled in (attach the zip there)")
+        footer = frame.add_footer("Save Report...", "Choose where to save the zip, then show it in Explorer",
+                                  cancel="Close", cancel_tip="Close this window", on_primary=self._on_save)
+        self.btn_save = footer.btn_primary
+        self.btn_issue = footer.add_extra(ghost_button(
+            "web", "Open a new issue on GitHub in the browser, with the version filled in (attach the zip there)",
+            "Open a GitHub Issue",
+        ))
         self.btn_issue.clicked.connect(self._on_issue)
-        close = QPushButton("Close", self)
-        close.setToolTip("Close this window")
-        close.clicked.connect(self.reject)
-        buttons.addWidget(self.btn_save)
-        buttons.addWidget(self.btn_issue)
-        buttons.addStretch(1)
-        buttons.addWidget(close)
-        layout.addLayout(buttons)
         self.saved: Optional[Path] = None
 
     def suggested_path(self) -> Path:

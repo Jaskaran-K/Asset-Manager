@@ -87,7 +87,7 @@ def test_colour_material_and_lighting_are_kept(qapp, tmp_path):
     dialog.cmb_material.setCurrentIndex(dialog.cmb_material.findData("metallic"))
     dialog.cmb_lighting.setCurrentIndex(dialog.cmb_lighting.findData("dramatic"))
     assert viewport.material_id == "metallic" and viewport.lighting_id == "dramatic"
-    dialog.btn_model_color.click()
+    dialog.action_model_color.trigger()  # (the material's dropdown: Colour...)
     from ui.color_popup import ColorPopup
 
     popup = next(w for w in qapp.topLevelWidgets() if isinstance(w, ColorPopup) and w.isVisible())

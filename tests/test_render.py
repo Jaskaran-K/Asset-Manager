@@ -670,7 +670,8 @@ def test_it_offers_to_download_first(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(render_engine, "supported", lambda: True)
     dialog, window = viewer_with_window(qapp, tmp_path)
     assert "Download LuxCore (157 MB)" in window.btn_render.text() and "free" in window.status.text()
-    assert window.btn_remove.isHidden() and not window.btn_save.isEnabled() and not window.btn_stop.isEnabled()
+    assert not window.action_remove.isVisible() and window.btn_more.isHidden() and not window.btn_save.isEnabled()
+    assert not window.btn_stop.isEnabled() and window.btn_stop.isHidden()
     finish(qapp, dialog, window)
 
 
@@ -679,7 +680,7 @@ def test_the_download_then_renders(qapp, tmp_path, monkeypatch, stand_in_worker)
     dialog, window = viewer_with_window(qapp, tmp_path)
     window.btn_render.click()
     assert pump(qapp, lambda: window._result is not None)
-    assert render_engine.is_installed() and window.btn_render.text() == "Render" and not window.btn_remove.isHidden()
+    assert render_engine.is_installed() and window.btn_render.text() == "Render" and window.action_remove.isVisible()
     finish(qapp, dialog, window)
 
 
@@ -699,6 +700,7 @@ def test_a_render_shows_its_result_and_it_can_be_saved(qapp, tmp_path, monkeypat
     dialog, window = viewer_with_window(qapp, tmp_path)
     window.btn_render.click()
     assert not window.btn_render.isEnabled() and window.btn_stop.isEnabled()  # (one at a time)
+    assert window.btn_render.isHidden() and not window.btn_stop.isHidden()  # (Stop takes Render's place)
     assert pump(qapp, lambda: window.process is None)
     assert "Test Card" in window.status.text() and "42" in window.status.text() and window.btn_save.isEnabled()
     target = tmp_path / "picture"
@@ -795,9 +797,9 @@ def test_old_folders_left_by_a_crash_are_cleared(qapp, tmp_path, monkeypatch):
 def test_luxcore_can_be_removed(qapp, tmp_path, monkeypatch):
     fake_installed(monkeypatch)
     dialog, window = viewer_with_window(qapp, tmp_path)
-    assert not window.btn_remove.isHidden()
-    window.btn_remove.click()
-    assert not render_engine.is_installed() and window.btn_remove.isHidden() and "Download" in window.btn_render.text()
+    assert window.action_remove.isVisible() and not window.btn_more.isHidden()
+    window.action_remove.trigger()  # (More > Remove LuxCore)
+    assert not render_engine.is_installed() and not window.action_remove.isVisible() and "Download" in window.btn_render.text()
     finish(qapp, dialog, window)
 
 

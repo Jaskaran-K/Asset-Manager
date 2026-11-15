@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QToolButton
 
 from ui.artbook_note_bar import ColorButton
+from ui.controls import GhostButton, soft_shadow
 from ui.duotone import set_icon
 
 if TYPE_CHECKING:
@@ -32,11 +33,12 @@ class GroupBar(QFrame):
         self.setObjectName("groupBar")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(8, 5, 8, 5)
         layout.setSpacing(3)
+        soft_shadow(self)
         self.btn_color = ColorButton("fill", "Group colour", board.set_group_fill, board.live_change, self.avoid_rect)
         layout.addWidget(self.btn_color)
-        self.btn_lock = QToolButton()
+        self.btn_lock = GhostButton()
         set_icon(self.btn_lock, "lock", size=16)
         self.btn_lock.setCheckable(True)
         self.btn_lock.setFocusPolicy(Qt.FocusPolicy.NoFocus)

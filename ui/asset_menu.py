@@ -46,6 +46,7 @@ class ArtbookSender:
         resolve(paths): the real files to send, when picked (files inside archives unpacked)."""
         paths = [p for p in paths if p.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
         send = menu.addMenu("Send to Artbook" if paths else "Send to Artbook (images only)")
+        set_icon(send.menuAction(), "view_artbook")
         send.setEnabled(bool(paths))
         if paths:
             self.fill_artbook_menu(send, lambda page_id: self.send_files(resolve(paths) if resolve else paths, page_id))
@@ -226,11 +227,13 @@ def build_asset_menu(
 
     if texture_set is None:
         action_open = menu.addAction("Open with External App")
+        set_icon(action_open, "window")
         if asset.in_archive:
             action_open.setToolTip("Unpacks it first, then opens it in the program Windows uses for it")
         action_open.triggered.connect(actions.open_external or (lambda: file_actions.open_file(asset.path)))
 
     action_reveal = menu.addAction("Show Archive in File Explorer" if asset.in_archive else "Show in File Explorer")
+    set_icon(action_reveal, "folder")
     action_reveal.triggered.connect(actions.reveal)
     if actions.source_page:
         action_source = menu.addAction("Open Source Page")
@@ -246,37 +249,17 @@ def build_asset_menu(
         )
         action_extract.triggered.connect(actions.extract)
 
-    if (asset.is_texture and (actions.find_similar is not None or actions.colors)) or actions.more_like is not None:
-        menu.addSeparator()
-    if asset.is_texture and actions.find_similar is not None:
-        action_similar = menu.addAction("Find Similar")
-        set_icon(action_similar, "similar")
-        action_similar.setToolTip("Show this picture and its look-alikes (resized or re-saved copies), closest first")
-        action_similar.triggered.connect(actions.find_similar)
-    if actions.more_like is not None:
-        action_like = menu.addAction("More Like This")
-        set_icon(action_like, "ai")
-        action_like.setToolTip("Files with the same kind of content (AI Search), closest first: other skulls, other brick walls")
-        action_like.triggered.connect(actions.more_like)
-    if asset.is_texture and actions.colors and actions.search_color is not None:
-        colour_menu = menu.addMenu("Search by Its Colours")
-        colour_menu.setToolTipsVisible(True)
-        set_icon(colour_menu.menuAction(), "palette")
-        for rgb, share in actions.colors:
-            word = hex_of(rgb)
-            action = colour_menu.addAction(color_swatch_icon(word, 22, 14), f"{color_name(rgb).capitalize()}  {word}  ({share:.0%})")
-            action.setToolTip(f"Pictures with colours close to {word} on 15% of them or more")
-            action.triggered.connect(lambda _checked=False, w=word: actions.search_color(w))
-
     menu.addSeparator()
 
     selected = len(selection)
     action_tag = menu.addAction("Tag..." if selected <= 1 else f"Tag {selected} Files...")
+    set_icon(action_tag, "tag")
     action_tag.setShortcut(shortcuts.sequence("main.tag"))
     action_tag.triggered.connect(actions.tag)
 
     all_favorite = bool(marks) and all(m.favorite for m in marks)
     action_fav = menu.addAction("Remove from Favorites" if all_favorite else "Add to Favorites")
+    set_icon(action_fav, "star")
     action_fav.setShortcut(shortcuts.sequence("main.favorite"))
     action_fav.triggered.connect(actions.toggle_favorite)
 
@@ -289,34 +272,74 @@ def build_asset_menu(
         action.setChecked(current == {rating})
         action.triggered.connect(lambda _checked=False, r=rating: actions.set_rating(r))
 
+    menu.addSeparator()
+
+    # Find: look-alikes, AI's More Like This and the colours
+    finds = []
+    if asset.is_texture and actions.find_similar is not None:
+        finds.append(("Find Similar", "similar", "Show this picture and its look-alikes (resized or re-saved copies), closest first",
+                      actions.find_similar))
+    if actions.more_like is not None:
+        finds.append(("More Like This", "ai", "Files with the same kind of content (AI Search), closest first: other skulls, other brick walls",
+                      actions.more_like))
+    colours = asset.is_texture and bool(actions.colors) and actions.search_color is not None
+    if finds or colours:
+        find_menu = menu.addMenu("Find")
+        find_menu.setToolTipsVisible(True)
+        set_icon(find_menu.menuAction(), "search")
+        for text, icon, tip, fn in finds:
+            action = find_menu.addAction(text)
+            set_icon(action, icon)
+            action.setToolTip(tip)
+            action.triggered.connect(fn)
+        if colours:
+            colour_menu = find_menu.addMenu("Search by Its Colours")
+            colour_menu.setToolTipsVisible(True)
+            set_icon(colour_menu.menuAction(), "palette")
+            for rgb, share in actions.colors:
+                word = hex_of(rgb)
+                action = colour_menu.addAction(color_swatch_icon(word, 22, 14), f"{color_name(rgb).capitalize()}  {word}  ({share:.0%})")
+                action.setToolTip(f"Pictures with colours close to {word} on 15% of them or more")
+                action.triggered.connect(lambda _checked=False, w=word: actions.search_color(w))
+
+    # Edit: new names, converted copies, cut-outs (the originals stay, but for Rename)
+    edits = []
     files = len(selection)
     if actions.rename is not None:
-        action_rename = menu.addAction("Rename..." if files <= 1 else f"Rename {files} Files...")
-        action_rename.setShortcut(shortcuts.sequence("main.rename"))
-        action_rename.setToolTip("New names from a pattern, with a preview first (Ctrl+Z undoes it)")
-        action_rename.setEnabled(not all(a.in_archive for a in selection))
-        action_rename.triggered.connect(actions.rename)
+        edits.append(("Rename..." if files <= 1 else f"Rename {files} Files...", "edit",
+                      "New names from a pattern, with a preview first (Ctrl+Z undoes it)", actions.rename,
+                      not all(a.in_archive for a in selection), "main.rename"))
     if actions.convert is not None and any(a.is_texture for a in selection):
-        action_convert = menu.addAction("Convert and Resize...")
-        set_icon(action_convert, "upscale")
-        action_convert.setToolTip("Make copies in another type or smaller (PNG, JPG, TGA, TIF; 2K, 4K ...); the originals stay")
-        action_convert.triggered.connect(actions.convert)
+        edits.append(("Convert and Resize...", "upscale",
+                      "Make copies in another type or smaller (PNG, JPG, TGA, TIF; 2K, 4K ...); the originals stay",
+                      actions.convert, True, None))
     if actions.remove_background is not None and any(a.is_texture for a in selection):
         pictures = sum(1 for a in selection if a.is_texture)
-        action_cutout = menu.addAction("Remove Background..." if pictures <= 1 else f"Remove Background ({pictures} Pictures)...")
-        set_icon(action_cutout, "cutout")
-        action_cutout.setToolTip("Make a copy with the background removed beside each picture (a PNG with transparency); the originals stay")
-        action_cutout.triggered.connect(actions.remove_background)
+        edits.append(("Remove Background..." if pictures <= 1 else f"Remove Background ({pictures} Pictures)...", "cutout",
+                      "Make a copy with the background removed beside each picture (a PNG with transparency); the originals stay",
+                      actions.remove_background, True, None))
+    if edits:
+        edit_menu = menu.addMenu("Edit")
+        edit_menu.setToolTipsVisible(True)
+        set_icon(edit_menu.menuAction(), "edit")
+        for text, icon, tip, fn, enabled, shortcut_id in edits:
+            action = edit_menu.addAction(text)
+            set_icon(action, icon)
+            action.setToolTip(tip)
+            action.setEnabled(enabled)
+            if shortcut_id is not None:
+                action.setShortcut(shortcuts.sequence(shortcut_id))
+            action.triggered.connect(fn)
 
-    if actions.add_folder_rule is not None:
-        action_rule = menu.addAction("Folder Rule...")
-        set_icon(action_rule, "folder")
-        action_rule.setToolTip("Tag files added to this file's folder from now on (Settings > Folder Rules)")
-        action_rule.triggered.connect(actions.add_folder_rule)
-
-    menu.addSeparator()
     sender.add_send_menu(menu, [a.path for a in selection], actions.send_files)
 
+    menu.addSeparator()
     action_copy_path = menu.addAction("Copy Full Path")
+    set_icon(action_copy_path, "copy")
     action_copy_path.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(asset.path)))
+    if actions.add_folder_rule is not None:
+        action_rule = menu.addAction("Folder Rule...")
+        set_icon(action_rule, "new_folder")
+        action_rule.setToolTip("Tag files added to this file's folder from now on (Settings > Folder Rules)")
+        action_rule.triggered.connect(actions.add_folder_rule)
     return menu

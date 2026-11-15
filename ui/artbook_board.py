@@ -57,8 +57,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
     QGraphicsItem,
     QGraphicsPathItem,
     QGraphicsScene,
@@ -88,7 +86,9 @@ from ui import animations, artbook_layout, file_actions, shortcuts
 from ui.artbook_note_bar import SWATCHES, NoteBar, swatch_icon
 from ui.artbook_draw_bar import DrawBar
 from ui.artbook_group_bar import GroupBar
+from ui.artbook_image_bar import ImageBar
 from ui.artbook_image_list import ImageListPanel
+from ui.controls import DialogFrame
 from ui.tag_widgets import run_job
 from ui.themes import theme_color
 
@@ -290,19 +290,20 @@ class CustomGridDialog(QDialog):
     def __init__(self, start: tuple[int, int], parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Custom Grid")
-        form = QFormLayout(self)
+        self.setMinimumWidth(380)
+        frame = DialogFrame(self, "Custom Grid", "Guides that divide the selected images into equal parts.")
+        row = QHBoxLayout()
         self.spin_columns, self.spin_rows = QSpinBox(self), QSpinBox(self)
         for spin, value, what in ((self.spin_columns, start[0], "Columns"), (self.spin_rows, start[1], "Rows")):
             spin.setRange(1, MAX_GRID)
             spin.setValue(value)
             spin.setToolTip(f"{what}: how many the image is divided into (1 to {MAX_GRID})")
-            form.addRow(what, spin)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=self)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setToolTip("Draw this grid over the selected images")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setToolTip("Leave the guides as they are")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+            row.addWidget(QLabel(what, self))
+            row.addWidget(spin)
+            row.addSpacing(12)
+        row.addStretch(1)
+        frame.body.addLayout(row)
+        frame.add_footer("OK", "Draw this grid over the selected images", cancel_tip="Leave the guides as they are")
 
     def grid(self) -> tuple[int, int]:
         return self.spin_columns.value(), self.spin_rows.value()
@@ -1489,6 +1490,7 @@ class BoardView(QGraphicsView):
         self._expanding = False  # (selecting the rest of a group)
         self._single_pick = False  # Alt+click: one member of a group, on its own
         self._group_bar: Optional[GroupBar] = None  # floats above the selected group (made when first needed)
+        self._image_bar: Optional[ImageBar] = None  # floats under the selected images (made when first needed)
         self._image_list: Optional[ImageListPanel] = None  # every image on the page, at the right (L)
         self._pen: dict[str, Any] = {"color": None, "width": 4, "eraser": False, "smooth": True}  # the pen (kept between sessions)
         self._draw_on = False  # draw mode (D)
@@ -2748,6 +2750,41 @@ class BoardView(QGraphicsView):
         bar.show()
         bar.raise_()
 
+    @property
+    def image_bar(self) -> ImageBar:
+        if self._image_bar is None:
+            self._image_bar = ImageBar(self)
+        return self._image_bar
+
+    def image_bar_shown(self) -> bool:
+        """The image bar's for the selection now: images are selected, and nothing else is going on (typing,
+        cropping, picking a colour, drawing); a single note has its own bar."""
+        return bool(self.selected_images()) and not (self._editing or self._crop or self._picking or self._draw_on)
+
+    def _place_image_bar(self) -> None:
+        """Under the selection (above it when there's no room below), kept inside the board."""
+        if not self.image_bar_shown():
+            if self._image_bar is not None:
+                self._image_bar.hide()
+            return
+        box = QRect()
+        for item in self.selected():
+            box = box.united(self.mapFromScene(item.sceneBoundingRect()).boundingRect())
+        bar = self.image_bar
+        key = tuple(sorted((item.item_id, item.group or "") for item in self.selected()))
+        if not bar.isVisible() or bar.property("selection") != key:
+            bar.setProperty("selection", key)
+            bar.sync()
+        bar.resize(bar.sizeHint())
+        x = max(4, min(box.center().x() - bar.width() // 2, self.width() - bar.width() - 4))
+        y = box.bottom() + 16  # (below the frame's handles)
+        if y + bar.height() > self.height() - 4:
+            above = box.top() - bar.height() - NOTE_BAR_GAP
+            y = above if above >= 4 else self.height() - bar.height() - 4
+        bar.move(x, y)
+        bar.show()
+        bar.raise_()
+
     def _group_at(self, scene_point: QPointF) -> Optional[str]:
         """The group whose panel is at a point (the smallest, where panels overlap)."""
         inside = [(box.width() * box.height(), gid) for gid, box in self.group_backdrop_boxes().items() if box.contains(scene_point)]
@@ -3266,6 +3303,7 @@ class BoardView(QGraphicsView):
     def _place_note_bar(self) -> None:
         self._note_bar_queued = False
         self._place_group_bar()
+        self._place_image_bar()
         note = self.note_bar_target()
         if note is None or self._crop or self._picking or note.scene() is not self._scene:
             if self._note_bar is not None:
@@ -3817,15 +3855,7 @@ class BoardView(QGraphicsView):
         has_selection = bool(selected)
         items = self.selected()
         images = self.selected_images()
-        states = [item.state() for item in items]
-        reset = [
-            ("All", "artbook.reset", self.reset_transform, has_selection),
-            None,
-            ("Rotation", None, self.reset_rotation, any(s.rotation % 360 for s in states)),
-            ("Size", None, self.reset_size, any(s.scale != 1.0 for s in states)),
-            ("Flips", None, self.reset_flips, any(item.state().flip_h or item.state().flip_v for item in images)),
-            ("Crop", None, self.reset_crop, any(item.crop for item in images)),
-        ]
+        reset = self._reset_entries()
         selection = [
             ("Crop", "artbook.crop", self.start_crop, selected == 1 and len(images) == 1),
             ("Grayscale", "artbook.gray", self.toggle_gray, bool(images), bool(images) and all(item.gray for item in images)),
@@ -3853,23 +3883,8 @@ class BoardView(QGraphicsView):
         arrange = [
             ("Auto-Arrange", "artbook.arrange", self.auto_arrange, len(self.arrange_scope()) >= 2),
         ]
-        align = [
-            ("Left", None, lambda: self.align("left"), selected >= 2),
-            ("Centers", None, lambda: self.align("center"), selected >= 2),
-            ("Right", None, lambda: self.align("right"), selected >= 2),
-            ("Top", None, lambda: self.align("top"), selected >= 2),
-            ("Middles", None, lambda: self.align("middle"), selected >= 2),
-            ("Bottom", None, lambda: self.align("bottom"), selected >= 2),
-            None,
-            ("Distribute Horizontally", None, lambda: self.distribute(True), selected >= 3),
-            ("Distribute Vertically", None, lambda: self.distribute(False), selected >= 3),
-            None,
-            ("Stack", None, self.stack, selected >= 2),
-        ]
-        match_size = [
-            ("Same Height", None, lambda: self.same_size(True), selected >= 2),
-            ("Same Width", None, lambda: self.same_size(False), selected >= 2),
-        ]
+        align = self._align_entries()
+        match_size = self._match_size_entries()
         canvas = [
             ("Frame Selection" if has_selection else "Frame Everything", "artbook.fit", self.frame, bool(self._items)),
             ("Zoom to 100%", "artbook.zoom_100", lambda: self.animate_view(1.0, self.view_center()), True),
@@ -3880,14 +3895,7 @@ class BoardView(QGraphicsView):
             None,
             ("Export Selection as PNG..." if has_selection else "Export as PNG...", "artbook.export_png", self.request_export_image, bool(self._items)),
         ]
-        has_files = bool(self.selected_files())
-        files = [
-            ("Show in Explorer", None, self.show_in_explorer, has_files),
-            ("Open Source File", None, self.open_source_files, has_files),
-            None,
-            ("Replace Image...", None, self.replace_image, selected == 1 and len(images) == 1 and not self.is_locked(images[0])),
-            ("Relink Missing Images...", None, self.relink_missing, bool(self.missing_images())),
-        ]
+        files = self._file_entries()
         images_menu = [
             ("Select All", "artbook.select_all", self.select_all, bool(self._items)),
             ("Image List", "artbook.image_list", self.toggle_image_list, True, self.image_list_open()),
@@ -3923,6 +3931,94 @@ class BoardView(QGraphicsView):
             menu.addSeparator()
             menu.addMenu(self.window_menu(menu))
         return menu
+
+    # ------------------ the right-click menu's lists (the image bar's dropdowns show them too) ------------------
+    def _reset_entries(self) -> list:
+        items, images = self.selected(), self.selected_images()
+        states = [item.state() for item in items]
+        return [
+            ("All", "artbook.reset", self.reset_transform, bool(items)),
+            None,
+            ("Rotation", None, self.reset_rotation, any(s.rotation % 360 for s in states)),
+            ("Size", None, self.reset_size, any(s.scale != 1.0 for s in states)),
+            ("Flips", None, self.reset_flips, any(item.state().flip_h or item.state().flip_v for item in images)),
+            ("Crop", None, self.reset_crop, any(item.crop for item in images)),
+        ]
+
+    def _align_entries(self) -> list:
+        selected = len(self.selected())
+        return [
+            ("Left", None, lambda: self.align("left"), selected >= 2),
+            ("Centers", None, lambda: self.align("center"), selected >= 2),
+            ("Right", None, lambda: self.align("right"), selected >= 2),
+            ("Top", None, lambda: self.align("top"), selected >= 2),
+            ("Middles", None, lambda: self.align("middle"), selected >= 2),
+            ("Bottom", None, lambda: self.align("bottom"), selected >= 2),
+            None,
+            ("Distribute Horizontally", None, lambda: self.distribute(True), selected >= 3),
+            ("Distribute Vertically", None, lambda: self.distribute(False), selected >= 3),
+            None,
+            ("Stack", None, self.stack, selected >= 2),
+        ]
+
+    def _match_size_entries(self) -> list:
+        selected = len(self.selected())
+        return [
+            ("Same Height", None, lambda: self.same_size(True), selected >= 2),
+            ("Same Width", None, lambda: self.same_size(False), selected >= 2),
+        ]
+
+    def _file_entries(self) -> list:
+        selected, images = len(self.selected()), self.selected_images()
+        has_files = bool(self.selected_files())
+        return [
+            ("Show in Explorer", None, self.show_in_explorer, has_files),
+            ("Open Source File", None, self.open_source_files, has_files),
+            None,
+            ("Replace Image...", None, self.replace_image, selected == 1 and len(images) == 1 and not self.is_locked(images[0])),
+            ("Relink Missing Images...", None, self.relink_missing, bool(self.missing_images())),
+        ]
+
+    def image_adjust_entries(self, menu: QMenu) -> list:
+        """The image bar's Adjust: how the selected images look."""
+        images = self.selected_images()
+        return [
+            ("Grayscale", "artbook.gray", self.toggle_gray, bool(images), bool(images) and all(item.gray for item in images)),
+            ("Pixelated", None, self.toggle_pixelated, bool(images), bool(images) and all(item.pixelated for item in images)),
+            None,
+            ("Values", self._values_menu(images)),
+            ("Guides", self._guides_menu(images)),
+            ("Opacity", [self._opacity_action(menu, bool(self.selected()))]),
+        ]
+
+    def image_arrange_entries(self, _menu: QMenu) -> list:
+        """The image bar's Arrange: placing two or more images."""
+        return [
+            ("Auto-Arrange", "artbook.arrange", self.auto_arrange, len(self.arrange_scope()) >= 2),
+            None,
+            *self._align_entries(),
+            None,
+            *self._match_size_entries(),
+        ]
+
+    def image_more_entries(self, _menu: QMenu) -> list:
+        """The image bar's More: the rest of what the right-click menu does to the selection."""
+        items, images = self.selected(), self.selected_images()
+        return [
+            ("Reset", self._reset_entries()),
+            None,
+            ("Bring to Front", "artbook.front", lambda: self.restack(True), bool(items)),
+            ("Send to Back", "artbook.back", lambda: self.restack(False), bool(items)),
+            None,
+            ("Caption...", None, self.edit_caption, bool(images)),
+            ("Revert to Original", None, self.revert_upscales, any(item.original and not self.is_locked(item) for item in images)),
+            ("File", self._file_entries()),
+            ("Copy File Path", None, self.copy_file_paths, any(item.linked_path() for item in images)),
+            None,
+            ("Export Selection as PNG...", "artbook.export_png", self.request_export_image, bool(items)),
+            None,
+            ("Delete", "artbook.delete", self.delete_selection, bool(items)),
+        ]
 
     def _opacity_action(self, parent: QMenu, enabled: bool) -> QWidgetAction:
         """A slider for the selection's opacity: live while dragging, one undo step when let go."""

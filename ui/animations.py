@@ -357,6 +357,31 @@ class ComboRowDelegate(QStyledItemDelegate):
         return super().sizeHint(option, index)
 
 
+def windows_rounds_popups() -> bool:
+    """Windows 11 and later round a window's corners and draw its border on request (round_popup)."""
+    return sys.platform == "win32" and sys.getwindowsversion().build >= 22000
+
+
+def round_popup(popup: QWidget) -> None:
+    """Have Windows round a menu's corners and draw its border in the theme's border colour (with its own
+    shadow), so the menu looks like the rest of Windows 11. Older Windows: the stylesheet's border stays."""
+    if not windows_rounds_popups() or QApplication.platformName() != "windows":
+        return
+    try:
+        import ctypes
+
+        from ui.themes import theme_color
+
+        hwnd = ctypes.c_void_p(int(popup.winId()))
+        corner = ctypes.c_int(3)  # DWMWCP_ROUNDSMALL
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
+        color = theme_color("border")
+        border = ctypes.c_uint(color.red() | (color.green() << 8) | (color.blue() << 16))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(border), ctypes.sizeof(border))
+    except Exception:  # pylint: disable=broad-except
+        pass  # (square corners: still a working menu)
+
+
 class _PopupAnimator(QObject):
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.Polish and isinstance(obj, QComboBox) and not obj.property("rowDelegate"):
@@ -365,6 +390,8 @@ class _PopupAnimator(QObject):
             if obj.view().itemDelegate().metaObject().className() in ("QComboBoxDelegate", "QComboMenuDelegate"):
                 obj.view().setItemDelegate(ComboRowDelegate(obj.view()))
         if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+            if isinstance(obj, QMenu):
+                round_popup(obj)
             if isinstance(obj, QMenu) or _is_combo_dropdown(obj) or obj.property("animatePopup") is True:
                 if _is_combo_dropdown(obj):
                     combo = obj.parentWidget()

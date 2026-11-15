@@ -43,10 +43,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QGroupBox,
+    QFrame,
     QMessageBox,
     QProgressDialog,
-    QRadioButton,
     QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
@@ -58,13 +57,14 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
-    QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionGraphicsItem,
     QStyleOptionViewItem,
+    QToolButton,
     QToolTip,
     QTreeView,
     QVBoxLayout,
@@ -78,7 +78,8 @@ from ui import shortcuts
 from ui.artbook_board import smooth_points
 from ui.artbook_note_bar import swatch_icon
 from ui.color_popup import ColorPopup
-from ui.duotone import set_icon
+from ui.controls import ComboDrop, DialogFrame, FloatingBar, bar_separator, ghost_button, section_heading, segmented
+from ui.duotone import duotone_icon
 from ui.pdf_marks import MARK_TYPES, InkMark, Mark, MarksCommand, NoteMark, from_dict, new_id
 from ui.themes import theme_color
 
@@ -1300,62 +1301,44 @@ class ExportDialog(QDialog):
     def __init__(self, parent: QWidget, marked: int, current: int, total: int):
         super().__init__(parent)
         self.setWindowTitle("Export a Copy")
-        column = QVBoxLayout(self)
-        column.setSpacing(10)
-        intro = QLabel("Saves the pages as a new file, with your highlights, drawings and notes drawn in. The PDF itself isn't changed.")
-        intro.setWordWrap(True)
-        column.addWidget(intro)
+        self.setMinimumWidth(500)
+        frame = DialogFrame(self, "Export a Copy", "Saves the pages as a new file, with your highlights, drawings and "
+                                                   "notes drawn in. The PDF itself isn't changed.")
+        column = frame.body
 
-        pages = QGroupBox("Pages")
-        pages_column = QVBoxLayout(pages)
-        self.page_choices: dict[str, QRadioButton] = {}
-        for name, label, tip in (
-            ("marked", f"Pages with marks ({marked})", "Only the pages you've highlighted, drawn or written on"),
+        column.addWidget(section_heading("Pages"))
+        track, self._pages_group = segmented([
+            ("marked", f"With marks ({marked})", "Only the pages you've highlighted, drawn or written on"),
             ("all", f"All pages ({total})", "Every page of the PDF"),
             ("current", f"This page ({current + 1})", "Just the page you're on"),
-        ):
-            choice = QRadioButton(label)
-            choice.setToolTip(tip)
-            pages_column.addWidget(choice)
-            self.page_choices[name] = choice
+        ], "marked" if marked else "current", self)
+        self.page_choices = {button.property("value"): button for button in self._pages_group.buttons()}
         self.page_choices["marked"].setEnabled(marked > 0)
-        self.page_choices["marked" if marked else "current"].setChecked(True)
-        column.addWidget(pages)
+        column.addWidget(track)
 
-        kind = QGroupBox("Save as")
-        kind_column = QVBoxLayout(kind)
-        self.as_pdf = QRadioButton("One PDF")
-        self.as_pdf.setToolTip("All the pages in one PDF file (its pages are pictures: their text can't be selected)")
-        self.as_png = QRadioButton("PNG images (one per page)")
-        self.as_png.setToolTip("A picture of each page, in a folder you pick")
-        self.as_pdf.setChecked(True)
-        kind_column.addWidget(self.as_pdf)
-        kind_column.addWidget(self.as_png)
+        column.addWidget(section_heading("Save as"))
+        row = QHBoxLayout()
+        kind, self._kind_group = segmented([
+            ("pdf", "One PDF", "All the pages in one PDF file (its pages are pictures: their text can't be selected)"),
+            ("png", "PNG images", "A picture of each page, in a folder you pick"),
+        ], "pdf", self)
+        self.as_pdf, self.as_png = self._kind_group.buttons()
+        kind.setFixedWidth(240)
+        row.addWidget(kind)
         self.quality = QComboBox()
         self.quality.setToolTip("Standard (150 dpi) for reading on screen; High (300 dpi) for printing")
         self.quality.addItem("Standard (150 dpi)", "standard")
         self.quality.addItem("High (300 dpi)", "high")
-        kind_column.addWidget(self.quality)
-        column.addWidget(kind)
+        row.addWidget(self.quality)
+        row.addStretch(1)
+        column.addLayout(row)
 
+        column.addSpacing(4)
         self.with_marks = QCheckBox("Draw my highlights, drawings and notes")
         self.with_marks.setToolTip("Off: the pages as they are")
         self.with_marks.setChecked(True)
         column.addWidget(self.with_marks)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.setToolTip("Close without exporting")
-        cancel.clicked.connect(self.reject)
-        export = QPushButton("Export...")
-        export.setObjectName("primaryBtn")
-        export.setToolTip("Pick where to save it, then export")
-        export.setDefault(True)
-        export.clicked.connect(self.accept)
-        buttons.addWidget(cancel)
-        buttons.addWidget(export)
-        column.addLayout(buttons)
+        frame.add_footer("Export...", "Pick where to save it, then export", cancel_tip="Close without exporting")
 
     def choice(self) -> dict[str, Any]:
         return {
@@ -1468,7 +1451,8 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
 
 class PdfViewer(QWidget):
-    """A PDF in the file viewer: toolbar, sidebar (Contents / Pages) and the pages."""
+    """A PDF in the file viewer: a slim bar (sidebar, page, Find, zoom, More), the sidebar (Contents / Pages /
+    Notes), the pages, and the marking tools floating over them (they stay: you're using them)."""
 
     def __init__(self, path: Path, parent: Optional[QWidget] = None, artbook=None):
         """artbook: a ui.asset_menu.ArtbookSender (fill_artbook_menu, send_image_to_artbook), or None: pages can't be
@@ -1513,7 +1497,7 @@ class PdfViewer(QWidget):
         self._toast_timer.setInterval(MESSAGE_MS)
         self._toast_timer.timeout.connect(self.toast.hide)
         layout.addWidget(self._build_toolbar())
-        layout.addWidget(self._build_marks_bar())
+        self.marks_tools = self._build_marks_bar()
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(2)
@@ -1521,7 +1505,7 @@ class PdfViewer(QWidget):
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.view)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([220, 800])
+        self.splitter.setSizes([240, 800])
         layout.addWidget(self.splitter, 1)
 
         self.view.page_changed.connect(self._on_page_changed)
@@ -1567,29 +1551,29 @@ class PdfViewer(QWidget):
         return self.contents_model.rowCount(QModelIndex()) > 0 if self.view is not None else False
 
     # ------------------ toolbar ------------------
-    def _button(self, icon: str, tip: str, slot, text: str = "") -> QPushButton:
-        button = QPushButton(text)
-        set_icon(button, icon)
-        button.setToolTip(tip)
+    def _button(self, icon: str, tip: str, slot, text: str = "", size: int = 18) -> QToolButton:
+        button = ghost_button(icon, tip, text, size=size)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.clicked.connect(slot)
         return button
 
     def _build_toolbar(self) -> QWidget:
+        """Contents / Pages / Notes; the page; Find (centred, with its matches); zoom; More (Export, the fits)."""
         bar = QWidget()
-        bar.setObjectName("viewerToolbar")
+        bar.setObjectName("pdfBar")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         row = QHBoxLayout(bar)
-        row.setContentsMargins(10, 4, 10, 4)
-        row.setSpacing(6)
+        row.setContentsMargins(10, 5, 10, 5)
+        row.setSpacing(4)
         key = lambda shortcut_id: shortcuts.get(shortcut_id).keys  # noqa: E731
-        self.btn_sidebar = self._button("menu", f"Show / hide Contents and Pages ({key('pdf.sidebar')})", self.toggle_sidebar)
+        self.btn_sidebar = self._button("menu", f"Show / hide Contents, Pages and Notes ({key('pdf.sidebar')})", self.toggle_sidebar)
         self.btn_sidebar.setCheckable(True)
         row.addWidget(self.btn_sidebar)
-        row.addSpacing(8)
+        row.addWidget(bar_separator(20))
         row.addWidget(self._button("arrow_up", f"Previous page ({key('pdf.previous_page')})", lambda: self.view.step_page(-1)))
         self.page_box = QLineEdit()
         self.page_box.setObjectName("pdfPageBox")
-        self.page_box.setFixedWidth(56)
+        self.page_box.setFixedWidth(48)
         self.page_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.page_box.setValidator(QIntValidator(1, max(1, self.doc.pageCount()), self.page_box))
         self.page_box.setToolTip("The page you're on: type a page number and press Enter to go there")
@@ -1600,11 +1584,25 @@ class PdfViewer(QWidget):
         row.addWidget(self.lbl_count)
         row.addWidget(self._button("arrow_down", f"Next page ({key('pdf.next_page')})", lambda: self.view.step_page(1)))
         row.addStretch(1)
+
+        # Find: a pill with its matches and previous / next inside
+        self.find_pill = pill = QFrame()
+        pill.setObjectName("findPill")
+        pill.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        pill.setFixedHeight(32)
+        pill.setMinimumWidth(220)
+        pill.setMaximumWidth(340)
+        pill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        inside = QHBoxLayout(pill)
+        inside.setContentsMargins(12, 0, 4, 0)
+        inside.setSpacing(2)
+        glass = QLabel()
+        glass.setPixmap(duotone_icon("search", "text").pixmap(16, 16))
+        inside.addWidget(glass)
         self.find_box = QLineEdit()
         self.find_box.setObjectName("pdfFindBox")
         self.find_box.setPlaceholderText("Find in PDF")
         self.find_box.setClearButtonEnabled(True)
-        self.find_box.setFixedWidth(180)
         self.find_box.setToolTip(f"Find words in the PDF ({key('pdf.find')}). Enter: next match, Shift+Enter: previous, Esc: clear")
         self.find_box.installEventFilter(self)
         self._find_timer = QTimer(self)
@@ -1612,20 +1610,21 @@ class PdfViewer(QWidget):
         self._find_timer.setInterval(SEARCH_DELAY_MS)
         self._find_timer.timeout.connect(self._on_find_typed)
         self.find_box.textChanged.connect(self._find_timer.start)
-        row.addWidget(self.find_box)
+        inside.addWidget(self.find_box, 1)
         self.lbl_matches = QLabel("")
         self.lbl_matches.setObjectName("toolbarLabel")
-        self.lbl_matches.setMinimumWidth(70)
-        row.addWidget(self.lbl_matches)
-        row.addWidget(self._button("arrow_up", f"Previous match ({key('pdf.find_previous')})", lambda: self.view.step_match(-1)))
-        row.addWidget(self._button("arrow_down", f"Next match ({key('pdf.find_next')})", lambda: self.view.step_match(1)))
-        row.addSpacing(8)
+        inside.addWidget(self.lbl_matches)
+        inside.addWidget(self._button("arrow_up", f"Previous match ({key('pdf.find_previous')})", lambda: self.view.step_match(-1), size=14))
+        inside.addWidget(self._button("arrow_down", f"Next match ({key('pdf.find_next')})", lambda: self.view.step_match(1), size=14))
+        row.addWidget(pill, 2)
+        row.addStretch(1)
+
         row.addWidget(self._button("zoom_out", f"Zoom out ({key('pdf.zoom_out')}, or Ctrl+wheel)", lambda: self.view.zoom_by(1.0 / ZOOM_STEP)))
         self.zoom_box = QComboBox()
         self.zoom_box.setObjectName("pdfZoomBox")
         self.zoom_box.setEditable(True)
         self.zoom_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.zoom_box.setFixedWidth(104)
+        self.zoom_box.setFixedWidth(112)
         self.zoom_box.setToolTip("Zoom: pick a size, or type one (like 140%) and press Enter")
         self.zoom_box.addItem("Fit Width", "width")
         self.zoom_box.addItem("Fit Page", "page")
@@ -1635,76 +1634,98 @@ class PdfViewer(QWidget):
         self.zoom_box.lineEdit().returnPressed.connect(self._on_zoom_typed)
         row.addWidget(self.zoom_box)
         row.addWidget(self._button("zoom_in", f"Zoom in ({key('pdf.zoom_in')}, or Ctrl+wheel)", lambda: self.view.zoom_by(ZOOM_STEP)))
-        row.addSpacing(8)
-        row.addWidget(self._button("fit_width", f"Fit the page's width ({key('pdf.fit_width')})", lambda: self.view.fit("width")))
-        row.addWidget(self._button("fit", f"Fit the whole page ({key('pdf.fit_page')})", lambda: self.view.fit("page")))
+
+        self.btn_more = self._button("more", "More: Export a Copy..., Fit Width, Fit Page", lambda: None)
+        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more = QMenu(self.btn_more)
+        more.setToolTipsVisible(True)
+        self.action_export = more.addAction(duotone_icon("copy"), "Export a Copy...")
+        self.action_export.setToolTip("Export a copy of the pages with your marks drawn in (a PDF or PNG images)")
+        self.action_export.triggered.connect(self.export_copy)
+        more.addSeparator()
+        fit_width = more.addAction(duotone_icon("fit_width"), f"Fit Width\t{key('pdf.fit_width')}")
+        fit_width.setToolTip("Fit the page's width")
+        fit_width.triggered.connect(lambda: self.view.fit("width"))
+        fit_page = more.addAction(duotone_icon("fit"), f"Fit Page\t{key('pdf.fit_page')}")
+        fit_page.setToolTip("Fit the whole page")
+        fit_page.triggered.connect(lambda: self.view.fit("page"))
+        self.btn_more.setMenu(more)
+        row.addWidget(self.btn_more)
         return bar
 
-    def _build_marks_bar(self) -> QWidget:
-        """The second row: the tools, the colour and pen size, undo / redo, and showing your marks."""
-        bar = QWidget()
-        bar.setObjectName("viewerToolbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(10, 2, 10, 4)
-        row.setSpacing(6)
+    def _build_marks_bar(self) -> FloatingBar:
+        """The marking tools, floating at the bottom of the pages (they don't fade: you're working with them):
+        Hand and Select; Highlight, Pen, Note and Eraser; the colour (for those that have one) and the pen's size
+        (for the pen); undo / redo; and showing your marks."""
+        tools = FloatingBar(self.view, gap=22)
+        row = tools.row
         key = lambda shortcut_id: shortcuts.get(shortcut_id).keys  # noqa: E731
-        self.tool_group = QButtonGroup(bar)
-        self.tool_buttons: dict[str, QPushButton] = {}
-        for mode, icon, label, tip in (
-            ("hand", "hand", "", f"Hand: drag to move the pages; click a mark to pick it ({key('pdf.escape')} goes back to it)"),
-            ("select", "text_select", "", f"Select Text: drag over text, then {key('pdf.copy')} to copy ({key('pdf.select_tool')})"),
-            ("highlight", "highlight", "Highlight", f"Highlight: drag over text ({key('pdf.highlight_tool')}; with text selected, highlights it)"),
-            ("pen", "edit", "Pen", f"Pen: draw on the page ({key('pdf.pen_tool')})"),
-            ("note", "sticky_note", "Note", f"Note: click on the page and type ({key('pdf.note_tool')})"),
-            ("eraser", "eraser", "", f"Eraser: drag over highlights, drawings and notes to remove them ({key('pdf.eraser_tool')})"),
+        self.tool_group = QButtonGroup(tools)
+        self.tool_buttons: dict[str, QToolButton] = {}
+        for mode, icon, tip in (
+            ("hand", "hand", f"Hand: drag to move the pages; click a mark to pick it ({key('pdf.escape')} goes back to it)"),
+            ("select", "text_select", f"Select Text: drag over text, then {key('pdf.copy')} to copy ({key('pdf.select_tool')})"),
+            ("highlight", "highlight", f"Highlight: drag over text ({key('pdf.highlight_tool')}; with text selected, highlights it)"),
+            ("pen", "edit", f"Pen: draw on the page ({key('pdf.pen_tool')})"),
+            ("note", "sticky_note", f"Note: click on the page and type ({key('pdf.note_tool')})"),
+            ("eraser", "eraser", f"Eraser: drag over highlights, drawings and notes to remove them ({key('pdf.eraser_tool')})"),
         ):
-            button = self._button(icon, tip, lambda _checked=False, m=mode: self.view.set_mode(m), label)
+            button = self._button(icon, tip, lambda _checked=False, m=mode: self.view.set_mode(m))
             button.setCheckable(True)
             self.tool_group.addButton(button)
             self.tool_buttons[mode] = button
             row.addWidget(button)
             if mode == "select":
-                row.addSpacing(8)
+                row.addWidget(bar_separator(20))
         self.tool_buttons["hand"].setChecked(True)
-        row.addSpacing(8)
-        self.btn_color = QPushButton()
-        self.btn_color.setToolTip("Colour for the highlighter, pen or notes (the tool that's on, or the last one used)")
+        self._colour_separator = bar_separator(20)
+        row.addWidget(self._colour_separator)
+        self.btn_color = ghost_button(None, "Colour for the highlighter, pen or notes (the tool that's on)")
         self.btn_color.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_color.setIconSize(QSize(18, 18))
         self.btn_color.clicked.connect(self._show_color_menu)
         row.addWidget(self.btn_color)
-        self.size_box = QComboBox()
-        self.size_box.setToolTip("Pen size (in points: it grows and shrinks with the page as you zoom)")
-        self.size_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.size_box = QComboBox(tools)  # (the choice; the dropdown shows it)
         for size in PEN_SIZES:
             self.size_box.addItem(f"{size:g} pt", size)
         self.size_box.setCurrentIndex(self.size_box.findData(self.view.pen_width))
         self.size_box.activated.connect(self._on_size_picked)
-        row.addWidget(self.size_box)
-        row.addSpacing(8)
+        self.size_drop = ComboDrop(self.size_box, None, "Pen size (in points: it grows and shrinks with the page as you zoom)")
+        self.size_drop.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        row.addWidget(self.size_drop)
+        row.addWidget(bar_separator(20))
         self.btn_undo = self._button("undo", f"Undo ({key('pdf.undo')})", self.view.undo)
         self.btn_redo = self._button("redo", f"Redo ({key('pdf.redo')})", self.view.redo)
         row.addWidget(self.btn_undo)
         row.addWidget(self.btn_redo)
-        row.addStretch(1)
-        self.btn_export = self._button("copy", "Export a copy of the pages with your marks drawn in (a PDF or PNG images)", self.export_copy, "Export...")
-        row.addWidget(self.btn_export)
-        self.btn_show_marks = self._button("eye", "Show / hide your highlights, drawings and notes", self._on_show_marks, "Marks")
+        row.addWidget(bar_separator(20))
+        self.btn_show_marks = self._button("eye", "Show / hide your highlights, drawings and notes", self._on_show_marks)
         self.btn_show_marks.setCheckable(True)
         self.btn_show_marks.setChecked(True)
         row.addWidget(self.btn_show_marks)
         self._color_tool = "highlight"  # (whose colour the colour button shows when no such tool is on)
         self._color_popup: Optional[ColorPopup] = None
         self._sync_marks_bar()
-        return bar
+        tools.reveal()
+        return tools
 
     def _color_target(self) -> str:
         return self.view.mode if self.view.mode in TOOL_COLORS else self._color_tool
 
     def _sync_marks_bar(self) -> None:
+        """The colour while a tool that has one is on, the size while the pen is; undo / redo when they can."""
+        mode = self.view.mode
         self.btn_color.setIcon(swatch_icon(self.view.colors[self._color_target()]))
-        self.size_box.setEnabled(self.view.mode in ("pen", "hand", "select"))
+        coloured = mode in TOOL_COLORS
+        changed = coloured == self.btn_color.isHidden() or (mode == "pen") == self.size_drop.isHidden()
+        self.btn_color.setVisible(coloured)
+        self._colour_separator.setVisible(coloured)
+        self.size_drop.setVisible(mode == "pen")
         self.btn_undo.setEnabled(self.view.undo_stack.canUndo())
         self.btn_redo.setEnabled(self.view.undo_stack.canRedo())
+        tools = getattr(self, "marks_tools", None)
+        if changed and tools is not None and tools.showing():
+            tools.place()
 
     def _show_color_menu(self) -> None:
         tool = self._color_target()
@@ -1714,7 +1735,7 @@ class PdfViewer(QWidget):
             action.triggered.connect(lambda _checked=False, c=color: self._set_tool_color(tool, c))
         menu.addSeparator()
         menu.addAction("Custom...").triggered.connect(lambda: self._custom_color(tool))
-        menu.exec(self.btn_color.mapToGlobal(QPoint(0, self.btn_color.height())))
+        menu.exec(self.btn_color.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 4)))  # (above: the tools are at the bottom)
         menu.deleteLater()
 
     def _set_tool_color(self, tool: str, color: str) -> None:
@@ -1743,7 +1764,10 @@ class PdfViewer(QWidget):
         self.toast.setText(text)
         width = min(560, max(200, self.view.width() - 40))
         height = max(34, self.toast.heightForWidth(width) + 4)
-        self.toast.setGeometry((self.view.width() - width) // 2, self.view.height() - 22 - height, width, height)
+        bottom = self.view.height() - 22
+        if self.marks_tools.showing():  # (above the tools)
+            bottom = self.marks_tools.y() + self.marks_tools.layout().contentsMargins().top() - 10
+        self.toast.setGeometry((self.view.width() - width) // 2, bottom - height, width, height)
         self.toast.show()
         self.toast.raise_()
         self._toast_timer.start()
@@ -1919,6 +1943,10 @@ class PdfViewer(QWidget):
         self.view.step_match(step)
 
     def eventFilter(self, obj, event) -> bool:
+        if obj is self.find_box and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self.find_pill.setProperty("focused", event.type() == QEvent.Type.FocusIn)
+            self.find_pill.style().unpolish(self.find_pill)
+            self.find_pill.style().polish(self.find_pill)
         if obj is self.find_box and event.type() == QEvent.Type.KeyPress:
             if shortcuts.matches("pdf.find_box_next", event) or shortcuts.matches("pdf.find_box_next_alt", event):
                 self.find_step(1)
@@ -1975,26 +2003,18 @@ class PdfViewer(QWidget):
         column = QVBoxLayout(side)
         column.setContentsMargins(8, 8, 8, 8)
         column.setSpacing(6)
-        tabs = QHBoxLayout()
-        tabs.setSpacing(4)
-        self.tab_group = QButtonGroup(side)
-        self.tab_buttons: dict[str, QPushButton] = {}
-        for name, label, tip in (
+        track, self.tab_group = segmented([
             ("contents", "Contents", "The PDF's chapters: click one to go there"),
             ("pages", "Pages", "Every page: click one to go there"),
             ("notes", "Notes", "Your highlights, drawings and notes: click one to go there"),
-        ):
-            button = QPushButton(label)
-            button.setObjectName("pdfTab")  # (snug: three side by side in a narrow sidebar)
-            button.setMinimumWidth(0)
-            button.setCheckable(True)
-            button.setToolTip(tip)
+        ], "contents", side)
+        self.tab_buttons: dict[str, QToolButton] = {}
+        for button in self.tab_group.buttons():
+            name = button.property("value")
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(lambda _checked=False, n=name: self.show_tab(n))
-            self.tab_group.addButton(button)
             self.tab_buttons[name] = button
-            tabs.addWidget(button)
-        column.addLayout(tabs)
+        column.addWidget(track)
         self.side_stack = QStackedWidget()
 
         contents = QWidget()
@@ -2043,7 +2063,7 @@ class PdfViewer(QWidget):
         self.notes_list.itemClicked.connect(self._on_note_listed_clicked)
         self.notes_list.itemActivated.connect(self._on_note_listed_clicked)
         notes_column.addWidget(self.notes_list, 1)
-        self.lbl_no_notes = QLabel("No highlights, drawings or notes yet. The Highlight, Pen and Note tools are above the pages.")
+        self.lbl_no_notes = QLabel("No highlights, drawings or notes yet. The Highlight, Pen and Note tools are at the bottom of the pages.")
         self.lbl_no_notes.setObjectName("pageHint")
         self.lbl_no_notes.setWordWrap(True)
         notes_column.addWidget(self.lbl_no_notes)

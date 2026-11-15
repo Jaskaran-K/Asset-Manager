@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QProcess, QStandardPaths, Qt, QTimer, Slot
+from PySide6.QtCore import QProcess, QSize, QStandardPaths, Qt, QTimer, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -24,9 +24,11 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,9 +37,11 @@ from core import environment, render_engine, render_scene, render_worker
 from core.model_look import LIGHTINGS
 from core.settings import get_render_settings, set_render_settings
 from ui.archive_jobs import UnpackJob, unpack_in_background
+from ui.controls import ghost_button, segmented
 from ui.duotone import set_icon
 
 POLL_MS = 200
+PANEL_WIDTH = 300  # the settings beside the picture
 LUXCORE, VIEWER = "luxcore", "viewer"
 
 
@@ -95,6 +99,16 @@ class _Preview(QLabel):
         self._fit()
 
 
+class _Status(QLabel):
+    """The panel's note: as tall as its wrapped lines need, so the window can't be made short enough to cut it
+    off (a wrapped label otherwise only asks for one line)."""
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        lines = self.heightForWidth(PANEL_WIDTH - 36) if self.text() else 0  # (the panel's side margins)
+        return QSize(hint.width(), max(hint.height(), lines))
+
+
 class RenderWindow(QDialog):
     def __init__(self, viewport, model: Path, name: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -102,7 +116,7 @@ class RenderWindow(QDialog):
         self.model = model
         self.name = name
         self.setWindowTitle(f"Render - {name}")
-        self.resize(980, 720)
+        self.resize(1100, 700)
         self.process: Optional[QProcess] = None
         self.folder: Optional[Path] = None
         self._download: Optional[UnpackJob] = None
@@ -121,108 +135,98 @@ class RenderWindow(QDialog):
 
     # ------------------ the window ------------------
     def _build(self) -> None:
+        """The picture, as big as there's room for; beside it, the settings and one button (Render)."""
         settings = get_render_settings()
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.preview = _Preview(self)
         layout.addWidget(self.preview, 1)
 
-        bar = QWidget(self)
-        bar.setObjectName("viewerToolbar")
-        rows = QVBoxLayout(bar)
-        rows.setContentsMargins(12, 8, 12, 10)
+        panel = QWidget(self)
+        panel.setObjectName("sidePanel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        panel.setFixedWidth(PANEL_WIDTH)
+        rows = QVBoxLayout(panel)
+        rows.setContentsMargins(18, 14, 18, 18)
         rows.setSpacing(8)
-        layout.addWidget(bar)
+        layout.addWidget(panel)
 
-        options = QHBoxLayout()
-        options.setSpacing(6)
-        rows.addLayout(options)
+        head = QHBoxLayout()
+        title = QLabel("Render", panel)
+        title.setObjectName("panelTitle")
+        head.addWidget(title, 1)
+        self.btn_more = ghost_button("more", "More: Remove LuxCore", parent=panel)
+        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more = QMenu(self.btn_more)
+        self.action_remove = more.addAction("Remove LuxCore")
+        self.action_remove.setToolTip("Delete the downloaded LuxCore (it can be downloaded again)")
+        more.setToolTipsVisible(True)
+        self.action_remove.triggered.connect(self._remove_clicked)
+        self.btn_more.setMenu(more)
+        head.addWidget(self.btn_more)
+        rows.addLayout(head)
 
-        def heading(text: str) -> None:
-            label = QLabel(text, bar)
-            label.setObjectName("toolbarLabel")
-            options.addWidget(label)
-
-        def choices(values: list[tuple[str, str, str]], current: str) -> QButtonGroup:
-            group = QButtonGroup(bar)
-            group.setExclusive(True)
-            for value, text, tip in values:
-                button = QPushButton(text, bar)
-                button.setCheckable(True)
-                button.setChecked(value == current)
-                button.setToolTip(tip)
-                button.setProperty("value", value)
-                group.addButton(button)
-                options.addWidget(button)
+        def choices(heading: str, values: list[tuple[str, str, str]], current: str) -> QButtonGroup:
+            rows.addSpacing(4)
+            label = QLabel(heading, panel)
+            label.setObjectName("sidebarTitle")
+            rows.addWidget(label)
+            track, group = segmented(values, current, panel)
+            rows.addWidget(track)
             return group
 
-        heading("Renderer")
-        self.engine_choice = choices([
+        self.engine_choice = choices("RENDERER", [
             (LUXCORE, "LuxCore", "Real light: cast shadows and light between parts of the model. Downloads once"),
             (VIEWER, "Viewer", "The picture on screen, at this size: instant, needs nothing, no cast shadows"),
         ], settings["engine"])
-        options.addSpacing(12)
-        heading("Size")
         self.size_choice = choices(
-            [(key, key, f"{w} x {h} pixels") for key, (w, h) in render_scene.RESOLUTIONS.items()], settings["resolution"],
+            "SIZE", [(key, key, f"{w} x {h} pixels") for key, (w, h) in render_scene.RESOLUTIONS.items()], settings["resolution"],
         )
-        options.addSpacing(12)
-        heading("Quality")
         self.quality_choice = choices(
-            [(key, text, f"{seconds} seconds of rendering (LuxCore)") for key, (text, seconds) in render_scene.QUALITIES.items()], settings["quality"],
+            "QUALITY", [(key, text, f"{seconds} seconds of rendering (LuxCore)") for key, (text, seconds) in render_scene.QUALITIES.items()],
+            settings["quality"],
         )
-        options.addSpacing(8)
-        self.check_denoise = QCheckBox("Denoise", bar)
+        rows.addSpacing(4)
+        self.check_denoise = QCheckBox("Denoise when it finishes", panel)
         self.check_denoise.setChecked(settings["denoise"])
         self.check_denoise.setToolTip("Clean up the last of the grain when LuxCore finishes: takes a few seconds")
-        options.addWidget(self.check_denoise)
-        options.addStretch(1)
+        rows.addWidget(self.check_denoise)
         for group, key in ((self.engine_choice, "engine"), (self.size_choice, "resolution"), (self.quality_choice, "quality")):
             group.buttonClicked.connect(lambda button, k=key: self._option_picked(k, button.property("value")))
         self.check_denoise.toggled.connect(lambda on: set_render_settings(denoise=on))
+        rows.addStretch(1)
 
-        self.status = QLabel("", bar)
+        self.status = _Status(panel)
         self.status.setWordWrap(True)
-        self.status.setObjectName("toolbarLabel")
+        self.status.setObjectName("mutedLabel")
         rows.addWidget(self.status)
-        self.progress = QProgressBar(bar)
+        self.progress = QProgressBar(panel)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(6)
         self.progress.hide()
         rows.addWidget(self.progress)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
-        rows.addLayout(buttons)
-        self.btn_render = QPushButton("Render", bar)
-        set_icon(self.btn_render, "render")
-        self.btn_render.setToolTip("Render what's in the viewer now")
-        self.btn_render.clicked.connect(self._render_clicked)
-        buttons.addWidget(self.btn_render)
-        self.btn_stop = QPushButton("Stop", bar)
-        self.btn_stop.setToolTip("Finish now, with what's been rendered so far")
-        self.btn_stop.clicked.connect(self._stop_clicked)
-        buttons.addWidget(self.btn_stop)
-        self.btn_save = QPushButton("Save PNG...", bar)
-        set_icon(self.btn_save, "save")
-        self.btn_save.setToolTip("Save the picture as a PNG file")
-        self.btn_save.clicked.connect(self._save_clicked)
-        buttons.addWidget(self.btn_save)
-        self.btn_use_viewer = QPushButton("Use the Viewer's Renderer", bar)
-        self.btn_use_viewer.setToolTip("Render with the viewer itself: needs nothing extra, but has no cast shadows")
+        self.btn_use_viewer = ghost_button(None, "Render with the viewer itself: needs nothing extra, but has no cast shadows",
+                                           "Use the Viewer's Renderer", parent=panel)
         self.btn_use_viewer.clicked.connect(self._use_viewer)
         self.btn_use_viewer.hide()
-        buttons.addWidget(self.btn_use_viewer)
-        buttons.addStretch(1)
-        self.btn_remove = QPushButton("Remove LuxCore", bar)
-        self.btn_remove.setToolTip("Delete the downloaded LuxCore (it can be downloaded again)")
-        self.btn_remove.clicked.connect(self._remove_clicked)
-        buttons.addWidget(self.btn_remove)
-        close = QPushButton("Close", bar)
-        close.setToolTip("Close this window (a render still going is stopped)")
-        close.clicked.connect(self.reject)
-        buttons.addWidget(close)
+        rows.addWidget(self.btn_use_viewer, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.btn_render = QPushButton("Render", panel)  # (the window's one filled button; Stop takes its place while busy)
+        self.btn_render.setObjectName("primaryBtn")
+        set_icon(self.btn_render, "render", "on_accent")
+        self.btn_render.setMinimumHeight(34)
+        self.btn_render.setToolTip("Render what's in the viewer now")
+        self.btn_render.clicked.connect(self._render_clicked)
+        rows.addWidget(self.btn_render)
+        self.btn_stop = QPushButton("Stop", panel)
+        self.btn_stop.setMinimumHeight(34)
+        self.btn_stop.setToolTip("Finish now, with what's been rendered so far")
+        self.btn_stop.clicked.connect(self._stop_clicked)
+        rows.addWidget(self.btn_stop)
+        self.btn_save = ghost_button("save", "Save the picture as a PNG file", "Save PNG...", parent=panel)
+        self.btn_save.clicked.connect(self._save_clicked)
+        rows.addWidget(self.btn_save, 0, Qt.AlignmentFlag.AlignHCenter)
 
     def _value(self, group: QButtonGroup) -> str:
         return group.checkedButton().property("value")
@@ -257,10 +261,13 @@ class RenderWindow(QDialog):
             self.btn_render.setText("Render")
             self.btn_render.setToolTip("Render what's in the viewer now")
         self.btn_render.setEnabled(not busy and (available or not lux))
+        self.btn_render.setVisible(not busy)
         self.btn_stop.setEnabled(busy)
+        self.btn_stop.setVisible(busy)
         self.btn_save.setEnabled(not busy and (self._image is not None or self._result is not None))
-        self.btn_remove.setVisible(installed)
-        self.btn_remove.setEnabled(not busy)
+        self.action_remove.setVisible(installed)
+        self.action_remove.setEnabled(not busy)
+        self.btn_more.setVisible(installed)  # (Remove LuxCore is all that's in it)
         if not busy and not self.status.text():
             if lux and not available:
                 self.status.setText("LuxCore isn't available for this version of the app. The viewer's renderer works without it.")

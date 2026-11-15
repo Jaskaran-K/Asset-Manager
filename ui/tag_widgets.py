@@ -48,7 +48,8 @@ from PySide6.QtWidgets import (
 from core.search_query import TAG_NAME, TAG_TOKEN, quote_tag_name
 from core.tag_repository import MAX_TAG_NAME_LENGTH, Tag, TagChange, TagError, TagRepository
 from ui import shortcuts
-from ui.duotone import Tone, set_icon
+from ui.controls import DialogFrame, GhostButton
+from ui.duotone import Tone, duotone_icon, set_icon
 from ui.icons import MAIN_CATEGORY_COLORS, SUB_CATEGORY_COLORS, color_swatch_icon
 
 # Colors handed out to new custom tags, in order
@@ -523,16 +524,22 @@ class TagSearchBar(QFrame):
         self._color_popup = None  # (the colour picker, while it's open)
         self._picked_token = ""  # the color: token the picker put in the box
 
+        # A pill with its buttons inside (the theme's #tagSearchBar); its border lights up while typing in it
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setFixedHeight(34)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setContentsMargins(12, 2, 5, 2)
         layout.setSpacing(4)
+        self.lbl_search_icon = QLabel(self)
+        self.lbl_search_icon.setPixmap(duotone_icon("search", "text").pixmap(16, 16))
+        layout.addWidget(self.lbl_search_icon)
         self._chip_row = QHBoxLayout()
         self._chip_row.setSpacing(4)
         layout.addLayout(self._chip_row)
 
         self.edit = QLineEdit()
         self.edit.setObjectName("tagSearchEdit")
-        self.edit.setPlaceholderText("Search assets or tag:name...")
+        self.edit.setPlaceholderText("Search files and tags")
         self.edit.setToolTip(
             "Type to search file names.\n"
             "tag:name  has the tag (pick a suggestion, or type it and press Enter)\n"
@@ -549,7 +556,7 @@ class TagSearchBar(QFrame):
         self.edit.installEventFilter(self)
         layout.addWidget(self.edit, 1)
 
-        self.btn_ai = QToolButton()
+        self.btn_ai = GhostButton()
         set_icon(self.btn_ai, "ai", size=16)
         self.btn_ai.setCheckable(True)
         self.btn_ai.setToolTip(
@@ -561,7 +568,7 @@ class TagSearchBar(QFrame):
         self.btn_ai.clicked.connect(self._on_ai_clicked)
         layout.addWidget(self.btn_ai)
 
-        self.btn_color = QToolButton()
+        self.btn_color = GhostButton()
         set_icon(self.btn_color, "palette", size=16)
         self.btn_color.setToolTip("Search by colour: pictures with a colour on 15% of them or more")
         self.btn_color.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -571,7 +578,7 @@ class TagSearchBar(QFrame):
         self.btn_color.setMenu(self._color_menu())
         layout.addWidget(self.btn_color)
 
-        self.btn_save = QToolButton()
+        self.btn_save = GhostButton()
         set_icon(self.btn_save, "star", size=16)
         self.btn_save.setToolTip("Save this search as a collection in the sidebar")
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -580,7 +587,7 @@ class TagSearchBar(QFrame):
         self.btn_save.hide()
         layout.addWidget(self.btn_save)
 
-        self.btn_clear = QToolButton()
+        self.btn_clear = GhostButton()
         set_icon(self.btn_clear, "close", "text", size=14)
         self.btn_clear.setToolTip("Clear search and tag filters (Esc)")
         self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -903,6 +910,10 @@ class TagSearchBar(QFrame):
         self._picked_token = ""
 
     def eventFilter(self, obj, event) -> bool:
+        if obj is self.edit and event.type() in (event.Type.FocusIn, event.Type.FocusOut):
+            self.setProperty("focused", event.type() == event.Type.FocusIn)
+            self.style().unpolish(self)
+            self.style().polish(self)
         if obj is self.edit and event.type() == event.Type.KeyPress:
             if shortcuts.matches("search.remove_last_chip", event) and not self.edit.text() and self._filters:
                 self.remove_filter(self._filters[-1])
@@ -948,19 +959,12 @@ class TagAssetsDialog(QDialog):
         self.setWindowTitle("Tag File" if count == 1 else f"Tag {count} Files")
         self.setMinimumSize(380, 460)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
-
-        hint = QLabel(
-            "Tick a tag to add it to "
-            + ("this file" if count == 1 else f"all {count} files")
-            + ", untick to remove it."
-            + ("" if count == 1 else " A partly filled box means only some of the files have it.")
+        frame = DialogFrame(
+            self, "Tag File" if count == 1 else f"Tag {count} Files",
+            "Tick a tag to add it to " + ("this file" if count == 1 else f"all {count} files") + ", untick to remove it."
+            + ("" if count == 1 else " A partly filled box means only some of the files have it."),
         )
-        hint.setObjectName("pageHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        layout = frame.body
 
         self.list_tags = QListWidget()
         self.list_tags.itemChanged.connect(self._update_apply_button)
@@ -998,20 +1002,11 @@ class TagAssetsDialog(QDialog):
         self._default_box = QVBoxLayout()
         layout.addLayout(self._default_box)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.setToolTip("Close without changing any tags")
-        btn_cancel.clicked.connect(self.reject)
-        self.btn_apply = QPushButton("Apply")
-        self.btn_apply.setToolTip("Apply the ticked and unticked tags to the files")
-        self.btn_apply.setObjectName("primaryBtn")
-        self.btn_apply.setDefault(False)
+        footer = frame.add_footer("Apply", "Apply the ticked and unticked tags to the files",
+                                  cancel_tip="Close without changing any tags", on_primary=self._on_apply)
+        self.btn_apply = footer.btn_primary
+        self.btn_apply.setDefault(False)  # (Enter in the name box makes a tag)
         self.btn_apply.setAutoDefault(False)
-        self.btn_apply.clicked.connect(self._on_apply)
-        buttons.addWidget(btn_cancel)
-        buttons.addWidget(self.btn_apply)
-        layout.addLayout(buttons)
 
         self._populate()
 

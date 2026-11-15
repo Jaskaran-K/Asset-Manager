@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QSplitter, QToolB
 from core.settings import VIEW_MODES, get_view_state, set_view_state
 from ui import shortcuts
 from ui.artbook_window import CLICK_THROUGH_SHORTCUT, ArtbookWindow, GlobalHotkey, WindowMenu, WindowOptionsButton
+from ui.controls import GhostButton
 from ui.duotone import set_icon
 
 # mode: (menu label, icon, shortcut id)
@@ -39,15 +40,14 @@ MODES: dict[str, tuple[str, str, str]] = {
 assert tuple(MODES) == VIEW_MODES
 
 
-class ViewSwitchButton(QToolButton):
+class ViewSwitchButton(GhostButton):
     """Split button: click toggles Asset / Artbook view, the arrow lists every view."""
 
     def __init__(self, modes: "ViewModes", parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.modes = modes
-        self.setObjectName("splitBtn")
-        self.setText("View")
-        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setObjectName("ghostSplit")  # (borderless: ui.controls)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         menu = QMenu(self)
@@ -64,7 +64,7 @@ class ViewSwitchButton(QToolButton):
 
     def show_mode(self, mode: str) -> None:
         label, icon, _shortcut = MODES[mode]
-        set_icon(self, icon, size=16)
+        set_icon(self, icon, size=18)
         target = "Artbook" if mode == "asset" else "Asset"
         self.setToolTip(
             f"{label}. Click for {target} View; the arrow lists every view (Ctrl+1 to Ctrl+4)"

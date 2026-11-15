@@ -9,14 +9,14 @@ from typing import Callable, Optional, Sequence
 
 import shiboken6
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
+from PySide6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QLabel, QSlider, QWidget
 
 from core import archives, environment
 from core.hdr_image import HDR_EXTENSIONS
 from core.model_look import LIGHTINGS
 from core.scanner import AssetItem
 from core.settings import HDRI_EXPOSURE_RANGE, set_model_view
-from ui.duotone import set_icon
+from ui.controls import ghost_button
 from ui.tag_widgets import run_job
 
 _BROWSE = "browse"
@@ -50,6 +50,7 @@ class RoughnessBar(QWidget):
         self.value = QLabel()
         self.value.setObjectName("toolbarLabel")
         row.addWidget(self.value)
+        self.value.setMinimumWidth(22)
         self._show_value()
         self.slider.valueChanged.connect(self._moved)
         self.slider.sliderReleased.connect(self._remember)
@@ -194,15 +195,11 @@ class LightingControls:
         self.slider_exposure.sliderReleased.connect(self._remember_exposure)
         self._show_exposure()
 
-        self.btn_backdrop = QPushButton("Backdrop")
-        set_icon(self.btn_backdrop, "backdrop")
-        self.btn_backdrop.setCheckable(True)
+        self.btn_backdrop = ghost_button("backdrop", "Backdrop: show the HDRI behind the model (B)", checkable=True)
         self.btn_backdrop.setChecked(viewport.show_backdrop)
-        self.btn_backdrop.setToolTip("Show the HDRI behind the model (B)")
         self.btn_backdrop.toggled.connect(viewport.set_backdrop)
         viewport.backdrop_changed.connect(self.btn_backdrop.setChecked)
         row.addWidget(self.btn_backdrop)
-        row.addStretch(1)
         return bar
 
     def _show_exposure(self) -> None:

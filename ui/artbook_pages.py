@@ -93,15 +93,12 @@ def page_icon(page_id: str, ratio: float) -> QIcon:
 
 
 def folder_icon(ratio: float) -> QIcon:
-    """A folder; a light one for the selected row (the accent one would vanish on its accent pill)."""
-    icon = QIcon()
-    for tone, mode in (("accent", QIcon.Mode.Normal), ("light", QIcon.Mode.Selected)):
-        pixmap = _canvas(FOLDER_ICON_SIZE, ratio)
-        painter = QPainter(pixmap)
-        draw_icon(painter, QRectF((FOLDER_ICON_SIZE.width() - 18) / 2, 1, 18, 18), "folder", tone)
-        painter.end()
-        icon.addPixmap(pixmap, mode)
-    return icon
+    """A folder (the same on a selected row: the selection is a soft tint)."""
+    pixmap = _canvas(FOLDER_ICON_SIZE, ratio)
+    painter = QPainter(pixmap)
+    draw_icon(painter, QRectF((FOLDER_ICON_SIZE.width() - 18) / 2, 1, 18, 18), "folder", "accent")
+    painter.end()
+    return QIcon(pixmap)
 
 
 class PagesTree(QTreeWidget):
@@ -144,8 +141,7 @@ class PagesTree(QTreeWidget):
     def drawRow(self, painter: QPainter, option, index: QModelIndex) -> None:
         super().drawRow(painter, option, index)
         if self._shows_pencil(index):
-            tone = "light" if self.selectionModel().isSelected(index) else "accent"
-            draw_icon(painter, QRectF(self.pencil_rect(index)), "edit", tone)
+            draw_icon(painter, QRectF(self.pencil_rect(index)), "edit", "accent")  # (the selection is a soft tint)
 
     def _pencil_at(self, pos) -> Optional[QModelIndex]:
         index = self.indexAt(pos)

@@ -393,7 +393,7 @@ def test_menu_entries_for_pictures(qapp):
     )
     parent = QWidget()
     menu = build_asset_menu(parent, asset(Path("D:/x/rock.png")), [], [], actions, ArtbookSender(None, picked.append))
-    texts = {a.text(): a for a in menu.actions()}
+    texts = every_action(menu)
     texts["Find Similar"].trigger()
     texts["Folder Rule..."].trigger()
     colours = texts["Search by Its Colours"].menu().actions()
@@ -401,7 +401,7 @@ def test_menu_entries_for_pictures(qapp):
     colours[0].trigger()
     assert picked == ["similar", "rule", "#d6281e"]
     menu = build_asset_menu(parent, asset(Path("D:/x/notes.pdf")), [], [], actions, ArtbookSender(None, picked.append))
-    assert "Find Similar" not in {a.text() for a in menu.actions()}
+    assert "Find Similar" not in every_action(menu)
     parent.deleteLater()
 
 
@@ -514,3 +514,13 @@ def test_huge_exrs_are_skipped(tmp_path, monkeypatch):
     exr.write_bytes(b"\x00" * 2048)
     monkeypatch.setattr(picture_look, "MAX_EXR_BYTES", 1024)
     assert read_look(str(exr)) is picture_look.UNREADABLE
+
+
+def every_action(menu) -> dict:
+    """A menu's entries by their text, its submenus' too (Find, Edit ...)."""
+    found = {}
+    for action in menu.actions():
+        found[action.text()] = action
+        if action.menu() is not None:
+            found.update({k: v for k, v in every_action(action.menu()).items() if k not in found})
+    return found

@@ -39,6 +39,7 @@ from core.archives import Cancelled
 from core.settings import get_upscale_settings, set_upscale_settings
 from ui.archive_jobs import UnpackJob, unpack_in_background
 from ui.artbook_board import BASE_SIDE, BoardView, ImageItem, _decode_saved
+from ui.controls import DialogFrame, ghost_button, section_heading, segmented
 from ui.duotone import set_icon
 from ui.tag_widgets import run_job
 from ui.themes import theme_color
@@ -364,7 +365,9 @@ class UpscaleDialog(QDialog):
     # ------------------ building ------------------
     def _build(self) -> None:
         settings = get_upscale_settings()
-        layout = QVBoxLayout(self)
+        frame = DialogFrame(self, self.TITLE, f"Select images in the list and {self.VERB.lower()} them, compare, then "
+                                              f"tick the ones to put on the board.")
+        layout = frame.body
         middle = QHBoxLayout()
         layout.addLayout(middle, 1)
         self.list = QListWidget(self)
@@ -386,31 +389,24 @@ class UpscaleDialog(QDialog):
         self.compare.checker_after = self.CHECKER
         right.addWidget(self.compare, 1)
         hint = QLabel("Drag the line to compare. Mouse wheel zooms, drag to move, double-click to fit.", self)
-        hint.setObjectName("mutedLabel")
+        hint.setObjectName("pageHint")
         right.addWidget(hint)
 
         self.options_box = QWidget(self)
         options = QHBoxLayout(self.options_box)
-        options.setContentsMargins(0, 0, 0, 0)
+        options.setContentsMargins(0, 4, 0, 0)
+        options.setSpacing(10)
         layout.addWidget(self.options_box)
         self.options_box.setVisible(self.OPTIONS)
 
         def heading(text: str) -> None:
-            label = QLabel(text, self)
-            label.setObjectName("toolbarLabel")
+            label = section_heading(text, self)
+            label.setStyleSheet("padding-top: 0px;")
             options.addWidget(label)
 
         def choices(values: list[tuple[Any, str, str]], current: Any) -> QButtonGroup:
-            group = QButtonGroup(self)
-            group.setExclusive(True)
-            for value, text, tip in values:
-                button = QPushButton(text, self)
-                button.setCheckable(True)
-                button.setChecked(value == current)
-                button.setToolTip(tip)
-                button.setProperty("value", value)
-                group.addButton(button)
-                options.addWidget(button)
+            track, group = segmented(values, current, self)
+            options.addWidget(track)
             return group
 
         self._build_options(heading, choices, options, settings)
@@ -426,30 +422,22 @@ class UpscaleDialog(QDialog):
         self.progress.hide()
         layout.addWidget(self.progress)
 
-        buttons = QHBoxLayout()
-        layout.addLayout(buttons)
-        self.btn_upscale = QPushButton(self.VERB, self)
+        footer = frame.add_footer(
+            f"Use {self.RESULT} Pictures",
+            f"Put the ticked {self.RESULT.lower()} pictures on the board (one Ctrl+Z; Images > Revert to Original any time)",
+            cancel_tip="Close without changing the board", on_primary=self._on_apply,
+        )
+        self.btn_apply = footer.btn_primary
+        self.btn_apply.setDefault(False)
+        self.btn_upscale = footer.add_extra(QPushButton(self.VERB, self))
         set_icon(self.btn_upscale, self.ICON)
         self.btn_upscale.clicked.connect(self._on_upscale)
-        buttons.addWidget(self.btn_upscale)
-        self.btn_stop = QPushButton("Stop", self)
+        self.btn_stop = footer.add_extra(QPushButton("Stop", self))
         self.btn_stop.setToolTip(f"Stop {self.WORKING.lower()} (pictures already done are kept)")
         self.btn_stop.clicked.connect(self._on_stop)
-        buttons.addWidget(self.btn_stop)
-        buttons.addStretch(1)
-        self.btn_remove = QPushButton(f"Remove {self.TOOL}", self)
-        self.btn_remove.setToolTip(f"Delete the downloaded {self.TOOL} (it can be downloaded again)")
+        self.btn_remove = footer.add_extra(ghost_button(None, f"Delete the downloaded {self.TOOL} (it can be downloaded again)",
+                                                        f"Remove {self.TOOL}"))
         self.btn_remove.clicked.connect(self._on_remove)
-        buttons.addWidget(self.btn_remove)
-        self.btn_apply = QPushButton(f"Use {self.RESULT} Pictures", self)
-        self.btn_apply.setToolTip(f"Put the ticked {self.RESULT.lower()} pictures on the board (one Ctrl+Z; Images > Revert to Original any time)")
-        self.btn_apply.clicked.connect(self._on_apply)
-        buttons.addWidget(self.btn_apply)
-        close = QPushButton("Cancel", self)
-        close.setToolTip("Close without changing the board")
-        close.clicked.connect(self.reject)
-        buttons.addWidget(close)
-
     def _build_options(self, heading, choices, options, settings) -> None:
         heading("Kind of picture")
         self.model_choice = choices([(key, name, tip) for key, (_model, name, tip) in upscaler.MODELS.items()], settings["model"])

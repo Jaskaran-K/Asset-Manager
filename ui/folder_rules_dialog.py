@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from core.category_rules import fold
 from core.folder_rules import FolderRule
 from core.tag_repository import MAX_TAG_NAME_LENGTH, TagRepository
+from ui.controls import DialogFrame, section_heading
 from ui.duotone import set_icon
 
 _RULE_ROLE = Qt.ItemDataRole.UserRole
@@ -52,18 +53,13 @@ class FolderRuleDialog(QDialog):
         self.repo = repo
         self.setWindowTitle("Change Folder Rule" if rule else "New Folder Rule")
         self.setMinimumWidth(520)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
-        hint = QLabel(
-            "Files added to the folder from now on get these tags: new files, and files copied or moved in "
-            "(also while the app is closed: they're tagged at the next scan). A tag you take off a file stays off."
+        frame = DialogFrame(
+            self, "Change Folder Rule" if rule else "New Folder Rule",
+            "Files added to the folder from now on get these tags: new files, and files copied or moved in (also while "
+            "the app is closed: they're tagged at the next scan). A tag you take off a file stays off.",
         )
-        hint.setObjectName("pageHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        layout.addWidget(QLabel("Folder"))
+        layout = frame.body
+        layout.addWidget(section_heading("Folder"))
         row = QHBoxLayout()
         self.txt_folder = QLineEdit(rule.folder if rule else folder)
         self.txt_folder.setPlaceholderText("The folder the rule watches")
@@ -75,7 +71,7 @@ class FolderRuleDialog(QDialog):
         row.addWidget(browse)
         layout.addLayout(row)
 
-        layout.addWidget(QLabel("Tags (separate them with commas)"))
+        layout.addWidget(section_heading("Tags (separated by commas)"))
         row = QHBoxLayout()
         self.txt_tags = QLineEdit(", ".join(rule.tags) if rule else "")
         self.txt_tags.setPlaceholderText("WIP, Kitbash")
@@ -96,6 +92,7 @@ class FolderRuleDialog(QDialog):
         row.addWidget(self.btn_pick)
         layout.addLayout(row)
 
+        layout.addWidget(section_heading("Which files"))
         self.chk_subfolders = QCheckBox("Its subfolders too", self)
         self.chk_subfolders.setToolTip("Files added anywhere inside the folder, not only directly in it")
         self.chk_subfolders.setChecked(rule.subfolders if rule else True)
@@ -112,19 +109,7 @@ class FolderRuleDialog(QDialog):
         self.lbl_problem.setWordWrap(True)
         layout.addWidget(self.lbl_problem)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.setToolTip("Close without changing the rule")
-        cancel.clicked.connect(self.reject)
-        self.btn_ok = QPushButton("Save Rule")
-        self.btn_ok.setObjectName("primaryBtn")
-        self.btn_ok.setToolTip("Keep the rule")
-        self.btn_ok.setDefault(True)
-        self.btn_ok.clicked.connect(self.accept)
-        buttons.addWidget(cancel)
-        buttons.addWidget(self.btn_ok)
-        layout.addLayout(buttons)
+        self.btn_ok = frame.add_footer("Save Rule", "Keep the rule", cancel_tip="Close without changing the rule").btn_primary
         self._file_types = {fold(t.name) for t in repo.list_tags(kind="default")}
         self._update()
 
@@ -218,7 +203,6 @@ class FolderRulesPage(QWidget):
         layout.addWidget(self.tree, 1)
         buttons = QHBoxLayout()
         self.btn_add = QPushButton("+ Add Rule...")
-        self.btn_add.setObjectName("primaryBtn")
         self.btn_add.setToolTip("Make a rule: files added to a folder get tags")
         self.btn_add.clicked.connect(self._on_add)
         self.btn_edit = QPushButton("Change...")

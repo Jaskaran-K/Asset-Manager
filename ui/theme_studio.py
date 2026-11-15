@@ -826,7 +826,7 @@ class PreviewPane(QFrame):
         top.addWidget(btn_settings)
         btn_import = QPushButton("Add Folder")
         btn_import.setObjectName("primaryBtn")
-        set_icon(btn_import, "new_folder", "light", tokens=self.icon_tokens)
+        set_icon(btn_import, "new_folder", "on_accent", tokens=self.icon_tokens)
         btn_import.setToolTip("(A sample main button)")
         top.addWidget(btn_import)
         layout.addWidget(header)
@@ -1201,7 +1201,7 @@ class IconsPreview(QScrollArea):
         self._section(column, "On buttons")
         buttons = QHBoxLayout()
         for text, icon, tone, kind in (
-            ("Button", "settings", "accent", ""), ("Main button", "new_folder", "light", "primaryBtn"),
+            ("Button", "settings", "accent", ""), ("Main button", "new_folder", "on_accent", "primaryBtn"),
             ("Toggle (on)", "eye", "accent", "on"), ("Unavailable", "copy", "accent", "off"),
         ):
             button = QPushButton(text)

@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from core import artbook_share, pur_import
 from core import artbook_store as store
@@ -32,7 +32,8 @@ from core.settings import (
 from ui import shortcuts
 from ui.artbook_board import BoardView, export_pictures
 from ui.artbook_pages import PagesPanel
-from ui.duotone import DuotoneGlyph, set_icon
+from ui.controls import ghost_button
+from ui.duotone import DuotoneGlyph
 from ui.sidebar import SidebarHost
 from ui.tag_widgets import run_job
 from ui.toolbar import CompactToolbar
@@ -87,13 +88,9 @@ class ArtbookPanel(QWidget):
         bar = QWidget()
         bar.setObjectName("controlBar")
         bar_layout = QHBoxLayout(bar)
-        bar_layout.setContentsMargins(12, 8, 12, 8)
-        bar_layout.setSpacing(10)
-        self.btn_pages = QPushButton()
-        set_icon(self.btn_pages, "menu", size=18)
-        self.btn_pages.setCheckable(True)
-        self.btn_pages.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_pages.setToolTip("Show / hide the Pages sidebar (Ctrl+B)")
+        bar_layout.setContentsMargins(10, 6, 10, 6)
+        bar_layout.setSpacing(6)
+        self.btn_pages = ghost_button("menu", "Show / hide the Pages sidebar (Ctrl+B)", checkable=True)
         bar_layout.addWidget(self.btn_pages)
         title = QLabel("Artbook")
         title.setObjectName("panelTitle")
@@ -104,20 +101,12 @@ class ArtbookPanel(QWidget):
         bar_layout.addWidget(self.lbl_page)
         bar_layout.addStretch(1)
 
-        self.btn_images = QPushButton("Images")
-        set_icon(self.btn_images, "grid")
-        self.btn_images.setCheckable(True)
-        self.btn_images.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_images.setToolTip("Show / hide the list of every image on the page (L)")
+        self.btn_images = ghost_button("grid", "Images: show / hide the list of every image on the page (L)", checkable=True)
         bar_layout.addWidget(self.btn_images)
-        self.btn_fit = QPushButton("Fit")
-        set_icon(self.btn_fit, "fit")
-        self.btn_fit.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_fit.setToolTip("Frame the selection, or everything on the page (F)")
+        self.btn_fit = ghost_button("fit", "Fit: frame the selection, or everything on the page (F)")
         bar_layout.addWidget(self.btn_fit)
-        self.btn_zoom = QPushButton("100%")
-        self.btn_zoom.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_zoom.setToolTip("Current zoom. Click for 100% (Ctrl+0)")
+        self.btn_zoom = ghost_button(None, "Current zoom. Click for 100% (Ctrl+0)", "100%")
+        self.btn_zoom.setMinimumWidth(52)
         bar_layout.addWidget(self.btn_zoom)
 
         # The window's View / Settings buttons sit here when the Artbook is on the right
@@ -126,7 +115,7 @@ class ArtbookPanel(QWidget):
         bar_layout.addLayout(self.toolbar_slot)
         layout.addWidget(bar)
         # Narrow (a side of Split View): icon-only buttons, no page name
-        self.toolbar = CompactToolbar(self, bar, [(self.btn_images, "Images"), (self.btn_fit, "Fit")], hide=[self.lbl_page])
+        self.toolbar = CompactToolbar(self, bar, [], hide=[self.lbl_page])  # (its buttons are icons already)
 
         self.board = BoardView()
         self.pages = PagesPanel(self)

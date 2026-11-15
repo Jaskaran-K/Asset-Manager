@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui import artbook_layout, shortcuts
+from ui.controls import GhostButton, soft_shadow
 from ui.duotone import set_icon
 from ui.themes import theme_color
 
@@ -45,6 +46,7 @@ class ImageListPanel(QFrame):
         super().__init__(board)
         self.board = board
         self.setObjectName("imageList")
+        soft_shadow(self)  # (it floats over the board)
         self._icons: dict[str, tuple[int, QIcon]] = {}  # item id -> (its pixmap's cache key, icon)
         self._syncing = False
 
@@ -64,7 +66,7 @@ class ImageListPanel(QFrame):
         self.btn_relink.setToolTip("Find the images whose files moved: pick the folder they're in now")
         self.btn_relink.clicked.connect(self._on_relink)
         header.addWidget(self.btn_relink)
-        close = QToolButton()
+        close = GhostButton()
         set_icon(close, "close", size=14)
         close.setToolTip(f"Close the image list ({shortcuts.get('artbook.image_list').keys})")
         close.clicked.connect(self.hide)

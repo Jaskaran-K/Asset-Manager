@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.controls import GhostButton
 from ui.duotone import set_icon
 from ui.themes import theme_color
 
@@ -330,7 +331,7 @@ class ColorPopup(QFrame):
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # (dragging it moves the window)
         header.addWidget(self.title, 1)
-        close = QToolButton()
+        close = GhostButton()
         set_icon(close, "close", size=14)
         close.setToolTip("Close (Esc). Drag the title to move the picker")
         close.setFixedSize(26, 26)
@@ -353,7 +354,7 @@ class ColorPopup(QFrame):
         stack.addWidget(self.hue_slider)
         stack.addWidget(self.alpha_slider)
         sliders.addLayout(stack, 1)
-        self.btn_dropper = QToolButton()
+        self.btn_dropper = GhostButton()
         set_icon(self.btn_dropper, "eyedropper", size=18)
         self.btn_dropper.setToolTip("Take a colour from anywhere on screen (click to pick, Esc to cancel)")
         self.btn_dropper.setFixedSize(30, 30)
@@ -374,7 +375,7 @@ class ColorPopup(QFrame):
         self.value_edit.setToolTip("Type a colour and press Enter")
         self.value_edit.editingFinished.connect(self._on_text)
         values.addWidget(self.value_edit, 1)
-        self.btn_copy = QToolButton()
+        self.btn_copy = GhostButton()
         set_icon(self.btn_copy, "copy", size=16)
         self.btn_copy.setToolTip("Copy the colour")
         self.btn_copy.setFixedSize(26, 26)

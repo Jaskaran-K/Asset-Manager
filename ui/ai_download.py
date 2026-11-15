@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QProgressBar, QWidget
 
 from core import ai_tools
 from ui.archive_jobs import UnpackJob, unpack_in_background
+from ui.controls import DialogFrame, section_heading
 from ui.duotone import set_icon
 
 WHAT_THEY_DO = {
@@ -31,13 +32,14 @@ class AIDownloadDialog(QDialog):
         model = f" ({tool.model.split(' (')[0]})" if key in ai_tools.CUTOUT_MODELS else ""
         self.setWindowTitle(f"Download {tool.name}{model}")
         self.setMinimumWidth(480)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
         size = ai_tools.needed_bytes(key) / 1e6
         runtime = "" if ai_tools.runtime_installed() else ", with ONNX Runtime, which runs the AI tools"
+        frame = DialogFrame(self, f"Download {tool.name}{model}", WHAT_THEY_DO[key])
+        layout = frame.body
+        layout.addWidget(section_heading("What's downloaded"))
         text = QLabel(
-            f"{WHAT_THEY_DO[key]}\n\nIt uses {tool.model}, downloaded once ({size:.0f} MB{runtime}). It runs on this "
-            "computer, on the graphics card when it can: nothing is sent anywhere. Settings > Storage removes it."
+            f"{tool.model}, once ({size:.0f} MB{runtime}). It runs on this computer, on the graphics card when it can: "
+            "nothing is sent anywhere. Settings > Storage removes it."
         )
         text.setWordWrap(True)
         layout.addWidget(text)
@@ -51,19 +53,10 @@ class AIDownloadDialog(QDialog):
         self.progress.setFixedHeight(6)
         self.progress.hide()
         layout.addWidget(self.progress)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setToolTip("Don't download it (or stop the download)")
-        self.btn_cancel.clicked.connect(self.reject)
-        self.btn_download = QPushButton(f"Download ({size:.0f} MB)")
-        set_icon(self.btn_download, "ai" if key == "search" else "cutout")
-        self.btn_download.setObjectName("primaryBtn")
-        self.btn_download.setToolTip(f"Download {tool.name} now")
-        self.btn_download.clicked.connect(self.start)
-        buttons.addWidget(self.btn_cancel)
-        buttons.addWidget(self.btn_download)
-        layout.addLayout(buttons)
+        footer = frame.add_footer(f"Download ({size:.0f} MB)", f"Download {tool.name} now",
+                                  cancel_tip="Don't download it (or stop the download)", on_primary=self.start)
+        self.btn_cancel, self.btn_download = footer.btn_cancel, footer.btn_primary
+        set_icon(self.btn_download, "ai" if key == "search" else "cutout", "on_accent")
         if not ai_tools.supported():
             self.status.setText("The AI tools aren't available for this version of the app.")
             self.btn_download.setEnabled(False)

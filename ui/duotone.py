@@ -39,7 +39,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QLabel, QSizePolicy, QWidget
 
-from ui.themes import parse_color, theme_tokens, current_theme_id
+from ui.themes import parse_color, theme_tokens, current_theme_id, with_derived
 
 Tone = Union[str, tuple[str, str]]  # a TONES name, or (primary, secondary) color tokens / "#hex"
 
@@ -50,6 +50,7 @@ TONES: dict[str, tuple[str, str]] = {
     "danger": ("warn_text", "danger"),
     "warning": ("note_text", "#f59e0b"),
     "light": ("#ffffff", "#fff7ed"),  # on a colored button (e.g. the amber "In Library")
+    "on_accent": ("on_accent", "on_accent"),  # on a filled (accent) button: white, or dark on a pale accent
 }
 DISABLED = ("text_faint", "text_faint")
 Tokens = Optional[Mapping[str, str]]  # colours to use instead of the current theme's (the Theme Studio's preview)
@@ -57,6 +58,8 @@ Tokens = Optional[Mapping[str, str]]  # colours to use instead of the current th
 
 def _color(token: str, tokens: Tokens = None) -> QColor:
     tokens = theme_tokens(current_theme_id()) if tokens is None else tokens
+    if token not in tokens and not token.startswith(("#", "rgb")):
+        tokens = with_derived(tokens)  # (on_accent, track: worked out from the theme)
     color = parse_color(tokens.get(token, token))
     return color if color.isValid() else QColor("#9ca3af")
 
@@ -641,6 +644,131 @@ def _web(p, primary, secondary):
     _line(p, primary, 1.6, (3.9, 12), (20.1, 12))  # (the equator)
 
 
+def _more(p, primary, secondary):
+    """Three dots: More (the rarely used actions of a bar, in a menu)."""
+    for x in (6, 12, 18):
+        p.fillPath(_circle(x, 12, 2.1), primary)
+
+
+def _info(p, primary, secondary):
+    """An i in a circle: the details of a file (a viewer's Info)."""
+    _body(p, _circle(12, 12, 9), secondary)
+    _line(p, primary, 2.1, (12, 11), (12, 16.5))
+    p.fillPath(_circle(12, 7.6, 1.3), primary)
+
+
+def _search(p, primary, secondary):
+    """A magnifying glass: search."""
+    _body(p, _circle(10.5, 10.5, 6.5), secondary)
+    _line(p, primary, 2.3, (15.5, 15.5), (20.5, 20.5))
+
+
+def _crop(p, primary, secondary):
+    """A picture with crop marks over two of its corners: crop an image."""
+    _body(p, _rounded(6.5, 6.5, 11, 11, 1.6), secondary)
+    _line(p, primary, 2.0, (6.5, 2.5), (6.5, 17.5), (21.5, 17.5))
+    _line(p, primary, 2.0, (2.5, 6.5), (17.5, 6.5), (17.5, 21.5))
+
+
+def _flip_h(p, primary, secondary):
+    """A shape and its mirror image across a dashed line: flip horizontally."""
+    _body(p, _polygon((10, 5), (10, 19), (3, 19)), secondary, 1.5)
+    p.setPen(_pen(primary, 1.8))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(_polygon((14, 5), (14, 19), (21, 19)))
+    for y in (3, 8.5, 14, 19.5):
+        _line(p, primary, 1.6, (12, y), (12, y + 2.2))
+
+
+def _flip_v(p, primary, secondary):
+    """Flip vertically: the horizontal flip, turned on its side."""
+    p.save()
+    p.translate(12, 12)
+    p.rotate(90)
+    p.translate(-12, -12)
+    _flip_h(p, primary, secondary)
+    p.restore()
+
+
+def _align_objects(p, primary, secondary):
+    """Two blocks lined up against a line: arrange and align images."""
+    _body(p, _rounded(7, 4.5, 14, 6, 1.6), secondary)
+    _body(p, _rounded(7, 13.5, 9, 6, 1.6), secondary)
+    _line(p, primary, 2.1, (4, 3), (4, 21))
+
+
+def _keyboard(p, primary, secondary):
+    """A keyboard: Settings > Shortcuts."""
+    _body(p, _rounded(2.5, 6, 19, 12.5, 2.4), secondary)
+    for row, y in enumerate((9.2, 12.4)):
+        for i in range(4 if row == 0 else 3):
+            x = 6 + i * 4 + (2 if row else 0)
+            p.fillPath(_rounded(x - 1, y - 1, 2, 2, 0.6), primary)
+    _line(p, primary, 1.8, (8.5, 15.6), (15.5, 15.6))  # the space bar
+
+
+def _book(p, primary, secondary):
+    """An open book: the guides."""
+    left = _polygon((2.5, 5), (11.2, 6.4), (11.2, 20), (2.5, 18.6))
+    right = _polygon((12.8, 6.4), (21.5, 5), (21.5, 18.6), (12.8, 20))
+    _body(p, left.united(right), secondary, round_corners=1.2)
+    _line(p, primary, 1.6, (5.2, 9.6), (8.8, 10.2))
+    _line(p, primary, 1.6, (5.2, 13.2), (8.8, 13.8))
+    _line(p, primary, 1.6, (15.2, 10.2), (18.8, 9.6))
+    _line(p, primary, 1.6, (15.2, 13.8), (18.8, 13.2))
+
+
+def _shading(p, primary, secondary):
+    """A ball lit on one side: how a 3D model is drawn (shaded, wireframe...)."""
+    _body(p, _circle(12, 12, 9), secondary)
+    half = QPainterPath()
+    half.moveTo(12, 3)
+    half.arcTo(QRectF(3, 3, 18, 18), 90, -180)
+    half.closeSubpath()
+    p.fillPath(half, primary)
+
+
+def _turn_light(p, primary, secondary):
+    """A sun with an arrow round it: dragging turns the lights."""
+    _body(p, _circle(10, 10, 5.2), secondary)
+    for i in range(8):
+        angle = math.radians(45 * i)
+        cos, sin = math.cos(angle), math.sin(angle)
+        _line(p, primary, 1.7, (10 + 7.2 * cos, 10 + 7.2 * sin), (10 + 8.8 * cos, 10 + 8.8 * sin))
+    arc = QPainterPath()
+    arc.arcMoveTo(QRectF(8, 8, 13, 13), 330)
+    arc.arcTo(QRectF(8, 8, 13, 13), 330, -110)
+    _outline(p, arc, primary, 1.9)
+    p.fillPath(_polygon((9.6, 18.2), (13.6, 21.6), (13.4, 16.4)), primary)  # the arrowhead
+
+
+def _turntable(p, primary, secondary):
+    """A turntable's plate with an arrow going round above it: spin the model (Auto Rotate)."""
+    plate = QPainterPath()
+    plate.addEllipse(QRectF(3, 13.5, 18, 7))
+    _body(p, plate, secondary)
+    arc = QPainterPath()
+    arc.arcMoveTo(QRectF(4, 3.5, 16, 9), 200)
+    arc.arcTo(QRectF(4, 3.5, 16, 9), 200, -250)
+    _outline(p, arc, primary, 1.9)
+    p.fillPath(_polygon((17.0, 2.6), (20.6, 6.4), (15.6, 7.4)), primary)  # the arrowhead
+
+
+def _fullscreen(p, primary, secondary):
+    """A screen with its four corners marked: Full Screen."""
+    _body(p, _rounded(5, 5, 14, 14, 2.5), secondary)
+    for corner in (((3.5, 8.5), (3.5, 3.5), (8.5, 3.5)), ((15.5, 3.5), (20.5, 3.5), (20.5, 8.5)),
+                   ((20.5, 15.5), (20.5, 20.5), (15.5, 20.5)), ((8.5, 20.5), (3.5, 20.5), (3.5, 15.5))):
+        _line(p, primary, 2.0, *corner)
+
+
+def _checker(p, primary, secondary):
+    """A checkerboard: showing transparency."""
+    _body(p, _rounded(3.5, 3.5, 17, 17, 2.5), secondary)
+    p.fillRect(QRectF(4, 4, 8, 8), primary)
+    p.fillRect(QRectF(12, 12, 8, 8), primary)
+
+
 def _spark(cx: float, cy: float, r: float) -> QPainterPath:
     """A four-pointed spark: long points, a pinched waist."""
     waist = r * 0.28
@@ -717,6 +845,10 @@ ICONS: dict[str, IconPainter] = {
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
     "open_in": _open_in, "backdrop": _backdrop, "uv": _uv, "render": _render, "profile": _profile, "upscale": _upscale, "similar": _similar, "material": _material,
     "ai": _ai, "cutout": _cutout, "web": _web,
+    "more": _more, "info": _info, "search": _search, "fullscreen": _fullscreen, "checker": _checker,
+    "shading": _shading, "turn_light": _turn_light, "turntable": _turntable,
+    "crop": _crop, "flip_h": _flip_h, "flip_v": _flip_v, "align_objects": _align_objects,
+    "keyboard": _keyboard, "book": _book,
 }
 
 

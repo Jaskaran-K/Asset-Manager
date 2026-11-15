@@ -156,7 +156,7 @@ def test_settings_pick_tags_and_follow_the_tags_page(qapp, monkeypatch):
 
     # Right-click a tag > Add as Sidebar Category
     tags_page.category_requested.emit("Work")
-    assert dialog.stack.currentWidget() is page and page.right_stack.currentIndex() == 1
+    assert dialog.current_page() is page and page.right_stack.currentIndex() == 1
     assert page.categories()[-1] == {"name": "Work", "color": page.categories()[-1]["color"], "extensions": [],
                                      "tags": ["Work"], "subcategories": []}
     dialog._on_save()

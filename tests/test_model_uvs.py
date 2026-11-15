@@ -349,13 +349,13 @@ def test_several_uv_sets_can_be_picked_in_the_viewer(qapp, tmp_path):
     dialog.btn_uv.click()
     assert pump(qapp, lambda: dialog.uv_view.layout_shown is not None)
     combo = dialog.cmb_uv_set
-    assert not combo.isHidden() and [combo.itemText(i) for i in range(combo.count())] == ["1: DiffuseUV", "2: DiffuseUV"]
+    assert not dialog.uv_set_drop.isHidden() and [combo.itemText(i) for i in range(combo.count())] == ["1: DiffuseUV", "2: DiffuseUV"]
     combo.setCurrentIndex(1)
     combo.activated.emit(1)
     assert pump(qapp, lambda: dialog.uv_view.layout_shown is not None and dialog.uv_view.layout_shown.tiles == [1002])
     assert combo.currentIndex() == 1
     dialog.btn_uv.click()
-    assert combo.isHidden()  # (back on the model)
+    assert dialog.uv_set_drop.isHidden()  # (back on the model)
     close(qapp, dialog)
 
 
@@ -363,7 +363,7 @@ def test_one_uv_set_needs_no_picker(qapp, tmp_path):
     dialog = open_viewer(qapp, obj_asset(tmp_path))
     dialog.btn_uv.click()
     assert pump(qapp, lambda: dialog.uv_view.layout_shown is not None)
-    assert dialog.cmb_uv_set.isHidden()
+    assert dialog.uv_set_drop.isHidden()
     close(qapp, dialog)
 
 

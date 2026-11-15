@@ -11,15 +11,13 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
-    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
-    QVBoxLayout,
 )
 
 from core import artbook_store as store
+from ui.controls import DialogFrame, ghost_button
 
 if TYPE_CHECKING:
     from ui.artbook import ArtbookPanel
@@ -55,14 +53,12 @@ class VersionsDialog(QDialog):
         self.page_id = page_id
         self.setWindowTitle(f"Earlier Versions - {name}")
         self.resize(560, 560)
-        layout = QVBoxLayout(self)
-        intro = QLabel(
+        frame = DialogFrame(
+            self, f"Earlier Versions of {name}",
             f"A version is kept before the first change each day the page changes (the last {store.MAX_VERSIONS}). "
-            "Restoring keeps how the page is now as a version too, so you can go back."
+            "Restoring keeps how the page is now as a version too, so you can go back.",
         )
-        intro.setWordWrap(True)
-        intro.setObjectName("mutedLabel")
-        layout.addWidget(intro)
+        layout = frame.body
         self.list = QListWidget(self)
         self.list.setIconSize(THUMB)
         self.list.setSpacing(4)
@@ -76,21 +72,15 @@ class VersionsDialog(QDialog):
         self.lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_empty)
 
-        buttons = QHBoxLayout()
-        self.btn_restore = QPushButton("Restore This Version", self)
-        self.btn_restore.setToolTip("Make the page as it was then (how it is now is kept as a version)")
-        self.btn_restore.clicked.connect(lambda: self._restore(as_new=False))
-        self.btn_new = QPushButton("Restore as a New Page", self)
-        self.btn_new.setToolTip("Make a new page from this version, beside this one (this page stays as it is)")
+        footer = frame.add_footer("Restore This Version", "Make the page as it was then (how it is now is kept as a version)",
+                                  cancel="Close", on_primary=lambda: self._restore(as_new=False))
+        self.btn_restore = footer.btn_primary
+        self.btn_restore.setDefault(False)
+        self.btn_new = footer.add_extra(ghost_button(
+            "new_page", "Make a new page from this version, beside this one (this page stays as it is)",
+            "Restore as a New Page",
+        ))
         self.btn_new.clicked.connect(lambda: self._restore(as_new=True))
-        close = QPushButton("Close", self)
-        close.setToolTip("Close without changing anything")
-        close.clicked.connect(self.reject)
-        buttons.addWidget(self.btn_restore)
-        buttons.addWidget(self.btn_new)
-        buttons.addStretch(1)
-        buttons.addWidget(close)
-        layout.addLayout(buttons)
         self._fill()
 
     def _fill(self) -> None:

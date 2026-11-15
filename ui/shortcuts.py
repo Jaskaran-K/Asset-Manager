@@ -182,6 +182,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("viewer.next", VIEWER, "Page Down", "Next file in the grid", "PgDown"),
     Shortcut("viewer.previous_alt", VIEWER, "Alt+Left", "Previous file in the grid", "Alt+Left"),
     Shortcut("viewer.next_alt", VIEWER, "Alt+Right", "Next file in the grid", "Alt+Right"),
+    Shortcut("viewer.info", VIEWER, "Ctrl+I", "Show / hide the file's details", "Ctrl+I"),
     Shortcut("viewer.open_app", VIEWER, "O", "A file only its app can show: open it there (a PureRef board: in the Artbook)", "O"),
 
     # PDF viewer (ui.pdf_viewer)

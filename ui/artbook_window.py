@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPushButton,
     QSlider,
     QSystemTrayIcon,
     QWidget,
@@ -38,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from core.settings import ARTBOOK_OPACITY_RANGE, get_artbook_window_state, set_artbook_window_state
 from ui import shortcuts
+from ui.controls import DropButton
 from ui.duotone import set_icon
 from ui.icons import app_icon
 
@@ -313,14 +313,11 @@ class WindowMenu(QMenu):
         self.window_.set_click_through(checked)
 
 
-class WindowOptionsButton(QPushButton):
+class WindowOptionsButton(DropButton):
     """The separate Artbook window's Window button (its menu: WindowMenu)."""
 
     def __init__(self, window: ArtbookWindow, parent: Optional[QWidget] = None):
-        super().__init__("Window", parent)
-        set_icon(self, "window")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Always on top, opacity and click-through for this window")
+        super().__init__("window", "Window", "Always on top, opacity and click-through for this window", parent)
         self.window_menu = WindowMenu(window, self)
         self.setMenu(self.window_menu)
 

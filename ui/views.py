@@ -7,6 +7,7 @@
 - Smooth wheel scrolling: each wheel notch glides to its target instead of jumping there.
   Touchpads already send smooth pixel deltas, so they're left alone.
 - Trees animate expanding and collapsing: sub-rows slide out instead of popping in.
+- HoverFade: a row's (or a grid card's) hover fades in and out rather than snapping.
 
 The motion follows the Animations setting (ui.animations.motion_enabled). A widget can opt
 out with the property "smoothScroll" = False.
@@ -18,8 +19,11 @@ from typing import Optional
 
 import shiboken6
 
-from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QObject, QRect, QRectF, Qt, QVariantAnimation
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPalette
+from PySide6.QtCore import (
+    QAbstractAnimation, QEasingCurve, QEvent, QModelIndex, QObject, QPersistentModelIndex, QRect, QRectF, Qt, QTimer,
+    QVariantAnimation,
+)
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
@@ -45,26 +49,19 @@ MIN_NOTCH_PX = 100  # about three rows of text per wheel notch, like Windows' de
 # ----------------------------------------------------------------------
 # Row highlight
 # ----------------------------------------------------------------------
-class RowHighlightDelegate(QStyledItemDelegate):
-    """Rounded hover / selection pill behind a row (spanning all its columns).
+HEADING_ROLE = Qt.ItemDataRole.UserRole + 900  # True: a heading row (no hover, the theme's faint text)
 
-    An icon with a Selected-mode pixmap shows that on the pill (e.g. a light version of an
-    accent-colored icon, which would vanish on the accent pill)."""
+
+class RowHighlightDelegate(QStyledItemDelegate):
+    """Rounded hover / selection pill behind a row (spanning all its columns): the selection is a soft
+    accent tint with the theme's selected text, like a checked button (not a solid accent block)."""
 
     INSET = 4
-    RADIUS = 5.0
-    _selected_row = False
+    RADIUS = 6.0
 
     def color(self, token: str) -> QColor:
         """A theme colour for the pill (the Theme Studio's preview shows the theme being made)."""
         return theme_color(token)
-
-    def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
-        super().initStyleOption(option, index)
-        icon = option.icon
-        if self._selected_row and not icon.isNull() and icon.availableSizes(QIcon.Mode.Selected):
-            ratio = option.widget.devicePixelRatioF() if option.widget is not None else 1.0
-            option.icon = QIcon(icon.pixmap(option.decorationSize, ratio, QIcon.Mode.Selected))
 
     def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index) -> QWidget:
         editor = super().createEditor(parent, option, index)
@@ -86,8 +83,11 @@ class RowHighlightDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         state = option.state
         selected = bool(state & QStyle.StateFlag.State_Selected)
-        hovered = bool(state & QStyle.StateFlag.State_MouseOver) and bool(state & QStyle.StateFlag.State_Enabled)
-        if selected or hovered:
+        heading = bool(index.data(HEADING_ROLE))
+        level = 0.0
+        if bool(state & QStyle.StateFlag.State_Enabled) and not heading:
+            level = hover_level(option.widget, index, bool(state & QStyle.StateFlag.State_MouseOver))
+        if selected or level > 0.0:
             first = index.column() == 0
             last = index.column() >= index.model().columnCount(index.parent()) - 1
             cell = QRectF(option.rect).adjusted(self.INSET if first else 0, 1, -self.INSET if last else 0, -1)
@@ -95,22 +95,123 @@ class RowHighlightDelegate(QStyledItemDelegate):
             pill = cell.adjusted(0 if first else -2 * self.RADIUS, 0, 0 if last else 2 * self.RADIUS, 0)
             path = QPainterPath()
             path.addRoundedRect(pill, self.RADIUS, self.RADIUS)
+            color = self.color("accent_soft" if selected else "hover")
+            if not selected:
+                color.setAlphaF(color.alphaF() * level)  # (fading in or out: HoverFade)
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setClipRect(cell)
-            painter.fillPath(path, self.color("accent" if selected else "hover"))
+            painter.fillPath(path, color)
             painter.restore()
 
         opt = QStyleOptionViewItem(option)
         opt.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver | QStyle.StateFlag.State_HasFocus)
-        if selected:
+        if selected or heading:
             for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText):
-                opt.palette.setColor(role, Qt.GlobalColor.white)
-        self._selected_row = selected  # initStyleOption (called by paint) can't see it: it's cleared above
-        try:
-            super().paint(painter, opt, index)
-        finally:
-            self._selected_row = False
+                opt.palette.setColor(role, self.color("card_selected_text" if selected else "text_faint"))
+        super().paint(painter, opt, index)
+
+
+# ----------------------------------------------------------------------
+# Hover fade
+# ----------------------------------------------------------------------
+class HoverFade(QObject):
+    """Fades a view's hover in and out: the row (or card) under the mouse brightens over HOVER_MS while the one
+    it left fades away. Delegates ask hover_level() instead of reading State_MouseOver (RowHighlightDelegate,
+    ui.asset_grid's cards). A tree's row is one hover, whichever column the mouse is in."""
+
+    def __init__(self, view: QAbstractItemView):
+        super().__init__(view)
+        self.setObjectName("hoverFade")
+        self.current = QPersistentModelIndex()
+        self.previous = QPersistentModelIndex()
+        self.previous_from = 0.0  # how lit the row was when the mouse left it
+        self.t = 1.0  # how far the fade has got
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(animations.HOVER_MS)
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.valueChanged.connect(self._on_step)
+        view.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover)
+        view.viewport().installEventFilter(self)
+
+    def _view(self) -> Optional[QAbstractItemView]:
+        view = self.parent()
+        return view if isinstance(view, QAbstractItemView) and shiboken6.isValid(view) else None
+
+    @staticmethod
+    def _row(index) -> QModelIndex:
+        return index.sibling(index.row(), 0) if index.isValid() else QModelIndex()
+
+    def is_current(self, index) -> bool:
+        row = self._row(index)
+        return row.isValid() and self.current.isValid() and self.current == row
+
+    def level(self, index) -> float:
+        row = self._row(index)
+        if not row.isValid():
+            return 0.0
+        if self.current.isValid() and self.current == row:
+            return self.t
+        if self.previous.isValid() and self.previous == row:
+            return self.previous_from * (1.0 - self.t)
+        return 0.0
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        kind = event.type()
+        if kind in (QEvent.Type.HoverMove, QEvent.Type.HoverEnter, QEvent.Type.MouseMove):
+            view = self._view()
+            if view is not None:
+                self.hover(view.indexAt(event.position().toPoint()))
+        elif kind in (QEvent.Type.HoverLeave, QEvent.Type.Leave):
+            self.hover(QModelIndex())
+        return False
+
+    def hover(self, index) -> None:
+        """The mouse is over index now (an invalid one: over no row)."""
+        row = self._row(index)
+        if row.isValid() == self.current.isValid() and (not row.isValid() or self.current == row):
+            return
+        self._repaint(self.previous)  # (its fade is cut short)
+        self.previous = QPersistentModelIndex(self.current)
+        self.previous_from = self.t if self.current.isValid() else 0.0
+        self.current = QPersistentModelIndex(row)
+        self.anim.stop()
+        if animations.motion_enabled():
+            self.t = 0.0
+            self.anim.start()
+        else:
+            self.t = 1.0
+        self._repaint(self.previous)
+        self._repaint(self.current)
+
+    def _on_step(self, value) -> None:
+        self.t = float(value)
+        self._repaint(self.previous)
+        self._repaint(self.current)
+
+    def _repaint(self, row: QPersistentModelIndex) -> None:
+        view = self._view()
+        if view is None or not row.isValid() or view.model() is None:
+            return
+        index = view.model().index(row.row(), 0, row.parent())
+        rect = view.visualRect(index)
+        if isinstance(view, QTreeView):
+            rect = QRect(0, rect.top(), view.viewport().width(), rect.height())
+        view.viewport().update(rect.adjusted(-4, -4, 4, 4))
+
+
+def hover_level(view: Optional[QWidget], index, hovered: bool) -> float:
+    """How lit index's hover is (0 to 1): its view's HoverFade, or hovered as it is without one."""
+    fade = view.findChild(HoverFade, "hoverFade", Qt.FindChildOption.FindDirectChildrenOnly) if view is not None else None
+    if fade is None:
+        return 1.0 if hovered else 0.0
+    if hovered and not fade.is_current(index):
+        # The rows moved under a still mouse (a scroll): it's over this one now
+        keep = QPersistentModelIndex(index)
+        QTimer.singleShot(0, fade, lambda: fade.hover(keep) if keep.isValid() else None)
+    return fade.level(index)
 
 
 # ----------------------------------------------------------------------
@@ -193,9 +294,9 @@ def _polish_view(view: QAbstractItemView) -> None:
     # Pixel scrolling, so glides (and touchpads) move smoothly rather than a row at a time
     view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    if view.findChild(HoverFade, "hoverFade", Qt.FindChildOption.FindDirectChildrenOnly) is None:
+        HoverFade(view)  # (hover events too, so the delegate sees the hovered row)
     if isinstance(view, QTreeView):
-        # Hover events, so the delegate sees the hovered row (a stylesheet :hover rule used to do this)
-        view.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover)
         view.setAnimated(animations.motion_enabled())
         if type(view.itemDelegate()) is QStyledItemDelegate:  # not views with their own delegate
             view.setItemDelegate(RowHighlightDelegate(view))

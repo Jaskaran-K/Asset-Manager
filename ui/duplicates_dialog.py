@@ -9,13 +9,10 @@ from PySide6.QtCore import QFile, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QDialog,
-    QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -24,6 +21,7 @@ from core.picture_look import Look, group_lookalikes
 from core.scanner import AssetItem
 from core.tag_repository import TagRepository
 from ui import file_actions
+from ui.controls import DialogFrame, ghost_button
 from ui.tag_widgets import run_in_background
 
 _ASSET_ROLE = Qt.ItemDataRole.UserRole
@@ -61,12 +59,16 @@ class DuplicatesDialog(QDialog):
         self.removed = 0
         self._closed = False
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
+        frame = DialogFrame(
+            self, "Find Look-alikes" if self.lookalikes else "Find Duplicates",
+            "Pictures that look the same: resized or re-saved copies. Tick the copies you don't need." if self.lookalikes
+            else "Files that are exactly the same. Tick the copies you don't need: one of every file is always kept.",
+        )
+        layout = frame.body
         self.lbl_summary = QLabel(
             f"Comparing {len(looks):,} pictures..." if self.lookalikes else f"Comparing {len(assets):,} files..."
         )
-        self.lbl_summary.setObjectName("pageHint")
+        self.lbl_summary.setObjectName("cardTitle")
         self.lbl_summary.setWordWrap(True)
         layout.addWidget(self.lbl_summary)
 
@@ -79,31 +81,24 @@ class DuplicatesDialog(QDialog):
         self.tree.currentItemChanged.connect(self._update_buttons)
         layout.addWidget(self.tree, 1)
 
-        buttons = QHBoxLayout()
-        self.btn_keep_oldest = QPushButton("Tick Copies (Keep Biggest)" if self.lookalikes else "Tick Copies (Keep Oldest)")
+        footer = frame.add_footer("Move Ticked to Recycle Bin",
+                                  "You can restore them from the Recycle Bin. One copy of every file is always kept.",
+                                  cancel="Close", cancel_tip="Close (files moved to the Recycle Bin can be restored from there)",
+                                  on_primary=self._on_trash)
+        self.btn_trash = footer.btn_primary
+        self.btn_trash.setDefault(False)  # (Enter shouldn't throw files away)
+        self.btn_keep_oldest = footer.add_extra(
+            ghost_button(None, "", "Tick Copies (Keep Biggest)" if self.lookalikes else "Tick Copies (Keep Oldest)")
+        )
         self.btn_keep_oldest.setToolTip(
             "Tick every picture except the biggest file in each group (usually the best copy)" if self.lookalikes
             else "Tick every file except the oldest one in each group"
         )
         self.btn_keep_oldest.clicked.connect(self._tick_all_but_oldest)
-        self.btn_reveal = QPushButton("Show in File Explorer")
-        self.btn_reveal.setToolTip("Show the highlighted file in File Explorer")
+        self.btn_reveal = footer.add_extra(ghost_button("folder", "Show the highlighted file in File Explorer",
+                                                        "Show in File Explorer"))
         self.btn_reveal.clicked.connect(self._reveal_current)
-        self.btn_trash = QPushButton("Move Ticked to Recycle Bin")
-        self.btn_trash.setObjectName("primaryBtn")
-        self.btn_trash.setToolTip("You can restore them from the Recycle Bin. One copy of every file is always kept.")
-        self.btn_trash.clicked.connect(self._on_trash)
-        btn_close = QPushButton("Close")
-        btn_close.setToolTip("Close (files moved to the Recycle Bin can be restored from there)")
-        btn_close.clicked.connect(self.accept)
-        for btn in (self.btn_keep_oldest, self.btn_reveal):
-            buttons.addWidget(btn)
-        buttons.addStretch(1)
-        buttons.addWidget(self.btn_trash)
-        buttons.addWidget(btn_close)
-        layout.addLayout(buttons)
         self._update_buttons()
-
         if self.lookalikes:
             pictures = list(looks)
             run_in_background(

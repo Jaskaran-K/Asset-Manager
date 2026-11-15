@@ -412,7 +412,7 @@ def test_menu_for_a_set(qapp, tmp_path, monkeypatch):
     )
     parent = QWidget()
     menu = build_asset_menu(parent, card, files, [], actions, ArtbookSender(None, sent.append))
-    texts = {a.text(): a for a in menu.actions()}
+    texts = every_action(menu)
     assert "Preview Material" in texts and "Open with External App" not in texts
     texts["Send to Maya as Material"].trigger()
     texts["Rename 2 Files..."].trigger()
@@ -565,3 +565,13 @@ def test_material_shader_draws_the_colour_map(tmp_path):
     if result.returncode == NO_OPENGL:
         pytest.skip("No OpenGL 3.3 here")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def every_action(menu) -> dict:
+    """A menu's entries by their text, its submenus' too (Find, Edit ...)."""
+    found = {}
+    for action in menu.actions():
+        found[action.text()] = action
+        if action.menu() is not None:
+            found.update({k: v for k, v in every_action(action.menu()).items() if k not in found})
+    return found

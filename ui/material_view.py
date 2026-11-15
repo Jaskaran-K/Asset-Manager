@@ -5,7 +5,8 @@ maps instead of a model: metal / roughness PBR (GGX lights, and under an HDRI it
 reflections), normal maps (green flipped for DirectX), height as real displacement, packed AO /
 roughness / metallic maps, emissive, and opacity as a cut-out. MaterialViewerDialog adds the maps' list
 (each one's kind can be corrected, or it can be left out), the shape, tiling, a strength slider per kind of
-map (this preview only: not sent, not kept), and sending the material to Blender or Maya.
+map (this preview only: not sent, not kept), and sending the material to Maya or Blender. Its tools float over
+the shape (as the 3D viewer's do); the maps and sliders are in a panel beside it.
 """
 
 from __future__ import annotations
@@ -20,15 +21,16 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QMatrix4x4
 from PySide6.QtOpenGL import QOpenGLShader, QOpenGLShaderProgram
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSlider,
     QSpinBox,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -43,11 +45,13 @@ from core.model_look import ENV_HIGH, ENV_LOW, MAX_LIGHTS, light_directions
 from core.scanner import AssetItem
 from core.texture_sets import ROLE_NAMES, ROLES, TextureSet
 from ui import shortcuts
+from ui.controls import ComboDrop, FloatingBar, bar_separator, ghost_button
 from ui.duotone import set_icon
 from ui.model_lighting import LightingControls
 from ui.tag_widgets import run_job
 from ui.viewer import _ENV_GLSL, _FIELD_OF_VIEW, Model3DViewportWidget
 
+MIN_SIZE = QSize(820, 560)  # the least the window's smallest size can be (it's worked out from its parts)
 HEIGHT_MAX = 0.04  # the height slider's top: the map's lowest to highest point, as a share of one copy of the map
 HEIGHT_START = 0.01
 # The Adjust sliders: (kind, label, top, start, steps, value shown, what it does). They change this preview
@@ -507,80 +511,107 @@ class MaterialViewerDialog(QDialog):
         self.setWindowTitle(f"{texture_set.name} - Material")
         self.resize(1200, 760)
         root = QHBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        left = QVBoxLayout()
+        # The shape, with its tools floating at the bottom (they fade while the mouse is still over it)
+        area = QWidget()
+        area_layout = QVBoxLayout(area)
+        area_layout.setContentsMargins(0, 0, 0, 0)
         self.viewport = MaterialViewport(self)
         self.viewport.status_text = "Loading the maps..."
-        toolbar = QWidget()
-        toolbar.setObjectName("viewerToolbar")
-        rows = QVBoxLayout(toolbar)
-        rows.setContentsMargins(8, 4, 8, 4)
-        rows.setSpacing(4)
-        top, bottom = QHBoxLayout(), QHBoxLayout()
-        top.setSpacing(8)
-        bottom.setSpacing(12)
-        rows.addLayout(top)
-        rows.addLayout(bottom)
+        area_layout.addWidget(self.viewport)
+        root.addWidget(area, 1)
+        self.tools = tools = FloatingBar(area, gap=18)
+        row = tools.row
+        choices = QWidget(tools)  # (the choices themselves: combos, hidden, shown by the dropdowns)
+        choices.hide()
 
-        self.cmb_shape = QComboBox()
+        self.cmb_shape = QComboBox(choices)
         for name in SHAPES:
             self.cmb_shape.addItem(SHAPE_NAMES[name], name)
-        self.cmb_shape.setToolTip("The shape the material is shown on")
         self.cmb_shape.currentIndexChanged.connect(lambda _i: self.viewport.set_shape(self.cmb_shape.currentData()))
-        top.addWidget(self.cmb_shape)
+        row.addWidget(ComboDrop(self.cmb_shape, "material", "The shape the material is shown on"))
 
-        self.cmb_lighting = QComboBox()
-        self._lighting_details = QWidget(toolbar)
+        # Above the tools while an HDRI is in use: its exposure and backdrop
+        self.tune = FloatingBar(area, gap=18)
+        self.tune.stack_on(tools)
+        self._lighting_details = QWidget(self.tune.frame)
+        self.cmb_lighting = QComboBox(choices)
         self.lighting_controls = LightingControls(self.viewport, self.cmb_lighting, self._lighting_details, hdri_assets)
-        top.addWidget(self.cmb_lighting)
+        details = QHBoxLayout(self._lighting_details)
+        details.setContentsMargins(0, 0, 0, 0)
+        details.addWidget(self.lighting_controls.bar)
+        self.tune.row.addWidget(self._lighting_details)
+        drop_lighting = ComboDrop(self.cmb_lighting, "light", "The lighting: a preset, or an HDRI from your library (or Browse...)")
+        self.viewport.lighting_changed.connect(drop_lighting.sync)
+        self.viewport.lighting_changed.connect(self._update_tune)
+        self.cmb_lighting.currentIndexChanged.connect(self._update_tune)
+        row.addWidget(drop_lighting)
+        row.addWidget(bar_separator(20))
 
-        self.btn_drag_lights = QPushButton("Turn Lights")
-        set_icon(self.btn_drag_lights, "light")
-        self.btn_drag_lights.setCheckable(True)
-        self.btn_drag_lights.setToolTip("On: dragging turns the lights or the HDRI. Off: it turns the shape (L; or Shift+drag)")
+        self.btn_drag_lights = ghost_button(
+            "turn_light", "Turn Lights. On: dragging turns the lights or the HDRI. Off: it turns the shape (L; or Shift+drag)",
+            checkable=True,
+        )
         self.btn_drag_lights.toggled.connect(self.viewport.set_drag_lights)
         self.viewport.drag_lights_changed.connect(self.btn_drag_lights.setChecked)
-        top.addWidget(self.btn_drag_lights)
-
-        self.btn_turntable = QPushButton("Auto Rotate")
-        set_icon(self.btn_turntable, "play")
-        self.btn_turntable.setCheckable(True)
-        self.btn_turntable.setToolTip("Spin the shape slowly")
+        row.addWidget(self.btn_drag_lights)
+        self.btn_turntable = ghost_button("turntable", "Auto Rotate: spin the shape slowly", checkable=True)
         self.btn_turntable.toggled.connect(self._on_turntable)
-        top.addWidget(self.btn_turntable)
-
-        btn_reset = QPushButton("Reset View")
-        set_icon(btn_reset, "refresh")
-        btn_reset.setToolTip("Reset the camera and the lights (R resets the camera)")
+        row.addWidget(self.btn_turntable)
+        btn_reset = ghost_button("refresh", "Reset the camera and the lights (R resets the camera)")
         btn_reset.clicked.connect(self.viewport.reset_camera)
         btn_reset.clicked.connect(self.viewport.reset_lights)
-        top.addWidget(btn_reset)
-        top.addStretch(1)
+        row.addWidget(btn_reset)
+        row.addWidget(bar_separator(20))
 
-        bottom.addWidget(QLabel("Tiling"))
+        tiling = QLabel("Tiling")
+        tiling.setObjectName("toolbarLabel")
+        row.addWidget(tiling)
         self.spin_tiling = QSpinBox()
         self.spin_tiling.setRange(1, 16)
+        self.spin_tiling.setFixedWidth(64)
         self.spin_tiling.setToolTip("How many times the maps repeat across the shape")
         self.spin_tiling.valueChanged.connect(self.viewport.set_tiling)
-        bottom.addWidget(self.spin_tiling)
-        self.chk_flip = QCheckBox("Flip Green (DirectX)", toolbar)
-        self.chk_flip.setToolTip("The normal map's green channel the other way up: DirectX (Unreal) normal maps")
+        row.addWidget(self.spin_tiling)
+        self.chk_flip = ghost_button(
+            None, "Flip Green: the normal map's green channel the other way up, for DirectX (Unreal) normal maps",
+            "DirectX", checkable=True,
+        )
         self.chk_flip.toggled.connect(self.viewport.set_flip_green)
-        bottom.addWidget(self.chk_flip)
-        bottom.addStretch(1)
-        rows.addWidget(self._lighting_details)
+        row.addWidget(self.chk_flip)
+        self._update_tune()
+        tools.reveal()
+        tools.fade_when_idle(self.viewport)
 
-        left.addWidget(toolbar)
-        left.addWidget(self.viewport, 1)
-        root.addLayout(left, 1)
-
-        side = QVBoxLayout()
+        # The panel: what the material is, its maps, the sliders, and sending it
+        panel = QWidget()
+        panel.setObjectName("sidePanel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        panel.setFixedWidth(380)
+        side = QVBoxLayout(panel)
+        side.setContentsMargins(16, 14, 16, 16)
+        side.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(8)
         title = QLabel(texture_set.name)
-        title.setObjectName("viewerTitle")
+        title.setObjectName("panelTitle")
         title.setWordWrap(True)
-        side.addWidget(title)
+        head.addWidget(title, 1)
+        badge = QLabel("MATERIAL")
+        badge.setObjectName("formatBadge")
+        head.addWidget(badge)
+        if reveal is not None:
+            btn_more = ghost_button("more", "More: Show in File Explorer")
+            btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            more = QMenu(btn_more)
+            self.action_reveal = more.addAction("Show in File Explorer")
+            self.action_reveal.setToolTip("Show the maps' folder (or archive) in File Explorer")
+            self.action_reveal.triggered.connect(reveal)
+            btn_more.setMenu(more)
+            head.addWidget(btn_more)
+        side.addLayout(head)
         where = texture_set.assets[0]
         place = where.archive.archive.name if where.in_archive else str(Path(where.path).parent)
         info = QLabel(f"{len(texture_set.maps)} files" + (f", UDIM tiles {texture_set.tiles[0]}-{texture_set.tiles[-1]}"
@@ -588,6 +619,10 @@ class MaterialViewerDialog(QDialog):
         info.setObjectName("mutedLabel")
         info.setWordWrap(True)
         side.addWidget(info)
+        side.addSpacing(6)
+        maps = QLabel("MAPS")
+        maps.setObjectName("sidebarTitle")
+        side.addWidget(maps)
         hint = QLabel("Untick a map to leave it out, or change what it is.")
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
@@ -595,40 +630,40 @@ class MaterialViewerDialog(QDialog):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Map", "Used as"])
         self.tree.setRootIsDecorated(False)
-        self.tree.setColumnWidth(0, 210)
-        self.tree.setMinimumWidth(380)
+        self.tree.setColumnWidth(0, 200)
         self.tree.itemChanged.connect(self._on_item_changed)
         side.addWidget(self.tree, 1)
         self._fill_maps()
         side.addWidget(self._build_strengths())
 
-        buttons = QVBoxLayout()
-        self.btn_blender = QPushButton("Send to Blender as Material")
-        set_icon(self.btn_blender, "open_in")
-        self.btn_blender.setToolTip("Make a Principled BSDF material with these maps in the Blender that's open, on its selected objects")
-        self.btn_blender.clicked.connect(lambda: self.send("blender"))
-        self.btn_maya = QPushButton("Send to Maya as Material")
-        set_icon(self.btn_maya, "open_in")
+        buttons = QHBoxLayout()  # (Maya first: the main one)
+        buttons.setSpacing(8)
+        self.btn_maya = QPushButton("Send to Maya")
+        self.btn_maya.setObjectName("primaryBtn")
+        set_icon(self.btn_maya, "open_in", "on_accent")
         self.btn_maya.setToolTip("Make an Arnold aiStandardSurface (or standardSurface: Settings > Apps) in the Maya that's open, on its selected objects")
         self.btn_maya.clicked.connect(lambda: self.send("maya"))
-        for button in (self.btn_blender, self.btn_maya):
+        self.btn_blender = ghost_button(None, "Make a Principled BSDF material with these maps in the Blender that's open, on its selected objects",
+                                        "Send to Blender")
+        self.btn_blender.clicked.connect(lambda: self.send("blender"))
+        buttons.addWidget(self.btn_maya, 1)
+        buttons.addWidget(self.btn_blender)
+        for button in (self.btn_maya, self.btn_blender):
             button.setVisible(send is not None)
-            buttons.addWidget(button)
-        if reveal is not None:
-            btn_reveal = QPushButton("Show in File Explorer")
-            btn_reveal.setToolTip("Show the maps' folder (or archive) in File Explorer")
-            btn_reveal.clicked.connect(reveal)
-            buttons.addWidget(btn_reveal)
-        btn_close = QPushButton("Close")
-        btn_close.setToolTip("Close the material (Esc)")
-        btn_close.clicked.connect(self.accept)
-        buttons.addWidget(btn_close)
         side.addLayout(buttons)
-        side_widget = QWidget()
-        side_widget.setLayout(side)
-        side_widget.setFixedWidth(400)
-        root.addWidget(side_widget)
+        root.addWidget(panel)
+        # The smallest it gets: the view as wide as its floating tools, the panel as tall as its parts want (smaller,
+        # the 3D view went, the tools ran over Send to Maya and the sliders into each other)
+        self.setMinimumSize(max(MIN_SIZE.width(), panel.width() + tools.sizeHint().width() + 24),
+                            max(MIN_SIZE.height(), panel.sizeHint().height() + 40))
         QTimer.singleShot(0, self._load)
+
+    def _update_tune(self, *_args) -> None:
+        """The HDRI's exposure and backdrop, above the tools, while one is in use."""
+        wanted = not self.lighting_controls.bar.isHidden()
+        if wanted and self.tune.showing():
+            self.tune.place()
+        self.tune.set_wanted(wanted)
 
     # ------------------ the Adjust sliders ------------------
     def _build_strengths(self) -> QWidget:
@@ -636,10 +671,10 @@ class MaterialViewerDialog(QDialog):
         layout = QVBoxLayout(box)
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(4)
-        title = QLabel("Adjust")
-        title.setObjectName("viewerTitle")
+        title = QLabel("ADJUST")
+        title.setObjectName("sidebarTitle")
         layout.addWidget(title)
-        hint = QLabel("For this preview only: the maps are sent to Blender / Maya as they are. Double-click a slider to reset it.")
+        hint = QLabel("For this preview only: the maps are sent to Maya / Blender as they are. Double-click a slider to reset it.")
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -778,8 +813,8 @@ class MaterialViewerDialog(QDialog):
     # ------------------ the rest ------------------
     def _on_turntable(self, on: bool) -> None:
         self.viewport.toggle_turntable(on)
-        self.btn_turntable.setText("Pause" if on else "Auto Rotate")
-        set_icon(self.btn_turntable, "pause" if on else "play")
+        set_icon(self.btn_turntable, "pause" if on else "turntable", size=18)
+        self.btn_turntable.setToolTip("Stop spinning" if on else "Auto Rotate: spin the shape slowly")
 
     def send(self, app_id: str) -> None:
         if self._send_to is not None:

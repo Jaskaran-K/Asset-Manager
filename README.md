@@ -16,6 +16,16 @@ the app starts from that copy and notes it in the crash log.
 
 ## The library
 
+- **The window:** the top bar has the sidebar button, where you are (**profile / Library**, or the folder or
+  archive you've opened; its arrow has **Open Folder...** and the library's options), the search box (with AI
+  Search and search by colour inside it), **More** (**⋯**: Open Folder, Refresh, undo / redo, duplicates, tag
+  export and import, backups), the **View** button and Settings. Selecting files brings up a bar at the bottom
+  of the grid: **Preview**, **Tag**, **Favorite**, **Send to Artbook**, **Find Similar**, **⋯** (the whole
+  right-click menu) and **x** to clear the selection.
+- **The viewer** (double-click a file): its name and type at the top, with previous / next, **Info** (**Ctrl+I**:
+  the file's details and tags, in a card; remembered), **More** (Open in External App, Show in File Explorer, Copy
+  Path), Full Screen and close. A picture's tools (Fit, 1:1, Checkerboard, Tile) float at the bottom and fade while
+  the mouse is still; moving it brings them back.
 - **Live updates:** files added, removed, renamed or edited in your folders show up within a couple of
   seconds while the app is open. Only the changed folders are rescanned. (Up to 4,000 folders are watched;
   in bigger libraries, Refresh picks up the rest.)
@@ -96,7 +106,7 @@ the app starts from that copy and notes it in the crash log.
     so. Archives inside archives are listed, but must be extracted to be opened.
 - **Favorites and ratings:** select files and press **F** to star them, or **1** to **5** to rate them
   (**0** clears). The sidebar has a Favorites row.
-- **Find duplicates** (**Tools > Find Duplicates...**) compares file contents, groups identical files, and moves
+- **Find duplicates** (**More > Find Duplicates...**) compares file contents, groups identical files, and moves
   the copies you tick to the Recycle Bin. One copy of every file is always kept.
 - **Undo:** **Ctrl+Z** / **Ctrl+Y** undo and redo tag, favorite and rating changes.
 - **Viewer:** **Page Up** / **Page Down** (or Alt+Left / Alt+Right, or the ‹ › buttons) step through the files
@@ -115,16 +125,25 @@ the app starts from that copy and notes it in the crash log.
   (`AssetManager.exe --profile <name>` works too). The app starts in the last profile used, and switching shows
   the profile's last scan at once while it rescans. Right-click a collection to show it in every profile or move
   it to another one.
-- **Looks:** **Settings > Appearance** has the themes and a background texture (grain, dots, grid, lines,
-  hexagons, carbon fiber, topographic) and a Glass Frost slider for the sidebar. Icons are two-tone and take
-  their colors from the theme, and so do the windows' title bars (on Windows 11, the theme's own colour).
-  Lists scroll smoothly, categories slide open, and when the window is resized
-  the grid's cards glide into their new rows.
+- **Looks:** **Settings > Appearance** has the themes (Dark, Light, Sand, Dark Purple, Neon Cyan) and a
+  background texture (grain, dots, grid, lines, hexagons, carbon fiber, topographic) and a Glass Frost slider
+  for the sidebar. Icons are two-tone and take their colors from the theme, and so do the windows' title bars
+  (on Windows 11, the theme's own colour). A pale accent (Sand's amber, or your own theme's) gets dark text on
+  its filled buttons, so they stay readable. Lists scroll smoothly, categories slide open, and when the window
+  is resized the grid's cards glide into their new rows. Hovering a button, a row or a card fades it in, and
+  buttons spring back when clicked.
+- **Keyboard:** Tab goes through a window as you read it (the top bar left to right, then the sidebar, then
+  the grid), and the arrow keys move through the grid. Whatever you've reached shows an accent ring around it;
+  the ring shows only while you use the keyboard, and goes at the next click.
 - **Your own themes:** the **Theme Studio** (Start menu: Asset Manager Theme Studio, or
   `AssetManager.exe --theme-studio`) is a separate window for making themes and backgrounds. You edit every
   colour with a live preview of the app, and make background patterns or tiles from your own images. It
   saves `.amtheme` files and never changes the app's settings. See **Settings > Guide > Theme Studio**.
 - **Help:** **Settings > Guide** has the Artbook guide, the Theme Studio guide and this Read Me, right in the app.
+- **Settings** lists its pages with an icon each, under General and Guide. Pages of settings show each one as a
+  card (its name and a line on what it does, its control beside it), and every page scrolls when the window
+  is small. Dialogs share one layout: what they do at the top, then the choices, and a bar at the bottom with
+  Cancel (or Close) and the main button at the right.
 
 ### Texture sets, renaming and converting
 - **Texture sets:** a material's maps (Rock_BaseColor, Rock_Normal, Rock_Roughness ...) show as one card, with its
@@ -133,23 +152,26 @@ the app starts from that copy and notes it in the crash log.
   are one set. A search that finds any of its maps shows the set. Tagging, favorites, ratings, Send to Artbook and
   dragging a set card apply to all its maps (drag one into Substance Painter's shelf or Blender's node editor).
 - **The material:** double-click a set (or right-click > **Preview Material**) for it on a sphere, cube or plane,
-  under the viewer's lights or your HDRIs: colour, normal (with **Flip Green** for DirectX ones, guessed from the
-  names), roughness or gloss, metallic, AO, emissive, opacity, packed ORM maps, and height as real displacement.
+  under the viewer's lights or your HDRIs: colour, normal (with **DirectX** to flip green for DirectX ones, guessed
+  from the names), roughness or gloss, metallic, AO, emissive, opacity, packed ORM maps, and height as real displacement.
   Each map's kind can be corrected, or a map left out; a set with a Normal and a Normal_OpenGL uses the OpenGL one,
   a Displacement map is used for height over a Bump map, and of two files named alike the EXR over a PNG or JPG.
   The **Adjust** sliders (colour, normal, roughness, metal, AO, emissive, height) change the preview only, each with
-  its value beside it; double-click one to reset it. Height is the map's depth as a share of its width.
-- **Send to Blender / Maya as Material** (right-click a set, or in the material window) makes the material in the
-  Blender or Maya that's open, on its selected objects, through the helper in **Settings > Apps**: a Principled BSDF
+  its value beside it; double-click one to reset it. Height is the map's depth as a share of its width. The shape,
+  lighting, Turn Lights, Auto Rotate, Reset, Tiling and DirectX float at the bottom of the shape, as in the 3D
+  viewer; the maps, the sliders and sending are in the panel beside it, with Show in File Explorer under its More
+  (**⋯**). Esc closes it.
+- **Send to Maya / Blender as Material** (right-click a set, or **Send to Maya** / **Send to Blender** in the
+  material window) makes the material in the Maya or Blender that's open, on its selected objects, through the helper in **Settings > Apps**: a Principled BSDF
   in Blender; an Arnold **aiStandardSurface** in Maya (or a standardSurface: Settings > Apps), with an aiNormalMap,
   Raw colour space for data maps and displacement on the shading group (turn on the mesh's Arnold subdivision to
   see it). AO maps are added but not connected (renderers make their own shadowing). After an update, the helper
   is brought up to date by itself: restart Blender or Maya once.
-- **Rename** (F2, or right-click > **Rename...**): new names from a pattern (`{name}`, `{set}`, `{map}` with the map
+- **Rename** (F2, or right-click > **Edit > Rename...**): new names from a pattern (`{name}`, `{set}`, `{map}` with the map
   words as they are, Substance style or short, `{n}` / `{n:3}`, `{folder}`), a find and replace and a letter case,
   shown for every file first, with what's in the way. Renamed files keep their tags, favorites and ratings, and
   Ctrl+Z renames them back. Files inside archives can't be renamed.
-- **Convert and Resize** (right-click pictures): PNG, JPG, TGA or TIF copies, at full size or the longest side at
+- **Convert and Resize** (right-click pictures > **Edit**): PNG, JPG, TGA or TIF copies, at full size or the longest side at
   512 / 1K / 2K / 4K / any size (never bigger), optionally each side down to a power of two, into a folder next to
   each file or one folder. 16-bit heights and masks stay 16-bit in PNG and TIF; the originals are never changed.
   **Move New Files to Recycle Bin** takes them back.
@@ -164,11 +186,11 @@ app with it.
   not file names. Tags, filters and the sidebar still narrow it down; saved searches keep it on. Your files are
   read once in the background (again only when they change): pictures, pictures inside archives, and models,
   videos and PDFs by their thumbnails once they have one.
-  - **More Like This** (right-click a file): files with the same kind of content, closest first (other skulls,
+  - **More Like This** (right-click a file > **Find**): files with the same kind of content, closest first (other skulls,
     other brick walls), where Find Similar finds copies of the same picture.
   - **Tag suggestions:** the tag window suggests the tags of the most similar files you've already tagged; click
     one to tick it. They get better the more you tag.
-- **Remove Background**: right-click pictures for a copy beside each with its background removed
+- **Remove Background**: right-click pictures > **Edit** for a copy beside each with its background removed
   (`name_cutout.png`, with transparency); in the Artbook, **Images > Remove Background...** shows each cut-out next
   to the original before it goes on the board (one Ctrl+Z; **Revert to Original** any time). It keeps a subject (a
   render, a photo of an object, a character): a full scene has none. Two models, each downloaded when first chosen:
@@ -224,6 +246,10 @@ making your first board. The list below is the full reference.
   **Ctrl+Y** undo and redo. The wheel zooms toward the cursor, middle-drag (or Space+drag) pans, **F** frames
   everything, double-click zooms to an image. A lighter **active area** sits behind everything on the page and
   grows, shrinks and moves with it as you add or spread out images (exports leave it out).
+- **The image bar** (a trial) floats under the selected images: Crop, Flip Horizontally / Vertically, **Adjust**
+  (Grayscale, Pixelated, Values, Guides, Opacity), **Arrange** (Auto-Arrange, Align, Distribute, Stack, Match Size:
+  two or more images), Group / Ungroup, Upscale and Remove Background, and **More** (Reset, Bring to Front / Send to
+  Back, Caption, Revert to Original, File, Export, Delete). Everything on it is in the right-click menu too.
 - **Right-click menu:** Undo / Redo, Copy / Paste, then **Canvas** (frame, 100%, grayscale board) and **Images**
   (Select All, and the Selection, Arrange, Align and Match Size submenus). Greyed-out items need a selection.
 - **Adjusting images:** **C** crops the selected image: drag the handles inward (or back out), Enter or C keeps
@@ -282,8 +308,9 @@ making your first board. The list below is the full reference.
   It stays on for more picks; Esc, I again or a right-click turns it off.
 - **Keys shared with other windows** (G is also the 3D viewer's grid) act on the window you're working in.
 - **Tidying up:** **A** auto-arranges the selection (or everything) into neat rows, keeping each image's size and
-  their reading order. Right-click > **Images** also has Align (left, centers, right, top, middles, bottom,
-  and distribute with equal gaps) and Match Size (same height / width). Each is one Ctrl+Z.
+  their reading order. Right-click > **Images** also has Align (left, centers or right lines the images up in a
+  column, top, middles or bottom in a row, each touching the next, in the order they were in; and distribute with
+  equal gaps) and Match Size (same height / width). Each is one Ctrl+Z.
 - **Pages sidebar:** the menu button at the top left of the Artbook (or **Ctrl+B** while you're working in it)
   slides out your pages, each with a small picture of its board. Organize them in folders, which can hold folders.
   - Click a page to open it. The page you were on is saved first.
@@ -321,7 +348,7 @@ making your first board. The list below is the full reference.
 - **Big boards:** images load at the detail they're seen at. Zoomed out, each shows a small copy; the ones in
   view get sharper as you zoom in, up to the full picture (past 4096 pixels), and let it go again once they're
   well out of view, so even boards with hundreds of large images open quickly and stay light on memory. Small
-  copies are cached (Settings > Video > **Clear Cache** clears them too), so a page opens almost at once the
+  copies are cached (**Settings > Storage** clears them), so a page opens almost at once the
   second time. Export as PNG and Copy always use the full pictures, whatever is showing.
 - **Motion:** arranging, aligning, stacking and undoing glide images to their new places, and pictures fade in
   as they load. The Motion setting in Settings > Appearance turns this off (or follows Windows).
@@ -329,6 +356,10 @@ making your first board. The list below is the full reference.
 ## Viewing 3D models
 
 Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid to turn it round in 3D.
+
+- **Its tools** float at the bottom of the model and fade after a moment of a still mouse (move it to bring them
+  back): how it's drawn, its material, the lighting, then Turn Lights, Grid, Auto Rotate, Reset, UVs and **Render**.
+  Just above them, only while they apply: metal's Roughness, and an HDRI's Exposure and Backdrop.
 
 - **Big models:** the viewer opens at once and the model loads in the background. A 300 MB, 14-million-triangle
   sculpt takes a few seconds: binary FBX and OBJ are read with quick readers of their own (`core/fbx_fast.py`,
@@ -340,13 +371,13 @@ Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid
   computer's memory. A model that crashed the reader, ran out of memory or took too long gets a "Couldn't read" card
   and isn't read again until the file changes (the viewer always tries).
 - **Moving round:** drag to turn the model, right-drag (or middle-drag) to pan, scroll to zoom. **R** resets the
-  view, **G** the ground grid, **W** cycles shaded / wireframe / both.
+  view, **G** the ground grid, **W** cycles shaded / wireframe / both (the tools follow).
 - **Its look:** pick a **material** (Matte, Clay, Phong, Glossy, Metallic, Toon, or Normals to check the
-  model's normals), a **colour** (the Artbook's colour picker: the model follows as you drag) and a
-  **lighting** set-up (Studio, Soft, Dramatic, Top, Headlight). They're remembered for every model.
+  model's normals), a **colour** (**Colour...** at the end of the material's list: the Artbook's colour picker, the
+  model follows as you drag) and a **lighting** set-up (Studio, Soft, Dramatic, Top, Headlight). They're remembered for every model.
 - **Turning the lights:** Shift+drag turns the lights round the model instead of the model; or switch on
   **Turn Lights** (**L**) to make a plain drag do it. The dial in the top right shows where the main light is
-  (hollow when it's behind the model). **Reset View** puts the lights back too.
+  (hollow when it's behind the model). **Reset** puts the lights back too.
 - **Metal's roughness:** Metallic has a **Roughness** slider, from a mirror (0) to a soft sheen (100), remembered
   for every model.
 - **HDRI lighting:** the colour 2:1 HDRIs in your library are listed under **Lighting**, with **Browse for an
@@ -358,14 +389,16 @@ Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid
 - **What it's made of:** the details list polygons, quads, triangles and n-gons as the file has them, and the size
   with its unit where the format says one (cm from FBX, m for glTF).
 - **UVs:** **U** shows the UV layout, read only when you ask: true polygons for OBJ and binary FBX, the UDIM tiles
-  in use numbered, and a picker for files with several UV sets. Drag to pan, scroll to zoom, **R** to fit.
+  in use numbered, and a picker for files with several UV sets. Drag to pan, scroll to zoom, **R** to fit. Meanwhile
+  the tools show only what works on UVs.
 - **Rendering:** **Render** (**F12**) makes a PNG of what's in the viewer, at 720p, 1080p or 1440p. It uses
   [LuxCore](https://luxcorerender.org/), a free path tracer that gives cast shadows and light between parts of a
   model. It downloads once, the first time (157 MB, about 300 MB unpacked), and renders in a process of its own for 5,
   20 or 60 seconds (**Draft**, **Good**, **Best**), with a live preview, **Stop** (which keeps what's done) and
   denoising. Its first render on a computer spends a couple of minutes preparing for the graphics card. If LuxCore can't
   run on your computer, the **Viewer** renderer needs nothing: the same picture as on screen, instantly, without
-  cast shadows. Toon and Normals can't be rendered, and textures aren't used yet. **Remove LuxCore** deletes it.
+  cast shadows. Toon and Normals can't be rendered, and textures aren't used yet. The picture fills the window, with
+  the settings beside it; **More** (**⋯**) **> Remove LuxCore** deletes it.
 - **Thumbnails:** models get a rendered picture in the grid, made once and kept with the other thumbnails.
   Models over 150 MB get theirs the first time you open them (reading one just for the grid would take
   seconds and a lot of memory). A picture next to the model (`model.png`) is used instead when there is one;
@@ -373,7 +406,9 @@ Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid
 
 ## Reading PDFs
 
-Open a PDF from the grid and the viewer shows it page by page, sharp at any zoom.
+Open a PDF from the grid and the viewer shows it page by page, sharp at any zoom. A slim bar above the pages has
+the sidebar, the page, **Find** and the zoom, with **More** (**⋯**: Export a Copy..., Fit Width, Fit Page); the
+marking tools float at the bottom of the pages and stay there while you work.
 
 - **Moving around:** scroll, or drag with the Hand tool (middle-drag or Space+drag work with any tool).
   **Left** / **Right** turn pages, **Home** / **End** go to the first and last; type a page number in the
@@ -388,11 +423,12 @@ Open a PDF from the grid and the viewer shows it page by page, sharp at any zoom
 - **Text:** the Select Text tool (**S**) selects text by dragging, across pages too; **Ctrl+C** copies,
   **Ctrl+A** selects a page's text. (Scanned pages have no text to find or select.)
 - **Your marks:** **Highlight** (**H**: drag over text, or highlight a selection), **Pen** (**D**),
-  **Note** (**T**: click and type) and **Eraser** (**E**), with a colour for each and a pen size. With the
+  **Note** (**T**: click and type) and **Eraser** (**E**), with a colour for each (shown while one of those tools
+  is on) and a pen size (while the Pen is). With the
   Hand tool, click a mark to pick it, drag a drawing or note to move it, **Delete** removes it, and
-  double-clicking a note edits it. **Ctrl+Z** / **Ctrl+Y** undo and redo; **Marks** hides them all.
-- **Sharing:** right-click a page > **Send Page to Artbook** (with or without your marks), or **Export...**
-  saves a copy of the pages with your marks drawn in: one PDF or PNG images, at 150 or 300 dpi.
+  double-clicking a note edits it. **Ctrl+Z** / **Ctrl+Y** undo and redo; the eye hides them all.
+- **Sharing:** right-click a page > **Send Page to Artbook** (with or without your marks), or **More > Export a
+  Copy...** saves a copy of the pages with your marks drawn in: one PDF or PNG images, at 150 or 300 dpi.
 - **The PDF is never changed.** Your marks, and the page and zoom you were at, are kept by the app
   (`%LOCALAPPDATA%\AssetManager\pdf-notes`), matched to the file's contents, so they follow it when it's
   renamed or moved. A PDF reopens where you left it.
@@ -402,6 +438,9 @@ Open a PDF from the grid and the viewer shows it page by page, sharp at any zoom
 Videos (`.mp4, .mov, .mkv, .avi, .webm, .m4v`) play inside the asset viewer using Qt Multimedia.
 No extra Python packages are needed.
 
+- **The controls** sit in a slim bar under the video (in full screen they hide while it plays): play, back and
+  forward, the time, then speed, A-B, volume, **More** (**⋯**: **Jump Time** for the back / forward buttons and the
+  arrow keys, and **Play a 720p Proxy**) and full screen.
 - **Playback speed:** the speed button opens presets from 0.25× (lowest) to 3.0× (highest), with a slider
   above them for anything in between, in 0.05× steps. The speed is remembered.
 - **Mute:** click the speaker icon or press **M**. Moving the volume slider up unmutes too.
@@ -452,10 +491,10 @@ Tags let you find groups of files without relying on file names. They're stored 
     from the screen), and the search follows as you pick.
   - plus file name words, in any order (`rock wall` finds `Wall_Rock_02.png`; `"rock wall"` keeps them together).
     Backspace removes the last chip; Esc or ✕ clears everything.
-- **Find Similar:** right-click a picture > **Find Similar** shows it and its look-alikes from the whole library,
+- **Find Similar:** right-click a picture > **Find > Find Similar** (or **Find Similar** on the selection bar) shows it and its look-alikes from the whole library,
   closest first: resized or re-saved copies, and very close versions (a "Similar to ..." chip in the search box;
-  remove it, combine it with other searches, or save it as a collection). **Search by Its Colours** in the same menu
-  searches for one of the picture's main colours, which its tooltip shows too. **Tools > Find Look-alikes...**
+  remove it, combine it with other searches, or save it as a collection). **Find > Search by Its Colours**
+  searches for one of the picture's main colours, which its tooltip shows too. **More > Find Look-alikes...**
   groups the look-alike pictures in the files shown, the biggest file first, to recycle extra copies; check the
   groups first: a turntable's frames or an alpha's JPG preview look alike too.
   - Each picture is looked at once in the background (its main colours, and a small fingerprint of how it looks),
@@ -478,7 +517,7 @@ Tags let you find groups of files without relying on file names. They're stored 
   deleting one takes it out of them; **Uncategorized** shows the files no category shows.
 - **Backups:** the database is backed up automatically once a day (the last 7 are kept) and before upgrades and app
   updates (the last 10). If it's ever damaged, the app offers to restore the newest good backup, keeping the
-  damaged file in the backups folder. **Tools** also has Back Up Library Now, Restore Library Backup..., and
+  damaged file in the backups folder. **More** also has Back Up Library Now, Restore Library Backup..., and
   Export / Import Tags (a `.json` file with your tags, favorites, ratings and collections, for moving to another PC).
   Artbook pages, their folders and PDF notes each keep their previous save too (`.bak`), opened if a file is damaged.
 

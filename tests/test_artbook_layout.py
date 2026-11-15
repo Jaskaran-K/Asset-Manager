@@ -60,14 +60,32 @@ def test_arrange_packs_rows_without_overlaps_in_order():
     ("left", lambda box: box.left()), ("right", lambda box: box.right()), ("center", lambda box: box.center().x()),
     ("top", lambda box: box.top()), ("bottom", lambda box: box.bottom()), ("middle", lambda box: box.center().y()),
 ])
-def test_align_lines_up_one_edge(edge, check):
+def test_align_lines_up_one_edge_edge_to_edge(edge, check):
     boxes = [("a", QRectF(0, 0, 100, 50)), ("b", QRectF(300, 120, 60, 200)), ("c", QRectF(150, 400, 80, 80))]
     result = moved(boxes, layout.align(boxes, edge))
     assert len({round(check(box), 6) for box in result.values()}) == 1
-    horizontal = edge in ("left", "right", "center")
-    for item_id, box in boxes:  # only that direction moves
-        after = result[item_id]
-        assert (after.top() == box.top()) if horizontal else (after.left() == box.left())
+    column = edge in ("left", "right", "center")
+    # A column in their top-to-bottom order (a row: left to right), each touching the next, from the corner
+    ordered = sorted(result.items(), key=lambda pair: [box for k, box in boxes if k == pair[0]][0].top() if column
+                     else [box for k, box in boxes if k == pair[0]][0].left())
+    order = [k for k, _box in ordered]
+    assert order == (["a", "b", "c"] if column else ["a", "c", "b"])
+    for (_a, first), (_b, second) in zip(ordered, ordered[1:]):
+        assert (second.top() == pytest.approx(first.bottom())) if column else (second.left() == pytest.approx(first.right()))
+    start = ordered[0][1]
+    assert (start.top() == 0) if column else (start.left() == 0)
+    for (_a, one), (_b, other) in [(p, q) for p in result.items() for q in result.items() if p[0] < q[0]]:
+        assert not one.adjusted(0.5, 0.5, -0.5, -0.5).intersects(other)  # (nothing on top of anything)
+    assert all(box.size() == dict(boxes)[k].size() for k, box in result.items())  # sizes kept
+
+
+def test_aligning_a_row_to_the_left_makes_a_column_not_a_pile():
+    """Three images side by side, aligned left: they used to land on top of each other."""
+    boxes = [("a", QRectF(0, 0, 100, 80)), ("b", QRectF(120, 10, 100, 60)), ("c", QRectF(240, 0, 100, 100))]
+    result = moved(boxes, layout.align(boxes, "left"))
+    assert {box.left() for box in result.values()} == {0.0}
+    tops = sorted((box.top(), box.bottom()) for box in result.values())
+    assert all(b[0] == pytest.approx(a[1]) for a, b in zip(tops, tops[1:]))  # stacked edge to edge
 
 
 def test_distribute_makes_equal_gaps_and_keeps_the_ends():

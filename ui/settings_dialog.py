@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import shiboken6
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QStackedWidget,
@@ -139,7 +140,8 @@ from core.version import APP_NAME, APP_VERSION, GITHUB_URL
 from core.video_tools import find_ffmpeg
 from ui.animations import set_motion_mode
 from ui.backgrounds import TEXTURES, render_tile
-from ui.duotone import IconLabel, set_icon
+from ui.controls import SettingCard, section_heading, segmented
+from ui.duotone import IconLabel, duotone_icon, set_icon
 from ui.folder_rules_dialog import FolderRulesPage
 from ui.glass import set_frost
 from ui.icons import (
@@ -153,6 +155,7 @@ from ui.icons import (
 from ui import shortcuts
 from ui.tag_widgets import next_tag_color, run_job
 from ui.themes import THEMES, apply_theme_soon, current_theme_id, parse_color, theme_color
+from ui.views import HEADING_ROLE
 
 # Data roles on category tree items
 EXTENSIONS_ROLE = Qt.ItemDataRole.UserRole
@@ -160,6 +163,36 @@ COLOR_ROLE = Qt.ItemDataRole.UserRole + 1
 ICON_ROLE = Qt.ItemDataRole.UserRole + 2
 TAGS_ROLE = Qt.ItemDataRole.UserRole + 3  # tag names (core.category_rules)
 MATCH_ALL_ROLE = Qt.ItemDataRole.UserRole + 4  # True: files need every tag; False: any of them
+
+
+NAV_ICONS = {  # Settings' pages -> their icon in the nav (ui.duotone)
+    "Folders": "folder", "Folder Rules": "new_folder", "Files": "tile", "Categories": "grid", "Profiles": "profile",
+    "Appearance": "palette", "Video": "play", "Archives": "archive", "Apps": "open_in", "Artbook": "view_artbook",
+    "Browser": "web", "Tags": "tag", "Shortcuts": "keyboard", "Storage": "save", "About": "info",
+    "Artbook Guide": "book", "Theme Studio": "book", "Read Me": "book",
+}
+
+
+def _nav_heading(nav: QTreeWidget, text: str) -> QTreeWidgetItem:
+    """A small caps heading in the Settings nav (GENERAL, GUIDE): not a page, so it can't be picked."""
+    item = QTreeWidgetItem(nav, [text.upper()])
+    font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+    item.setFont(0, font)
+    item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # (its pages under it stay enabled: a disabled parent disables them)
+    item.setData(0, HEADING_ROLE, True)  # (the theme's faint text, no hover: ui.views)
+    item.setSizeHint(0, QSize(0, 28))
+    item.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    return item
+
+
+def _card_page(page: QWidget, title: str, hint: str) -> QVBoxLayout:
+    """The layout of a page of setting cards (SettingCard, under section_heading()s): its title and hint at the top."""
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(24, 20, 24, 20)
+    layout.setSpacing(8)
+    layout.addWidget(_page_header(title, hint))
+    return layout
 
 
 def _page_header(title: str, hint: str) -> QWidget:
@@ -200,7 +233,6 @@ class FoldersPage(QWidget):
         buttons = QHBoxLayout()
         self.btn_add = QPushButton("+ Add Folder...")
         self.btn_add.setToolTip("Add a folder to the library; it's scanned with all its subfolders")
-        self.btn_add.setObjectName("primaryBtn")
         self.btn_add.clicked.connect(self._on_add)
         self.btn_remove = QPushButton("Remove")
         self.btn_remove.setToolTip("Remove the selected folder from the library (the files themselves aren't touched)")
@@ -893,6 +925,47 @@ _PREVIEW_SAMPLES = [
 ]
 
 
+class _SwatchGrid(QWidget):
+    """Buttons in as many equal columns as fit the width (the theme and texture swatches on Appearance)."""
+
+    def __init__(self, buttons: list[QWidget], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._buttons = buttons
+        self._columns = 0
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(8)
+        for button in buttons:
+            button.setParent(self)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._arrange(len(buttons))
+
+    def _widest(self) -> int:
+        return max(button.sizeHint().width() for button in self._buttons)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self._widest(), super().minimumSizeHint().height())
+
+    def _arrange(self, columns: int) -> None:
+        count = len(self._buttons)
+        columns = max(1, min(columns, count))
+        rows = -(-count // columns)
+        columns = -(-count // rows)  # (as even as the rows allow: 2 + 2, not 3 + 1)
+        if columns == self._columns:
+            return
+        self._columns = columns
+        for button in self._buttons:
+            self._grid.removeWidget(button)
+        for i, button in enumerate(self._buttons):
+            self._grid.addWidget(button, i // columns, i % columns)
+        for c in range(len(self._buttons)):
+            self._grid.setColumnStretch(c, 1 if c < columns else 0)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._arrange((self.width() + 8) // (self._widest() + 8))
+
+
 class AppearancePage(QWidget):
     """Theme, grid size and category color / icon options."""
 
@@ -914,23 +987,12 @@ class AppearancePage(QWidget):
         # Maps mirror tree items to the CategoriesPage items they represent
         self._source_items: dict[int, QTreeWidgetItem] = {}
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        content = QWidget()
-        content.setObjectName("scrollContent")
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
+        layout = _card_page(self, "Appearance", "How the app looks. Themes and textures show at once so you can try them; "
+                                                "Cancel brings back what you had.")
 
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(10)
-        layout.addWidget(_page_header("Appearance", "Customize how the asset manager looks."))
-
-        # --- Theme ---
-        layout.addWidget(self._section_title("Theme"))
-        theme_row = QHBoxLayout()
+        # --- Look ---
+        layout.addWidget(section_heading("Look"))
+        theme_card = SettingCard("Theme", "Each one colours the whole app, its windows and viewers.")
         self.theme_group = QButtonGroup(self)
         self.theme_group.setExclusive(True)
         self.theme_buttons: dict[str, QPushButton] = {}
@@ -945,24 +1007,15 @@ class AppearancePage(QWidget):
             btn.clicked.connect(lambda _checked=False, t=tid: self._on_theme_clicked(t))
             self.theme_group.addButton(btn)
             self.theme_buttons[tid] = btn
-            theme_row.addWidget(btn)
-        theme_row.addStretch(1)
         self.theme_buttons.get(theme_id, self.theme_buttons["dark"]).setChecked(True)
-        layout.addLayout(theme_row)
-        hint = QLabel("Themes apply instantly so you can preview them; Cancel restores the previous theme.")
-        hint.setObjectName("pageHint")
-        layout.addWidget(hint)
-        layout.addSpacing(14)
+        theme_card.add_below(_SwatchGrid(list(self.theme_buttons.values())))
+        layout.addWidget(theme_card)
 
-        # --- Background texture ---
-        layout.addWidget(self._section_title("Background Texture"))
-        texture_grid = QGridLayout()
-        texture_grid.setHorizontalSpacing(8)
-        texture_grid.setVerticalSpacing(8)
+        texture_card = SettingCard("Background texture", "A faint pattern behind the window and the grid.")
         self.texture_group = QButtonGroup(self)
         self.texture_group.setExclusive(True)
         self.texture_buttons: dict[str, QPushButton] = {}
-        for i, (texture, label) in enumerate(TEXTURES.items()):
+        for texture, label in TEXTURES.items():
             btn = QPushButton(label)
             btn.setObjectName("textureCard")
             btn.setCheckable(True)
@@ -975,46 +1028,56 @@ class AppearancePage(QWidget):
             btn.clicked.connect(lambda _checked=False, t=texture: self._on_texture_clicked(t))
             self.texture_group.addButton(btn)
             self.texture_buttons[texture] = btn
-            texture_grid.addWidget(btn, i // 4, i % 4)
         self.texture_buttons.get(texture_id, self.texture_buttons["none"]).setChecked(True)
-        layout.addLayout(texture_grid)
+        texture_card.add_below(_SwatchGrid(list(self.texture_buttons.values())))
+        layout.addWidget(texture_card)
         self._refresh_texture_swatches()
-        layout.addSpacing(14)
 
-        # --- Glass frost ---
-        layout.addWidget(self._section_title("Glass Frost"))
-        frost_row = QHBoxLayout()
+        frost = QWidget()
+        frost_row = QHBoxLayout(frost)
+        frost_row.setContentsMargins(0, 0, 0, 0)
         lbl_clear = QLabel("Clear")
         lbl_clear.setObjectName("pageHint")
         self.slider_frost = QSlider(Qt.Orientation.Horizontal)
         self.slider_frost.setRange(0, 100)
         self.slider_frost.setSingleStep(5)
         self.slider_frost.setPageStep(20)
+        self.slider_frost.setFixedWidth(180)
         self.slider_frost.setValue(get_glass_frost())
         self.slider_frost.setToolTip("How frosted the sidebar's glass is: blur, milkiness and grain (previewed now)")
         self.slider_frost.valueChanged.connect(self._on_frost_changed)
         lbl_frosted = QLabel("Frosted")
         lbl_frosted.setObjectName("pageHint")
         self.lbl_frost = QLabel()
-        self.lbl_frost.setFixedWidth(60)
+        self.lbl_frost.setFixedWidth(44)
         self.lbl_frost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         frost_row.addWidget(lbl_clear)
-        frost_row.addWidget(self.slider_frost, 1)
+        frost_row.addWidget(self.slider_frost)
         frost_row.addWidget(lbl_frosted)
         frost_row.addWidget(self.lbl_frost)
-        layout.addLayout(frost_row)
-        frost_hint = QLabel(
-            "The sidebar is glass: unpin it (the pin button) to float it over the grid and see the thumbnails blur through."
-        )
-        frost_hint.setObjectName("pageHint")
-        frost_hint.setWordWrap(True)
-        layout.addWidget(frost_hint)
+        layout.addWidget(SettingCard(
+            "Glass frost", "The sidebar is glass: unpin it (the pin button) to float it over the grid and see the "
+            "thumbnails blur through.", frost,
+        ))
         self._on_frost_changed(self.slider_frost.value())
-        layout.addSpacing(14)
 
-        # --- Grid size ---
-        layout.addWidget(self._section_title("Grid Size"))
-        size_row = QHBoxLayout()
+        self.cb_motion = QComboBox()
+        for mode, label in (
+            ("auto", "Follow Windows (Animation effects)"),
+            ("on", "On"),
+            ("off", "Off (reduce motion)"),
+        ):
+            self.cb_motion.addItem(label, mode)
+        self.cb_motion.setCurrentIndex(max(0, self.cb_motion.findData(get_motion())))
+        self.cb_motion.setToolTip("Button, menu and dropdown animations. Off makes everything change instantly.")
+        layout.addWidget(SettingCard("Animations", "Buttons, menus and dropdowns. Off makes everything change at once.",
+                                     self.cb_motion))
+
+        # --- Thumbnails ---
+        layout.addWidget(section_heading("Thumbnails"))
+        size = QWidget()
+        size_row = QHBoxLayout(size)
+        size_row.setContentsMargins(0, 0, 0, 0)
         lbl_small = QLabel("Small")
         lbl_small.setObjectName("pageHint")
         self.slider_size = QSlider(Qt.Orientation.Horizontal)
@@ -1022,43 +1085,20 @@ class AppearancePage(QWidget):
         self.slider_size.setRange(lo, hi)
         self.slider_size.setSingleStep(8)
         self.slider_size.setPageStep(32)
+        self.slider_size.setFixedWidth(180)
         self.slider_size.setValue(thumbnail_size)
+        self.slider_size.setToolTip("How big the grid's thumbnails are")
         self.slider_size.valueChanged.connect(self._on_size_changed)
         lbl_large = QLabel("Large")
         lbl_large.setObjectName("pageHint")
         self.lbl_size = QLabel()
-        self.lbl_size.setFixedWidth(60)
+        self.lbl_size.setFixedWidth(44)
         self.lbl_size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         size_row.addWidget(lbl_small)
-        size_row.addWidget(self.slider_size, 1)
+        size_row.addWidget(self.slider_size)
         size_row.addWidget(lbl_large)
         size_row.addWidget(self.lbl_size)
-        layout.addLayout(size_row)
-        self.chk_model_pictures = QCheckBox("Pictures of 3D models", self)
-        self.chk_model_pictures.setChecked(get_model_view()["thumbnails"])
-        self.chk_model_pictures.setToolTip(
-            "Render a picture of each 3D model for its thumbnail (once; then it's kept). Models over 150 MB get theirs "
-            "when you first open them. A picture next to the model (model.png) is used instead when there is one."
-        )
-        layout.addWidget(self.chk_model_pictures)
-        alpha_row = QHBoxLayout()
-        alpha_row.addWidget(QLabel("Alpha thumbnails"))
-        self.btn_alpha_relief = QPushButton("Relief")
-        self.btn_alpha_relief.setToolTip(
-            "Show grey height images (alphas, displacement maps) as a lit relief, like ZBrush does, "
-            "drawn from their full 16-bit heights"
-        )
-        self.btn_alpha_normal = QPushButton("Normal")
-        self.btn_alpha_normal.setToolTip("Show them as the flat grey image they are")
-        self.alpha_thumbnail_group = QButtonGroup(self)
-        self.alpha_thumbnail_group.setExclusive(True)
-        for button in (self.btn_alpha_relief, self.btn_alpha_normal):
-            button.setCheckable(True)
-            self.alpha_thumbnail_group.addButton(button)
-            alpha_row.addWidget(button)
-        (self.btn_alpha_relief if get_model_view()["alpha_relief"] else self.btn_alpha_normal).setChecked(True)
-        alpha_row.addStretch(1)
-        layout.addLayout(alpha_row)
+        size_card = SettingCard("Grid size", "How big the thumbnails are. A preview:", size)
 
         self.grid_preview = QListWidget()
         self.grid_preview.setObjectName("assetGrid")
@@ -1073,36 +1113,39 @@ class AppearancePage(QWidget):
         self._preview_assets = [
             AssetItem(Path(name), name, ext, 0, 0.0, group, cat) for name, ext, group, cat in _PREVIEW_SAMPLES
         ]
-        layout.addWidget(self.grid_preview)
-        layout.addSpacing(14)
+        size_card.add_below(self.grid_preview)
+        layout.addWidget(size_card)
 
-        # --- Animations ---
-        layout.addWidget(self._section_title("Animations"))
-        motion_row = QHBoxLayout()
-        self.cb_motion = QComboBox()
-        for mode, label in (
-            ("auto", "Follow Windows (Animation effects)"),
-            ("on", "On"),
-            ("off", "Off (reduce motion)"),
-        ):
-            self.cb_motion.addItem(label, mode)
-        self.cb_motion.setCurrentIndex(max(0, self.cb_motion.findData(get_motion())))
-        self.cb_motion.setToolTip("Button, menu and dropdown animations. Off makes everything change instantly.")
-        motion_row.addWidget(self.cb_motion)
-        motion_row.addStretch(1)
-        layout.addLayout(motion_row)
-        layout.addSpacing(14)
+        self.chk_model_pictures = QCheckBox(self)
+        self.chk_model_pictures.setChecked(get_model_view()["thumbnails"])
+        self.chk_model_pictures.setToolTip(
+            "Render a picture of each 3D model for its thumbnail (once; then it's kept). Models over 150 MB get theirs "
+            "when you first open them. A picture next to the model (model.png) is used instead when there is one."
+        )
+        layout.addWidget(SettingCard(
+            "Pictures of 3D models", "Render a picture of each model for its card, once. A picture next to the model "
+            "(model.png) is used instead when there is one.", self.chk_model_pictures,
+        ))
+
+        relief = get_model_view()["alpha_relief"]
+        alpha_track, self.alpha_thumbnail_group = segmented([
+            ("relief", "Relief", "Show grey height images (alphas, displacement maps) as a lit relief, like ZBrush does, "
+                                 "drawn from their full 16-bit heights"),
+            ("normal", "Normal", "Show them as the flat grey image they are"),
+        ], "relief" if relief else "normal", self)
+        alpha_track.setFixedWidth(180)
+        self.btn_alpha_relief, self.btn_alpha_normal = self.alpha_thumbnail_group.buttons()
+        layout.addWidget(SettingCard(
+            "Alpha thumbnails", "Grey height images (alphas, displacement maps) as a lit relief, or as the flat grey "
+            "image they are.", alpha_track,
+        ))
 
         # --- Category colors & icons ---
-        layout.addWidget(self._section_title("Category Colors & Icons"))
-        hint = QLabel(
-            "Pick a color for each category's sidebar badge, or use a small image as its icon "
-            "(PNG, JPG, SVG, ICO; up to 1 MB). Double-click a row to change its color."
+        layout.addWidget(section_heading("Categories"))
+        category_card = SettingCard(
+            "Colors and icons", "A color for each category's sidebar badge, or a small image as its icon (PNG, JPG, "
+            "SVG, ICO; up to 1 MB). Double-click a row to change its color.",
         )
-        hint.setObjectName("pageHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
         cat_row = QHBoxLayout()
         self.color_tree = QTreeWidget()
         self.color_tree.setObjectName("categoryTree")
@@ -1127,17 +1170,11 @@ class AppearancePage(QWidget):
             cat_buttons.addWidget(btn)
         cat_buttons.addStretch(1)
         cat_row.addLayout(cat_buttons)
-        layout.addLayout(cat_row)
+        category_card.add_below(cat_row)
+        layout.addWidget(category_card)
         layout.addStretch(1)
-
         self._on_size_changed(thumbnail_size)
         self._update_category_buttons()
-
-    @staticmethod
-    def _section_title(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setObjectName("sectionTitle")
-        return lbl
 
     # ------------------ theme & grid ------------------
     def theme_id(self) -> str:
@@ -1309,16 +1346,10 @@ class VideoPage(QWidget):
 
     def __init__(self, ffmpeg_path: str, media_backend: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(8)
-        layout.addWidget(_page_header(
-            "Video",
-            "Videos play inside the viewer. ffmpeg (a free external program) is used for grid "
-            "thumbnails and for 720p preview copies of files that won't play or that stutter.",
-        ))
-
-        layout.addWidget(self._section_label("ffmpeg location"))
+        layout = _card_page(self, "Video", "Videos play inside the viewer. ffmpeg (a free program) makes their grid "
+                                           "thumbnails, and 720p preview copies of files that won't play or that stutter.")
+        layout.addWidget(section_heading("ffmpeg"))
+        ffmpeg = SettingCard("ffmpeg location", "Leave it blank to use the ffmpeg on the system PATH.")
         row = QHBoxLayout()
         self.txt_ffmpeg = QLineEdit(ffmpeg_path)
         self.txt_ffmpeg.setPlaceholderText("Leave blank to use ffmpeg from the system PATH")
@@ -1328,41 +1359,31 @@ class VideoPage(QWidget):
         btn_browse.clicked.connect(self._on_browse)
         row.addWidget(self.txt_ffmpeg, 1)
         row.addWidget(btn_browse)
-        layout.addLayout(row)
+        ffmpeg.add_below(row)
         self.lbl_ffmpeg_status = IconLabel(text_name="pageHint")
         self.lbl_ffmpeg_status.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.lbl_ffmpeg_status)
+        ffmpeg.add_below(self.lbl_ffmpeg_status)
+        layout.addWidget(ffmpeg)
 
-        layout.addSpacing(10)
-        layout.addWidget(self._section_label("Playback backend"))
+        layout.addWidget(section_heading("Playback"))
         self.cb_backend = QComboBox()
         for backend_id in MEDIA_BACKENDS:
             self.cb_backend.addItem(self._BACKEND_LABELS[backend_id], backend_id)
         self.cb_backend.setCurrentIndex(max(0, self.cb_backend.findData(media_backend)))
-        layout.addWidget(self.cb_backend, 0, Qt.AlignmentFlag.AlignLeft)
-        backend_hint = "Try Windows Media Foundation if videos play incorrectly. Takes effect after restarting the app."
+        self.cb_backend.setToolTip("What plays videos in the viewer (used after restarting the app)")
+        backend_hint = "Try Windows Media Foundation if videos play incorrectly. Used after restarting the app."
         env_backend = os.environ.get("QT_MEDIA_BACKEND")
         if env_backend and env_backend != media_backend:
             backend_hint += f" (The QT_MEDIA_BACKEND environment variable currently forces \"{env_backend}\".)"
-        lbl_backend = QLabel(backend_hint)
-        lbl_backend.setObjectName("pageHint")
-        lbl_backend.setWordWrap(True)
-        layout.addWidget(lbl_backend)
+        layout.addWidget(SettingCard("Playback backend", backend_hint, self.cb_backend))
 
-        layout.addSpacing(10)
         storage = QLabel("Video posters and preview copies are listed, and can be cleared, in Settings > Storage.")
         storage.setObjectName("pageHint")
         storage.setWordWrap(True)
+        layout.addSpacing(4)
         layout.addWidget(storage)
         layout.addStretch(1)
-
         self._update_ffmpeg_status()
-
-    @staticmethod
-    def _section_label(text: str) -> QLabel:
-        label = QLabel(text)
-        label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        return label
 
     def ffmpeg_path(self) -> str:
         return self.txt_ffmpeg.text().strip()
@@ -1400,25 +1421,22 @@ class ArchivesPage(QWidget):
 
     def __init__(self, seven_zip_path: str, archive_contents: bool, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(8)
-        layout.addWidget(_page_header(
-            "Archives",
-            "ZIP, RAR and 7z archives are looked inside like folders (double-click one). ZIPs are read by "
-            "the app itself; RAR and 7z need 7-Zip, a free program (7-zip.org).",
-        ))
-
-        layout.addWidget(VideoPage._section_label("In the library"))
-        self.chk_contents = QCheckBox("Show the files inside archives among your other files", self)
+        layout = _card_page(self, "Archives", "ZIP, RAR and 7z archives are looked inside like folders (double-click "
+                                              "one). ZIPs are read by the app itself; RAR and 7z need 7-Zip, a free "
+                                              "program (7-zip.org).")
+        layout.addWidget(section_heading("In the library"))
+        self.chk_contents = QCheckBox(self)
         self.chk_contents.setChecked(archive_contents)
         self.chk_contents.setToolTip(
             "On: search finds them, marked with a small box. Off: they're only shown inside an opened archive."
         )
-        layout.addWidget(self.chk_contents)
+        layout.addWidget(SettingCard(
+            "Show the files inside archives", "Among your other files, marked with a small box, and found by search. "
+            "Off: they're only shown inside an opened archive.", self.chk_contents,
+        ))
 
-        layout.addSpacing(10)
-        layout.addWidget(VideoPage._section_label("7-Zip location"))
+        layout.addWidget(section_heading("7-Zip"))
+        seven = SettingCard("7-Zip location", "Leave it blank to find 7-Zip by itself.")
         row = QHBoxLayout()
         self.txt_seven_zip = QLineEdit(seven_zip_path)
         self.txt_seven_zip.setPlaceholderText("Leave blank to find 7-Zip automatically")
@@ -1428,21 +1446,21 @@ class ArchivesPage(QWidget):
         btn_browse.clicked.connect(self._on_browse)
         row.addWidget(self.txt_seven_zip, 1)
         row.addWidget(btn_browse)
-        layout.addLayout(row)
+        seven.add_below(row)
         self.lbl_status = IconLabel(text_name="pageHint")
         self.lbl_status.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.lbl_status)
+        seven.add_below(self.lbl_status)
+        layout.addWidget(seven)
 
-        layout.addSpacing(10)
         unpacked = QLabel(
             "Models, PDFs and videos inside archives are unpacked to be opened, and the copies kept so they open at "
             "once next time. How much they may take, and clearing them: Settings > Storage."
         )
         unpacked.setObjectName("pageHint")
         unpacked.setWordWrap(True)
+        layout.addSpacing(4)
         layout.addWidget(unpacked)
         layout.addStretch(1)
-
         self._update_status()
 
     def seven_zip_path(self) -> str:
@@ -1484,17 +1502,13 @@ class BrowserPage(QWidget):
         from ui import browser_inbox
 
         self._inbox = browser_inbox
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(8)
-        layout.addWidget(_page_header(
-            "Browser",
-            "Right-click a picture on a web page in Chrome or Opera GX > Asset Manager > Save to Library, or Add to "
-            "Artbook Page (the page that's open). The app needn't be open: library pictures are saved anyway, "
-            "and Artbook ones go on the page when it next opens.",
-        ))
+        layout = _card_page(self, "Browser", "Right-click a picture on a web page in Chrome or Opera GX > Asset Manager > "
+                                             "Save to Library, or Add to Artbook Page (the page that's open). The app "
+                                             "needn't be open: library pictures are saved anyway, and Artbook ones go on "
+                                             "the page when it next opens.")
 
-        layout.addWidget(VideoPage._section_label("Library pictures go to"))
+        layout.addWidget(section_heading("Saving"))
+        folder = SettingCard("Library pictures go to", "Where Save to Library puts them.")
         row = QHBoxLayout()
         self.txt_folder = QLineEdit(web_folder)
         self.txt_folder.textChanged.connect(self._update_folder_hint)
@@ -1503,17 +1517,14 @@ class BrowserPage(QWidget):
         btn_browse.clicked.connect(self._on_browse)
         row.addWidget(self.txt_folder, 1)
         row.addWidget(btn_browse)
-        layout.addLayout(row)
+        folder.add_below(row)
         self.lbl_folder = IconLabel(text_name="pageHint")
         self.lbl_folder.label.setWordWrap(True)
-        layout.addWidget(self.lbl_folder)
-        layout.addSpacing(10)
+        folder.add_below(self.lbl_folder)
+        layout.addWidget(folder)
 
-        layout.addWidget(VideoPage._section_label("Chrome and Opera GX"))
-        self.lbl_status = IconLabel(text_name="pageHint")
-        self.lbl_status.label.setWordWrap(True)
-        layout.addWidget(self.lbl_status)
-        buttons = QHBoxLayout()
+        layout.addWidget(section_heading("Chrome and Opera GX"))
+        extension = SettingCard("The extension", "Set Up lets it reach the app, for this Windows user only.")
         self.btn_set_up = QPushButton("Set Up")
         self.btn_set_up.setToolTip(
             "Lets the extension reach the app (for this Windows user only; no admin rights), and makes the "
@@ -1523,10 +1534,11 @@ class BrowserPage(QWidget):
         self.btn_remove = QPushButton("Remove")
         self.btn_remove.setToolTip("Undo Set Up (then remove the extension in the browser too)")
         self.btn_remove.clicked.connect(self._on_remove)
-        buttons.addWidget(self.btn_set_up)
-        buttons.addWidget(self.btn_remove)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
+        extension.add_control(self.btn_remove)
+        extension.add_control(self.btn_set_up)
+        self.lbl_status = IconLabel(text_name="pageHint")
+        self.lbl_status.label.setWordWrap(True)
+        extension.add_below(self.lbl_status)
 
         self.steps = QWidget(self)
         steps = QVBoxLayout(self.steps)
@@ -1564,9 +1576,9 @@ class BrowserPage(QWidget):
         self.lbl_opened.setObjectName("pageHint")
         self.lbl_opened.setWordWrap(True)
         steps.addWidget(self.lbl_opened)
-        layout.addWidget(self.steps)
+        extension.add_below(self.steps)
+        layout.addWidget(extension)
         layout.addStretch(1)
-
         self._update_folder_hint()
         self._update_status()
 
@@ -1655,43 +1667,35 @@ class StoragePage(QWidget):
 
     def __init__(self, unpacked_limit_gb: int, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(8)
-        layout.addWidget(_page_header(
-            "Storage",
-            "What the app keeps on disk. Caches can be cleared and the downloaded tools removed: they're made or "
-            "downloaded again when needed. Your Artbook pages and the library's backups are only shown here.",
-        ))
+        layout = _card_page(self, "Storage", "What the app keeps on disk. Caches can be cleared and the downloaded tools "
+                                             "removed: they're made or downloaded again when needed. Your Artbook pages "
+                                             "and the library's backups are only shown here.")
         self.lbl_total = QLabel("Adding up...", self)
-        self.lbl_total.setObjectName("toolbarLabel")
+        self.lbl_total.setObjectName("cardTitle")
         layout.addWidget(self.lbl_total)
         self.sizes: dict[str, int] = {}
         self.size_labels: dict[str, QLabel] = {}
         self.buttons: dict[str, QPushButton] = {}
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(4)
-        grid.setColumnStretch(0, 1)
-        row = 0
+        sections = {"clear": "Caches", "remove": "Downloaded tools", "open": "Your files"}
+        shown: set[str] = set()
         for area in storage.AREAS:
-            name = QLabel(area.name, self)
-            name.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+            if area.action not in shown:
+                shown.add(area.action)
+                layout.addWidget(section_heading(sections[area.action]))
+            card = SettingCard(area.name, area.about)
             size = QLabel("...", self)
+            size.setObjectName("pageHint")
             size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            size.setMinimumWidth(80)
+            size.setMinimumWidth(56)
             self.size_labels[area.key] = size
-            grid.addWidget(name, row, 0)
-            grid.addWidget(size, row, 1)
-            actions = QHBoxLayout()
-            actions.setSpacing(6)
+            card.add_control(size)
             if area.key == "unpacked":
                 self.cb_limit = QComboBox(self)
                 for gb in storage.UNPACKED_LIMITS_GB:
                     self.cb_limit.addItem(f"Up to {gb} GB", gb)
                 self.cb_limit.setCurrentIndex(max(0, self.cb_limit.findData(unpacked_limit_gb)))
                 self.cb_limit.setToolTip("How much the unpacked copies may take: the oldest go first past it (applied on Save)")
-                actions.addWidget(self.cb_limit)
+                card.add_control(self.cb_limit)
             text = {"clear": "Clear", "remove": "Remove", "open": "Open Folder"}[area.action]
             button = QPushButton(text, self)
             button.setToolTip({
@@ -1699,17 +1703,11 @@ class StoragePage(QWidget):
                 "remove": "Delete the download: it's downloaded again when needed",
                 "open": "Open the folder in Explorer",
             }[area.action])
+            button.setMinimumWidth(84)
             button.clicked.connect(lambda _checked=False, key=area.key: self._on_action(key))
             self.buttons[area.key] = button
-            actions.addWidget(button)
-            grid.addLayout(actions, row, 2, Qt.AlignmentFlag.AlignRight)
-            about = QLabel(area.about, self)
-            about.setObjectName("pageHint")
-            about.setWordWrap(True)
-            grid.addWidget(about, row + 1, 0, 1, 3)
-            grid.setRowMinimumHeight(row + 2, 8)
-            row += 3
-        layout.addLayout(grid)
+            card.add_control(button)
+            layout.addWidget(card)
         self.lbl_status = QLabel("", self)
         self.lbl_status.setObjectName("pageHint")
         layout.addWidget(self.lbl_status)
@@ -1838,7 +1836,7 @@ class AppsPage(QWidget):
         layout.addLayout(buttons)
 
         layout.addSpacing(10)
-        layout.addWidget(VideoPage._section_label("Import into the open window"))
+        layout.addWidget(section_heading("Import into the open window"))
         hint = QLabel(
             "Open In starts a new window of Maya or Blender each time. With a small helper script in the app, OBJ and "
             "FBX go into the window you already have open. It only ever imports model files. These buttons act right "
@@ -2073,21 +2071,13 @@ class ArtbookPage(QWidget):
         super().__init__(parent)
         self.artbook = artbook
         self._busy = False
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(8)
-        layout.addWidget(_page_header(
-            "Artbook",
-            "Each page is a folder with its layout and the images kept in it. Changes here happen "
-            "right away.",
-        ))
-        layout.addWidget(VideoPage._section_label("Pages folder"))
-        self.lbl_folder = QLabel()
-        self.lbl_folder.setObjectName("pageHint")
-        self.lbl_folder.setWordWrap(True)
+        layout = _card_page(self, "Artbook", "Each page is a folder with its layout and the images kept in it. Changes "
+                                             "here happen right away.")
+        layout.addWidget(section_heading("Pages"))
+        card = SettingCard("Pages folder")
+        self.lbl_folder = card.about_label
         self.lbl_folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.lbl_folder)
-        row = QHBoxLayout()
+        self.lbl_folder.show()
         self.btn_change = QPushButton("Change...")
         self.btn_change.setToolTip("Pick another folder for your pages: they're moved there")
         self.btn_change.clicked.connect(self._on_change)
@@ -2097,13 +2087,15 @@ class ArtbookPage(QWidget):
         self.btn_default = QPushButton("Use Default")
         self.btn_default.setToolTip(f"Move your pages back to the default folder ({artbook_store.DEFAULT_PAGES_DIR})")
         self.btn_default.clicked.connect(self._on_default)
+        buttons = QHBoxLayout()
         for button in (self.btn_change, self.btn_open, self.btn_default):
-            row.addWidget(button)
-        row.addStretch(1)
-        layout.addLayout(row)
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        card.add_below(buttons)
         self.lbl_status = QLabel()
         self.lbl_status.setObjectName("pageHint")
         self.lbl_status.setWordWrap(True)
+        layout.addWidget(card)
         layout.addWidget(self.lbl_status)
         hint = QLabel(
             "A folder in a synced place (OneDrive, Dropbox) keeps your pages backed up. If the folder "
@@ -2111,6 +2103,7 @@ class ArtbookPage(QWidget):
         )
         hint.setObjectName("pageHint")
         hint.setWordWrap(True)
+        layout.addSpacing(4)
         layout.addWidget(hint)
         layout.addStretch(1)
         self._update()
@@ -2373,7 +2366,6 @@ class TagsPage(QWidget):
         buttons = QHBoxLayout()
         self.btn_new = QPushButton("+ New Tag...")
         self.btn_new.setToolTip("Create a custom tag")
-        self.btn_new.setObjectName("primaryBtn")
         self.btn_new.clicked.connect(self._on_new)
         self.btn_rename = QPushButton("Rename...")
         self.btn_rename.setToolTip("Rename the selected tag (or double-click it)")
@@ -2564,7 +2556,6 @@ class ProfilesPage(QWidget):
 
         buttons = QHBoxLayout()
         self.btn_new = QPushButton("+ New Profile...")
-        self.btn_new.setObjectName("primaryBtn")
         self.btn_new.setToolTip("Make a profile, as a copy of the selected one or with no folders")
         self.btn_new.clicked.connect(self._on_new)
         self.btn_rename = QPushButton("Rename...")
@@ -2826,7 +2817,6 @@ class AboutPage(QWidget):
         row = QHBoxLayout()
         self.btn_update = QPushButton("Check for Updates")
         self.btn_update.setToolTip("Look for a newer version on GitHub")
-        self.btn_update.setObjectName("primaryBtn")
         self.btn_update.clicked.connect(self._on_check_updates)
         row.addWidget(self.btn_update)
         self.btn_crash_log = QPushButton("Open Crash Log")
@@ -2995,7 +2985,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Settings")
-        self.resize(900, 600)
+        self.resize(960, 680)
         self.setMinimumSize(760, 520)
 
         self._orig_folders = get_scan_folders()
@@ -3072,17 +3062,20 @@ class SettingsDialog(QDialog):
         body = QHBoxLayout()
         body.setSpacing(0)
 
+        # (a flat list: an icon for each page, under small caps GENERAL and GUIDE headings)
         self.nav = QTreeWidget()
         self.nav.setObjectName("settingsNav")
         self.nav.setHeaderHidden(True)
         self.nav.setFixedWidth(200)
-        self.nav.setIndentation(14)
+        self.nav.setIndentation(0)
+        self.nav.setRootIsDecorated(False)
+        self.nav.setItemsExpandable(False)
+        self.nav.setIconSize(QSize(18, 18))
 
         self.stack = QStackedWidget()
-        self._nav_pages: dict[int, QWidget] = {}
+        self.pages: dict[str, QWidget] = {}  # page name -> the page (in the stack, inside a scroll area)
 
-        general = QTreeWidgetItem(self.nav, ["General"])
-        general.setFont(0, QFont("Segoe UI", 10, QFont.Weight.Bold))
+        general = _nav_heading(self.nav, "General")
         self.nav_items: dict[str, QTreeWidgetItem] = {}
         for name, page in (
             ("Folders", self.page_folders),
@@ -3100,27 +3093,17 @@ class SettingsDialog(QDialog):
             ("Shortcuts", self.page_shortcuts),
             ("Storage", self.page_storage),
         ):
-            item = QTreeWidgetItem(general, [name])
-            item.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(page))
-            self.nav_items[name] = item
-        general.setData(0, Qt.ItemDataRole.UserRole, 0)  # General opens its first page
+            self._add_page(general, name, page)
         general.setExpanded(True)
 
-        guide = QTreeWidgetItem(self.nav, ["Guide"])
-        guide.setFont(0, QFont("Segoe UI", 10, QFont.Weight.Bold))
+        guide = _nav_heading(self.nav, "Guide")
         self.guide_pages: dict[str, GuidePage] = {}
         for name in GUIDES:
             self.guide_pages[name] = GuidePage(name, self.open_guide)
-            item = QTreeWidgetItem(guide, [name])
-            item.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(self.guide_pages[name]))
-            self.nav_items[name] = item
-        guide.setData(0, Qt.ItemDataRole.UserRole, self.nav_items["Artbook Guide"].data(0, Qt.ItemDataRole.UserRole))
+            self._add_page(guide, name, self.guide_pages[name], scroll=False)  # (a guide scrolls itself)
         guide.setExpanded(True)
 
-        about = QTreeWidgetItem(self.nav, ["About"])
-        about.setFont(0, QFont("Segoe UI", 10, QFont.Weight.Bold))
-        about.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(self.page_about))
-        self.nav_items["About"] = about
+        self._add_page(self.nav, "About", self.page_about)
 
         self.nav.currentItemChanged.connect(self._on_nav_changed)
         self.nav.setCurrentItem(self.nav_items["Folders"])
@@ -3151,6 +3134,27 @@ class SettingsDialog(QDialog):
         footer_layout.addWidget(self.btn_save)
         root.addWidget(footer)
 
+    def _add_page(self, under, name: str, page: QWidget, scroll: bool = True) -> None:
+        """A nav row (with the page's icon) and its page: in a scroll area, so a page taller than the window
+        scrolls instead of squashing its buttons."""
+        item = QTreeWidgetItem(under, [name])
+        item.setIcon(0, duotone_icon(NAV_ICONS.get(name, "info")))
+        holder = page
+        if scroll:
+            holder = QScrollArea()
+            holder.setObjectName("settingsScroll")
+            holder.setWidgetResizable(True)
+            holder.setFrameShape(QFrame.Shape.NoFrame)
+            holder.setWidget(page)
+        item.setData(0, Qt.ItemDataRole.UserRole, self.stack.addWidget(holder))
+        self.nav_items[name] = item
+        self.pages[name] = page
+
+    def current_page(self) -> Optional[QWidget]:
+        """The page shown (not the scroll area around it)."""
+        holder = self.stack.currentWidget()
+        return holder.widget() if isinstance(holder, QScrollArea) and holder.objectName() == "settingsScroll" else holder
+
     def show_page(self, name: str) -> None:
         if name in self.nav_items:
             self.nav.setCurrentItem(self.nav_items[name])
@@ -3164,9 +3168,14 @@ class SettingsDialog(QDialog):
         else:
             page.text.verticalScrollBar().setValue(0)
 
-    def _on_nav_changed(self, current: Optional[QTreeWidgetItem], _previous) -> None:
-        if current is not None:
-            self.stack.setCurrentIndex(current.data(0, Qt.ItemDataRole.UserRole))
+    def _on_nav_changed(self, current: Optional[QTreeWidgetItem], previous: Optional[QTreeWidgetItem]) -> None:
+        if current is None:
+            return
+        if current.data(0, Qt.ItemDataRole.UserRole) is None:  # (a heading was clicked: stay on the page)
+            if previous is not None:
+                QTimer.singleShot(0, lambda: self.nav.setCurrentItem(previous))
+            return
+        self.stack.setCurrentIndex(current.data(0, Qt.ItemDataRole.UserRole))
 
     def _on_files_validity_changed(self, valid: bool) -> None:
         self.btn_save.setEnabled(valid)

@@ -250,8 +250,8 @@ class UvViewWidget(QOpenGLWidget):
 
         painter.setPen(QColor(156, 163, 175, 170))
         painter.setFont(QFont("Segoe UI", 8))
-        hint = "Drag: pan   Scroll: zoom   R: fit   U: back to the model"
-        painter.drawText(QRectF(0, height - 26, width - 12, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, hint)
+        hint = "Drag: pan   Scroll: zoom   R: fit   U: back to the model"  # (under the badge: the tools float at the bottom)
+        painter.drawText(QRectF(16, 40, width - 32, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, hint)
         painter.end()
 
 

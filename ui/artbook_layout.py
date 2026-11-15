@@ -70,26 +70,41 @@ ALIGN_EDGES = ("left", "center", "right", "top", "middle", "bottom")
 
 
 def align(boxes: Boxes, edge: str) -> dict[Hashable, QPointF]:
-    """Line images up on one edge (or centre line) of the box around them all."""
+    """Line images up on an edge (or centre line) of the box around them all, edge to edge: left / center / right
+    make a column, in their top-to-bottom order, starting at the top of that box; top / middle / bottom make a
+    row, in their left-to-right order, starting at its left. Nothing ends up on top of anything else."""
     if edge not in ALIGN_EDGES:
         raise ValueError(edge)
     around = QRectF()
     for _id, box in boxes:
         around = around.united(box)
+    column = edge in ("left", "center", "right")
+    if column:
+        ordered = sorted(boxes, key=lambda pair: (pair[1].top(), pair[1].left()))
+    else:
+        ordered = sorted(boxes, key=lambda pair: (pair[1].left(), pair[1].top()))
     moves = {}
-    for item_id, box in boxes:
+    position = around.top() if column else around.left()
+    for item_id, box in ordered:
         if edge == "left":
-            moves[item_id] = QPointF(around.left() - box.left(), 0)
+            x = around.left()
         elif edge == "center":
-            moves[item_id] = QPointF(around.center().x() - box.center().x(), 0)
+            x = around.center().x() - box.width() / 2
         elif edge == "right":
-            moves[item_id] = QPointF(around.right() - box.right(), 0)
+            x = around.right() - box.width()
         elif edge == "top":
-            moves[item_id] = QPointF(0, around.top() - box.top())
+            y = around.top()
         elif edge == "middle":
-            moves[item_id] = QPointF(0, around.center().y() - box.center().y())
+            y = around.center().y() - box.height() / 2
         else:
-            moves[item_id] = QPointF(0, around.bottom() - box.bottom())
+            y = around.bottom() - box.height()
+        if column:
+            y = position
+            position += box.height()
+        else:
+            x = position
+            position += box.width()
+        moves[item_id] = QPointF(x - box.left(), y - box.top())
     return moves
 
 

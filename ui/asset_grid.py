@@ -24,6 +24,7 @@ from core.scanner import AssetItem
 from core.tag_repository import Marks
 from ui import animations
 from ui.duotone import draw_icon
+from ui.views import hover_level
 
 ASSET_ROLE = Qt.ItemDataRole.UserRole
 GLIDE_MS = 220  # cards gliding to their new places when the rows change
@@ -150,7 +151,20 @@ class AssetCardDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _paint_card(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
-        super().paint(painter, option, index)
+        # The stylesheet's hover look (#assetGrid::item:hover) fades in and out: the card as it is, then hovered
+        # on top, as strong as the fade has got (ui.views.HoverFade)
+        over = QStyle.StateFlag.State_MouseOver
+        level = hover_level(option.widget, index, bool(option.state & over)) if option.state & QStyle.StateFlag.State_Enabled else 0.0
+        plain, lit = QStyleOptionViewItem(option), QStyleOptionViewItem(option)
+        plain.state &= ~(over | QStyle.StateFlag.State_HasFocus)  # (keyboard focus: ui.focus_ring's ring)
+        lit.state = (lit.state | over) & ~QStyle.StateFlag.State_HasFocus
+        if level < 1.0:
+            super().paint(painter, plain, index)
+        if level > 0.0:
+            painter.save()
+            painter.setOpacity(level)
+            super().paint(painter, lit, index)
+            painter.restore()
         marks = self._marks_for(index)
         asset = index.data(ASSET_ROLE)
         inside = asset is not None and asset.in_archive

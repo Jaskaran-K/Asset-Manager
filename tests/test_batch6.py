@@ -398,7 +398,7 @@ def test_the_menu_offers_more_like_this_and_remove_background(qapp, tmp_path, mo
     parent = QWidget()
     monkeypatch.setattr(ArtbookSender, "add_send_menu", lambda self, menu, paths, resolve=None: None)
     menu = build_asset_menu(parent, file, [file], [], actions, ArtbookSender(None, lambda *_a: None))
-    texts = {a.text(): a for a in menu.actions()}
+    texts = every_action(menu)
     texts["More Like This"].trigger()
     texts["Remove Background..."].trigger()
     assert sent == ["like", "cutout"]
@@ -490,3 +490,13 @@ def test_a_saved_ai_search_offers_the_download(qapp, tmp_path, monkeypatch):
     assert pump(qapp, lambda: asked == ["search"] and not window.search_bar.ai_on())  # (declined: it's off again)
     assert window.search_bar.edit.text() == "a skull"
     window.close()
+
+
+def every_action(menu) -> dict:
+    """A menu's entries by their text, its submenus' too (Find, Edit ...)."""
+    found = {}
+    for action in menu.actions():
+        found[action.text()] = action
+        if action.menu() is not None:
+            found.update({k: v for k, v in every_action(action.menu()).items() if k not in found})
+    return found

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from ui import shortcuts
 from ui.color_popup import ColorPopup, color_text
+from ui.controls import GhostButton, fit_popup, soft_shadow
 from ui.duotone import set_icon
 
 if TYPE_CHECKING:
@@ -140,8 +141,9 @@ class NoteBar(QFrame):
         self.setObjectName("noteBar")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(8, 5, 8, 5)
         layout.setSpacing(3)
+        soft_shadow(self)
 
         live, avoid = board.live_change, self.avoid_rect
         self.btn_color = ColorButton("text_color", "Text colour", board.set_note_text_color, live, avoid)
@@ -167,6 +169,7 @@ class NoteBar(QFrame):
         for size in FONT_SIZES:
             self.size_box.addItem(str(size), size)
         self.size_box.activated.connect(self._on_size_picked)
+        fit_popup(self.size_box)
         layout.addWidget(self.size_box)
         self.font_box = QFontComboBox()
         self.font_box.setEditable(False)
@@ -177,8 +180,8 @@ class NoteBar(QFrame):
         layout.addWidget(self.font_box)
         layout.addWidget(self._divider())
 
-        self.btn_more = QToolButton()
-        set_icon(self.btn_more, "chevron_down", size=16)
+        self.btn_more = GhostButton()
+        set_icon(self.btn_more, "more", size=16)
         self.btn_more.setToolTip("More: alignment, clear formatting")
         self.btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -211,7 +214,7 @@ class NoteBar(QFrame):
         return line
 
     def _style_button(self, letter: str, style: str, tooltip: str, handler: Callable[[], None]) -> QToolButton:
-        button = QToolButton()
+        button = GhostButton()
         button.setText(letter)
         font = QFont(button.font())
         font.setBold(style == "bold")

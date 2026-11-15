@@ -25,14 +25,12 @@ from PySide6.QtCore import (
     QPointF,
     QRect,
     QRectF,
-    QSize,
     Qt,
     QTimer,
     QUrl,
     Signal,
 )
 from PySide6.QtGui import (
-    QAction,
     QBrush,
     QColor,
     QDesktopServices,
@@ -45,7 +43,6 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
-    QPolygonF,
     QVector3D,
 )
 from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat, QOpenGLShader, QOpenGLShaderProgram
@@ -57,13 +54,13 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
-    QSplitter,
     QStackedWidget,
-    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -75,12 +72,13 @@ from core.model_uvs import UvLayout, tiles_text
 from core.obj_fast import LoadCancelled
 from core.render_scene import UNRENDERABLE
 from core.model_look import ENV_HIGH, ENV_LOW, LIGHTINGS, MATERIALS, MAX_LIGHTS, Lighting, Material, light_directions, with_roughness
-from core.settings import ALPHA_PLANE_SIDES, TILE_GRIDS, get_model_view, set_model_view
+from core.settings import ALPHA_PLANE_SIDES, TILE_GRIDS, get_model_view, get_viewer_details, set_model_view, set_viewer_details
 from core.scanner import AssetItem
 from core.tag_repository import Tag
 from core.thumbnail_manager import load_app_file_picture
 from ui import file_actions, shortcuts
 from ui.archive_jobs import UnpackJob, unpack_in_background
+from ui.controls import ComboDrop, FloatingBar, FloatingCard, bar_separator, ghost_button
 from ui.duotone import set_icon
 from ui.model_lighting import LightingControls, RoughnessBar
 from ui.render_window import RenderWindow
@@ -313,6 +311,8 @@ class Model3DViewportWidget(QOpenGLWidget):
     drag_lights_changed = Signal(bool)  # (L switches what dragging turns)
     lighting_changed = Signal()  # an HDRI arrived or was dropped: the toolbar shows what's in use
     backdrop_changed = Signal(bool)  # (B)
+    render_mode_changed = Signal(str)  # (W)
+    grid_changed = Signal(bool)  # (G)
 
     def __init__(self, mesh: Optional[Mesh3D] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -524,11 +524,13 @@ class Model3DViewportWidget(QOpenGLWidget):
         """Update viewport rendering mode ('Shaded', 'Wireframe', 'Shaded + Wireframe', 'Vertices')."""
         self.render_mode = mode
         self.update()
+        self.render_mode_changed.emit(mode)
 
     def toggle_ground_grid(self, enabled: bool) -> None:
         """Toggle ground reference grid plane."""
         self.show_grid = enabled
         self.update()
+        self.grid_changed.emit(enabled)
 
     def toggle_turntable(self, enabled: bool) -> None:
         """Toggle turntable continuous rotation."""
@@ -607,11 +609,9 @@ class Model3DViewportWidget(QOpenGLWidget):
         if shortcuts.matches("viewer3d.wireframe", event):
             modes = ["Shaded", "Wireframe", "Shaded + Wireframe"]
             cur_idx = modes.index(self.render_mode) if self.render_mode in modes else 0
-            self.render_mode = modes[(cur_idx + 1) % len(modes)]
-            self.update()
+            self.set_render_mode(modes[(cur_idx + 1) % len(modes)])
         elif shortcuts.matches("viewer3d.grid", event):
-            self.show_grid = not self.show_grid
-            self.update()
+            self.toggle_ground_grid(not self.show_grid)
         elif shortcuts.matches("viewer3d.reset", event):
             self.reset_camera()
         elif shortcuts.matches("viewer3d.drag_lights", event):
@@ -1066,17 +1066,17 @@ class Model3DViewportWidget(QOpenGLWidget):
         painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
         painter.drawText(QRectF(12, 12, badge_width, 26), Qt.AlignmentFlag.AlignCenter, badge_text)
         if self.notice:  # (an HDRI on its way, or why it can't be used)
-            painter.drawText(QRectF(14, 42, w - 90, 40), Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, self.notice)
+            painter.drawText(QRectF(14, 60, w - 90, 40), Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, self.notice)
 
         # 3. The key light's direction, top-right: a dot on a disc (hollow when it's behind)
         self._draw_light_dial(painter, QPointF(w - 40.0, 40.0), 22.0)
 
-        # 4. How to move it, bottom-right
+        # 4. How to move it, under the badge (the tools float at the bottom)
         painter.setPen(QColor(156, 163, 175, 170))
         painter.setFont(QFont("Segoe UI", 8))
         turned = "HDRI" if self.environment is not None else "lights"
         hint = f"Drag: turn   Shift+drag: {turned}   Right-drag: pan   Scroll: zoom"
-        painter.drawText(QRectF(0, h - 26, w - 12, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, hint)
+        painter.drawText(QRectF(16, 40, w - 90, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, hint)
         painter.end()
 
     def _draw_light_dial(self, painter: QPainter, center: QPointF, radius: float) -> None:
@@ -1317,6 +1317,7 @@ class ViewerTarget:
 
 
 APP_FILE_PICTURE_SIDE = 480  # the picture of a file only its app can show
+DETAILS_WIDTH = 300  # the details card / panel (Info)
 
 
 class AssetViewerDialog(QDialog):
@@ -1415,25 +1416,38 @@ class AssetViewerDialog(QDialog):
         self.header_bar = self._build_header_bar()
         main_layout.addWidget(self.header_bar)
 
-        # 2. Main Content Splitter (Viewer + Metadata Inspector)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(2)
-
+        # 2. The file, and its details (Info, Ctrl+I): a card floating at the top right, or for a video a panel
+        # beside it (a video draws in a window of its own, which would cover a card)
         self.viewport: Optional[Model3DViewportWidget] = None
         viewer_widget, metadata_dict = self._create_viewer_and_metadata()
-        splitter.addWidget(viewer_widget)
-
         self._metadata = metadata_dict
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(viewer_widget, 1)
         self.inspector_panel = self._build_inspector_panel(metadata_dict)
-        splitter.addWidget(self.inspector_panel)
-        self._splitter = splitter
-
-        splitter.setSizes([840, 260])
-        main_layout.addWidget(splitter, 1)
-
-        # 3. Bottom Action Bar
-        self.bottom_bar = self._build_bottom_bar()
-        main_layout.addWidget(self.bottom_bar)
+        self.details_card: Optional[FloatingCard] = None
+        self.details_dock: Optional[QScrollArea] = None
+        if self.video_player is not None:
+            self.details_dock = QScrollArea()
+            self.details_dock.setObjectName("detailsDock")
+            self.details_dock.setWidgetResizable(True)
+            self.details_dock.setFrameShape(QFrame.Shape.NoFrame)
+            self.details_dock.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.details_dock.setFixedWidth(DETAILS_WIDTH)
+            self.details_dock.setWidget(self.inspector_panel)
+            body_layout.addWidget(self.details_dock)
+        else:
+            self.details_card = FloatingCard(body, DETAILS_WIDTH, top=self._details_top)
+            self.details_card.set_content(self.inspector_panel)
+            if self.pdf_viewer is not None:
+                self.details_card.follow(self.pdf_viewer.splitter)  # (below the PDF's tool bars, as they settle)
+            elif self.viewport is not None:
+                self.details_card.follow(self._model_stack)
+        self._body = body
+        main_layout.addWidget(body, 1)
+        self.show_details(get_viewer_details(), remember=False)
 
         # Enter in a text box (the PDF's page box, zoom box) is for that box: no button is the
         # dialog's default, so Enter never also presses one (it opened the tag editor)
@@ -1442,55 +1456,81 @@ class AssetViewerDialog(QDialog):
             button.setDefault(False)
 
     def _build_header_bar(self) -> QWidget:
+        """The slim bar at the top: the file (name, type, size), then previous / next, Info, More (Open in
+        External App, Show in File Explorer, Copy Path), Full Screen and close."""
         header = QWidget()
         header.setObjectName("headerBar")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(16, 10, 16, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(16, 6, 10, 6)
+        layout.setSpacing(8)
 
-        # File name
         title = QLabel(self.asset.name)
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         title.setObjectName("viewerTitle")
         layout.addWidget(title)
-
-        # Format Badge
-        badge = QLabel(f" {self.asset.category_name} ")
+        badge = QLabel(self.asset.category_name)
         badge.setObjectName("formatBadge")
         layout.addWidget(badge)
-
-        # Group & Size
-        meta = QLabel(f"{self.asset.asset_group} • {self.asset.formatted_size}")
-        meta.setObjectName("toolbarLabel")
+        meta = QLabel(f"{self.asset.asset_group}  ·  {self.asset.formatted_size}")
+        meta.setObjectName("viewerMeta")
         layout.addWidget(meta)
-
         layout.addStretch(1)
 
         icon_color = self.palette().color(QPalette.ColorRole.ButtonText)
         if self._navigate is not None:
             for step, kind, tip in ((-1, "back", "Previous file (Page Up or Alt+Left)"), (1, "forward", "Next file (Page Down or Alt+Right)")):
-                button = QPushButton()
+                button = ghost_button(None, tip)
                 button.setIcon(control_icon(kind, icon_color))
-                button.setToolTip(tip)
-                button.setFixedWidth(40)
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 button.clicked.connect(lambda _checked=False, s=step: self.go(s))
                 layout.addWidget(button)
                 if step < 0 and self._position:
                     position = QLabel(self._position)
-                    position.setObjectName("toolbarLabel")
+                    position.setObjectName("viewerMeta")
                     layout.addWidget(position)
+            layout.addWidget(bar_separator(22))
+
+        self.btn_info = ghost_button("info", "Details: size, type, tags and more (Ctrl+I)", checkable=True)
+        self.btn_info.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_info.clicked.connect(lambda checked: self.show_details(checked))
+        layout.addWidget(self.btn_info)
+
+        self.btn_more = ghost_button("more", "More: Open in External App, Show in File Explorer, Copy Path")
+        self.btn_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more = QMenu(self.btn_more)
+        more.setToolTipsVisible(True)
+        for text, icon, tip, slot in (
+            ("Open in External App", "window", "Open the file in the program Windows uses for it", self._open_external),
+            ("Show in File Explorer", "folder", "Open its folder in File Explorer with the file selected", self._reveal_in_explorer),
+            ("Copy Path", "copy", "Copy the file's full path to the clipboard", self._copy_path),
+        ):
+            action = more.addAction(text)
+            set_icon(action, icon)
+            action.setToolTip(tip)
+            action.triggered.connect(slot)
+        self.btn_more.setMenu(more)
+        layout.addWidget(self.btn_more)
 
         self._fullscreen_icons = (control_icon("fullscreen", icon_color), control_icon("exit_fullscreen", icon_color))
-        fullscreen = self.isFullScreen()
-        self.btn_fullscreen = QPushButton(" Exit Full Screen" if fullscreen else " Full Screen")
-        self.btn_fullscreen.setIcon(self._fullscreen_icons[1 if fullscreen else 0])
-        self.btn_fullscreen.setToolTip("Toggle full screen (F11)")
+        self.btn_fullscreen = ghost_button(None, "")
         self.btn_fullscreen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
+        self._show_fullscreen_button(self.isFullScreen())
         layout.addWidget(self.btn_fullscreen)
-
+        layout.addWidget(bar_separator(22))
+        btn_close = ghost_button("close", "Close the viewer (Esc)", size=14, tone="text")
+        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close)
         return header
+
+    def _show_fullscreen_button(self, fullscreen: bool) -> None:
+        self.btn_fullscreen.setIcon(self._fullscreen_icons[1 if fullscreen else 0])
+        self.btn_fullscreen.setToolTip("Leave full screen (F11 or Esc)" if fullscreen else "Full screen (F11)")
+
+    def _copy_path(self) -> None:
+        QGuiApplication.clipboard().setText(str(self.asset.path))
 
     def _create_viewer_and_metadata(self) -> tuple[QWidget, dict[str, str]]:
         """Instantiate the specialized viewer widget and gather metadata dictionary."""
@@ -1507,9 +1547,10 @@ class AssetViewerDialog(QDialog):
             "Modified": self.asset.formatted_modified_time,
             "Location": str(self.asset.path.parent),
         }
-        self.btn_tile: Optional[QPushButton] = None  # (an image's tools: _add_image_tools)
-        self.btn_uv: Optional[QPushButton] = None  # (a model's UVs: _add_uv_controls)
-        self.btn_render: Optional[QPushButton] = None  # (a model from a file can be rendered)
+        self.btn_tile: Optional[QToolButton] = None  # (an image's tools: _add_image_tools)
+        self.btn_uv: Optional[QToolButton] = None  # (a model's UVs: _add_uv_controls)
+        self.btn_render: Optional[QToolButton] = None  # (a model from a file can be rendered)
+        self.model_tools: Optional[FloatingBar] = None  # (a model's, or an alpha's 3D surface's: _build_model_tools)
         self._btn_open_app = self._app_status = None
         member = self.asset.archive
         if member is not None:
@@ -1545,7 +1586,7 @@ class AssetViewerDialog(QDialog):
             self._load_model(viewport)
             self._model_stack = QStackedWidget()  # (the model, and its UVs once they're asked for)
             self._model_stack.addWidget(viewport)
-            layout.addWidget(self._build_model_toolbar(viewport, has_uvs=True))
+            self.model_tools = self._build_model_tools(viewport, self._model_stack, has_uvs=True)
             layout.addWidget(self._model_stack, 1)
 
         # Case B: Texture / Image Viewer (decoded on a worker thread: a big one takes seconds)
@@ -1554,42 +1595,33 @@ class AssetViewerDialog(QDialog):
             self.tex_viewer = tex_viewer
             self._load_image(tex_viewer)
 
-            # Texture Control Toolbar
-            t_toolbar = QWidget()
-            t_toolbar.setObjectName("viewerToolbar")
-            tb_layout = QHBoxLayout(t_toolbar)
-            tb_layout.setContentsMargins(8, 4, 8, 4)
-            tb_layout.setSpacing(8)
-
-            btn_fit = QPushButton("Fit Screen")
-            btn_fit.setToolTip("Fit the whole image in the window")
-            btn_fit.clicked.connect(tex_viewer.fit_to_screen)
-            tb_layout.addWidget(btn_fit)
-
-            btn_100 = QPushButton("100% (1:1)")
-            btn_100.setToolTip("Show the image at its real size: one image pixel per screen pixel")
-            btn_100.clicked.connect(tex_viewer.set_actual_size)
-            tb_layout.addWidget(btn_100)
-
-            btn_checker = QPushButton("Checkerboard")
-            btn_checker.setCheckable(True)
-            btn_checker.setChecked(tex_viewer.show_checkerboard)
-            self._btn_checker = btn_checker  # (on once the image turns out to have transparency)
-            btn_checker.setToolTip("Check Transparency")
-            btn_checker.toggled.connect(tex_viewer.toggle_checkerboard)
-            tb_layout.addWidget(btn_checker)
-            self._add_image_tools(t_toolbar, tb_layout, tex_viewer, path)
-
-            tb_layout.addStretch(1)
-            hint_lbl = QLabel("Scroll to zoom • Drag to pan")
-            hint_lbl.setObjectName("hintLabel")
-            tb_layout.addWidget(hint_lbl)
-
-            layout.addWidget(t_toolbar)
             # The flat image, and (an alpha's, once asked for) its 3D surface
+            image_area = QWidget()
+            area_layout = QVBoxLayout(image_area)
+            area_layout.setContentsMargins(0, 0, 0, 0)
             self._image_stack = QStackedWidget()
             self._image_stack.addWidget(tex_viewer)
-            layout.addWidget(self._image_stack, 1)
+            area_layout.addWidget(self._image_stack)
+            layout.addWidget(image_area, 1)
+
+            # Its tools, floating at the bottom of the picture (they fade while the mouse is still)
+            self.image_tools = FloatingBar(image_area, gap=18)
+            row = self.image_tools.row
+            btn_fit = ghost_button("fit", "Fit the whole image in the window (scroll to zoom, drag to pan)")
+            btn_fit.clicked.connect(tex_viewer.fit_to_screen)
+            row.addWidget(btn_fit)
+            btn_100 = ghost_button(None, "Show the image at its real size: one image pixel per screen pixel", "1:1")
+            btn_100.clicked.connect(tex_viewer.set_actual_size)
+            row.addWidget(btn_100)
+            row.addWidget(bar_separator(20))
+            btn_checker = ghost_button("checker", "Checkerboard: see where it's transparent", checkable=True)
+            btn_checker.setChecked(tex_viewer.show_checkerboard)
+            self._btn_checker = btn_checker  # (on once the image turns out to have transparency)
+            btn_checker.toggled.connect(tex_viewer.toggle_checkerboard)
+            row.addWidget(btn_checker)
+            self._add_image_tools(self.image_tools, row, tex_viewer, path)
+            self.image_tools.reveal()
+            self.image_tools.fade_when_idle(tex_viewer)
 
         # Case C: Document (PDF) Viewer
         elif self.asset.is_document:
@@ -1680,122 +1712,167 @@ class AssetViewerDialog(QDialog):
         run_job(lambda: model_reader.read_mesh(path, should_stop=stop.is_set), done, failed)  # (in the model reader)
 
     def _refresh_inspector(self) -> None:
-        sizes = self._splitter.sizes()
-        old = self.inspector_panel
         self.inspector_panel = self._build_inspector_panel(self._metadata)
-        self._splitter.replaceWidget(1, self.inspector_panel)
-        old.deleteLater()
-        self._splitter.setSizes(sizes)
+        if self.details_card is not None:
+            self.details_card.set_content(self.inspector_panel)
+        elif self.details_dock is not None:
+            old = self.details_dock.takeWidget()
+            self.details_dock.setWidget(self.inspector_panel)
+            if old is not None:
+                old.deleteLater()
 
-    def _build_model_toolbar(self, viewport: Model3DViewportWidget, has_uvs: bool = False) -> QWidget:
-        """Shading, material, colour, lighting, what dragging turns, and (a model from a file) its UVs."""
-        v_toolbar = QWidget()
-        v_toolbar.setObjectName("viewerToolbar")
-        rows = QVBoxLayout(v_toolbar)
-        rows.setContentsMargins(8, 4, 8, 4)
-        rows.setSpacing(4)
-        tb_layout = QHBoxLayout()
-        tb_layout.setSpacing(8)
-        rows.addLayout(tb_layout)
-        tools = QHBoxLayout()  # (a second row: one is too wide for the window, and squeezes the details beside it)
-        tools.setSpacing(8)
-        rows.addLayout(tools)
+    def _details_top(self) -> int:
+        """Where the details card starts: below the view's own tool bars (a model's, a PDF's)."""
+        canvas = None
+        if self.pdf_viewer is not None:
+            canvas = self.pdf_viewer.splitter
+        elif self.viewport is not None:
+            canvas = self._model_stack
+        if canvas is None or not shiboken6.isValid(canvas) or not self._body.isAncestorOf(canvas):
+            return 0
+        return max(0, canvas.mapTo(self._body, QPoint(0, 0)).y())
 
-        cb_mode = QComboBox()
+    def show_details(self, shown: bool, remember: bool = True) -> None:
+        """The file's details (Info, Ctrl+I); remembered for the next file and the next time."""
+        self.btn_info.setChecked(shown)
+        if self.details_card is not None:
+            if shown:
+                self.details_card.reveal()
+            else:
+                self.details_card.conceal()
+        elif self.details_dock is not None:
+            self.details_dock.setVisible(shown)
+        if remember:
+            set_viewer_details(shown)
+
+    def _build_model_tools(self, viewport: Model3DViewportWidget, host: QWidget, has_uvs: bool = False,
+                           tune_extra: Optional[QWidget] = None, leading: Sequence[QWidget] = ()) -> FloatingBar:
+        """The model's tools, floating at the bottom of host and fading while the mouse is still over it: how it's
+        drawn, its material (and colour), the lighting; what dragging turns, the grid, Auto Rotate, Reset; and for a
+        model from a file, UVs and Render. Just above them, only while they apply: metal's Roughness, an HDRI's
+        Exposure and Backdrop, and tune_extra (an alpha's Height, Invert and detail). leading: put first."""
+        tools = FloatingBar(host, gap=18)
+        row = tools.row
+        for widget in leading:
+            row.addWidget(widget)
+        choices = QWidget(tools)  # (the choices themselves: combos, hidden, shown by the dropdowns)
+        choices.hide()
+
+        cb_mode = QComboBox(choices)
         cb_mode.addItems(["Shaded", "Wireframe", "Shaded + Wireframe", "Vertices"])
-        cb_mode.setToolTip("How the model is drawn (W cycles shaded / wireframe / both)")
         cb_mode.currentTextChanged.connect(viewport.set_render_mode)
-        tb_layout.addWidget(cb_mode)
+        drop_mode = ComboDrop(cb_mode, "shading", "How the model is drawn (W cycles shaded / wireframe / both)")
 
-        self.cmb_material = QComboBox()
+        def mode_changed(mode: str) -> None:  # (W)
+            cb_mode.blockSignals(True)
+            cb_mode.setCurrentText(mode)
+            cb_mode.blockSignals(False)
+            drop_mode.sync()
+
+        viewport.render_mode_changed.connect(mode_changed)
+        row.addWidget(drop_mode)
+
+        self.cmb_material = QComboBox(choices)
         for material_id, material in MATERIALS.items():
             self.cmb_material.addItem(material.label, material_id)
             self.cmb_material.setItemData(self.cmb_material.count() - 1, material.tip, Qt.ItemDataRole.ToolTipRole)
         self.cmb_material.setCurrentIndex(self.cmb_material.findData(viewport.material_id))
-        self.cmb_material.setToolTip("The material: how the surface takes the light")
-        tb_layout.addWidget(self.cmb_material)
+        self.btn_model_color = ComboDrop(
+            self.cmb_material, _swatch_icon(viewport.color),
+            "The material: how the surface takes the light. Colour... sets the model's colour (remembered for every model)",
+            extra=[("Colour...", lambda: self._pick_model_color(viewport))],
+        )
+        self.action_model_color = self.btn_model_color.extra_actions[0]
+        row.addWidget(self.btn_model_color)
 
-        self.btn_model_color = QPushButton()
-        self.btn_model_color.setToolTip("The model's colour (remembered for every model)")
-        self.btn_model_color.setIconSize(QSize(18, 18))
-        self.btn_model_color.setIcon(_swatch_icon(viewport.color))
-        self.btn_model_color.clicked.connect(lambda: self._pick_model_color(viewport))
-        tb_layout.addWidget(self.btn_model_color)
+        # Above the tools: what the look has to tune now (none of it while the UVs are shown)
+        tune = FloatingBar(host, gap=18)
+        tune.stack_on(tools)
+        self._look_details = look = QWidget(tune.frame)
+        details = QHBoxLayout(look)
+        details.setContentsMargins(0, 0, 0, 0)
+        details.setSpacing(14)
+        if tune_extra is not None:
+            details.addWidget(tune_extra)
+        self.roughness_bar = roughness_bar = RoughnessBar(viewport, look)  # (shows on metal)
+        details.addWidget(roughness_bar)
+        self.cmb_lighting = QComboBox(choices)
+        self.lighting_controls = lighting = LightingControls(viewport, self.cmb_lighting, look, self._hdri_assets)
+        details.addWidget(lighting.bar)  # (shows while an HDRI is in use)
+        tune.row.addWidget(look)
 
-        self.cmb_lighting = QComboBox()
-        self._look_details = QWidget(v_toolbar)  # (what applies to the look now: none of it to UVs)
-        self.lighting_controls = LightingControls(viewport, self.cmb_lighting, self._look_details, self._hdri_assets)
-        tb_layout.addWidget(self.cmb_lighting)
+        def update_tune(*_args) -> None:
+            parts = (tune_extra, roughness_bar, lighting.bar)
+            wanted = not look.isHidden() and any(part is not None and not part.isHidden() for part in parts)
+            if wanted and tune.showing():
+                tune.place()  # (what's in it changed)
+            tune.set_wanted(wanted)
 
-        self.btn_drag_lights = QPushButton("Turn Lights")
-        set_icon(self.btn_drag_lights, "light")
-        self.btn_drag_lights.setCheckable(True)
-        self.btn_drag_lights.setToolTip(
-            "On: dragging turns the lights or the HDRI round the model. Off: it turns the model (L; or hold Shift while dragging)"
+        drop_lighting = ComboDrop(self.cmb_lighting, "light", "The lighting: a preset, or an HDRI from your library (or Browse...)")
+        viewport.lighting_changed.connect(drop_lighting.sync)
+        viewport.lighting_changed.connect(update_tune)
+        self.cmb_lighting.currentIndexChanged.connect(update_tune)
+        row.addWidget(drop_lighting)
+        separators = [bar_separator(20)]
+        row.addWidget(separators[0])
+
+        self.btn_drag_lights = ghost_button(
+            "turn_light", "Turn Lights. On: dragging turns the lights or the HDRI round the model. "
+                          "Off: it turns the model (L; or hold Shift while dragging)", checkable=True,
         )
         self.btn_drag_lights.toggled.connect(viewport.set_drag_lights)
         viewport.drag_lights_changed.connect(self.btn_drag_lights.setChecked)
-        tb_layout.addWidget(self.btn_drag_lights)
+        row.addWidget(self.btn_drag_lights)
 
-        btn_grid = QPushButton("Grid")
-        set_icon(btn_grid, "grid")
-        btn_grid.setCheckable(True)
-        btn_grid.setChecked(True)
-        btn_grid.setToolTip("Toggle the ground grid (G)")
+        btn_grid = ghost_button("grid", "The ground grid (G)", checkable=True)
+        btn_grid.setChecked(viewport.show_grid)
         btn_grid.toggled.connect(viewport.toggle_ground_grid)
-        tb_layout.addWidget(btn_grid)
+        viewport.grid_changed.connect(btn_grid.setChecked)
+        row.addWidget(btn_grid)
 
-        btn_turntable = QPushButton("Auto Rotate")
-        set_icon(btn_turntable, "play")
-        btn_turntable.setToolTip("Spin the model slowly to see it from every side")
-        btn_turntable.setCheckable(True)
+        self.btn_turntable = btn_turntable = ghost_button("turntable", "Auto Rotate: spin the model slowly to see it from every side",
+                                                          checkable=True)
 
-        def on_turntable_toggled(checked: bool):
+        def on_turntable_toggled(checked: bool) -> None:
             viewport.toggle_turntable(checked)
-            btn_turntable.setText("Pause" if checked else "Auto Rotate")
-            set_icon(btn_turntable, "pause" if checked else "play")
+            set_icon(btn_turntable, "pause" if checked else "turntable", size=18)
+            btn_turntable.setToolTip("Stop spinning" if checked else "Auto Rotate: spin the model slowly to see it from every side")
 
         btn_turntable.toggled.connect(on_turntable_toggled)
-        tb_layout.addStretch(1)
-        tools.addWidget(btn_turntable)
+        row.addWidget(btn_turntable)
 
-        btn_reset = QPushButton("Reset View")
-        set_icon(btn_reset, "refresh")
-        btn_reset.setToolTip("Reset the camera and the lights (R resets the camera)")
+        btn_reset = ghost_button("refresh", "Reset the camera and the lights (R resets the camera)")
         btn_reset.clicked.connect(viewport.reset_camera)
         btn_reset.clicked.connect(viewport.reset_lights)
-        tools.addWidget(btn_reset)
-
-        details = QHBoxLayout(self._look_details)
-        details.setContentsMargins(0, 0, 0, 0)
-        details.setSpacing(16)
-        self.roughness_bar = RoughnessBar(viewport, self._look_details)  # (shows on metal)
-        details.addWidget(self.roughness_bar)
-        details.addWidget(self.lighting_controls.bar)  # (shows while an HDRI is in use)
-        details.addStretch(1)
-        tools.addStretch(1)
-        rows.addWidget(self._look_details)  # (a row of its own: with the tools, it squeezes the details panel beside it)
+        row.addWidget(btn_reset)
         material_combo = self.cmb_material
 
         def material_picked(_index: int) -> None:
             viewport.set_material(material_combo.currentData())
-            self.roughness_bar.show_for_material()
+            roughness_bar.show_for_material()
+            update_tune()
             self._update_render_button()
 
         material_combo.currentIndexChanged.connect(material_picked)
-        self.roughness_bar.show_for_material()
+        roughness_bar.show_for_material()
 
         self.btn_uv = self.btn_render = None
         if has_uvs:
-            self.btn_render = QPushButton("Render")
-            set_icon(self.btn_render, "render")
+            separators.append(bar_separator(20))
+            row.addWidget(separators[-1])
+            self.btn_render = ghost_button("render", "", "Render")
             self.btn_render.clicked.connect(self._open_render_window)
-            tools.insertWidget(0, self.btn_render)
-            self._add_uv_controls(tools, btn_reset, v_toolbar,
-                                  [cb_mode, material_combo, self.btn_model_color, self.cmb_lighting, self.btn_drag_lights, btn_grid, btn_turntable,
-                                   self.btn_render])
+            self._add_uv_controls(tools, btn_reset, [
+                cb_mode, drop_mode, material_combo, self.btn_model_color, self.cmb_lighting, drop_lighting, *separators,
+                self.btn_drag_lights, btn_grid, btn_turntable, self.btn_render,
+            ])
+            row.addWidget(self.btn_render)
             self._update_render_button()
-        return v_toolbar
+        self._update_tune = update_tune
+        update_tune()
+        tools.reveal()
+        tools.fade_when_idle(viewport)
+        return tools
 
     # ------------------------------------------------------------------
     # Rendering (ui.render_window)
@@ -1828,29 +1905,32 @@ class AssetViewerDialog(QDialog):
     # ------------------------------------------------------------------
     # A model's UVs (core.model_uvs): read the first time they're asked for
     # ------------------------------------------------------------------
-    def _add_uv_controls(self, row: QHBoxLayout, btn_reset: QPushButton, toolbar: QWidget, model_only: list[QWidget]) -> None:
+    def _add_uv_controls(self, tools: FloatingBar, btn_reset: QToolButton, model_only: list[QWidget]) -> None:
+        """UV (and, while it's on, the UV set when there's more than one); model_only: what's hidden meanwhile."""
         self.uv_view: Optional[UvViewWidget] = None
         self._uv_stop: Optional[threading.Event] = None
         self._uv_set_names: list[str] = []
         self._model_only_controls = model_only
-        self.btn_uv = QPushButton("UV")
-        set_icon(self.btn_uv, "uv")
-        self.btn_uv.setCheckable(True)
-        self.btn_uv.setToolTip("See the model's UV layout: its polygons flat, with the UDIM tiles they're in (U)")
+        self.btn_uv = ghost_button("uv", "UVs: the model's UV layout, its polygons flat, with the UDIM tiles they're in (U)",
+                                   checkable=True)
         self.btn_uv.toggled.connect(self._show_uvs)
-        row.insertWidget(0, self.btn_uv)
-        self.cmb_uv_set = QComboBox(toolbar)
-        self.cmb_uv_set.setToolTip("Which of the model's UV sets to show")
-        self.cmb_uv_set.hide()
+        self.cmb_uv_set = QComboBox(tools)
         self.cmb_uv_set.activated.connect(self._read_uvs)
-        row.insertWidget(row.count() - 1, self.cmb_uv_set)  # (before the stretch)
+        self.uv_set_drop = ComboDrop(self.cmb_uv_set, None, "Which of the model's UV sets to show")
+        self.uv_set_drop.hide()
+        row = tools.row
+        row.insertWidget(row.indexOf(btn_reset), self.uv_set_drop)
+        row.addWidget(self.btn_uv)
         btn_reset.clicked.connect(self._fit_uvs)
 
     def _show_uvs(self, on: bool) -> None:
-        """Between the model and its UVs (read the first time)."""
+        """Between the model and its UVs (read the first time). The tools show only what works on what's shown."""
         for control in self._model_only_controls:
             control.setEnabled(not on)
+            if not isinstance(control, QComboBox):  # (the combos stay hidden: the dropdowns show them)
+                control.setVisible(not on)
         self._look_details.setVisible(not on)
+        self._update_tune()
         if on:
             if self.uv_view is None:
                 self.uv_view = UvViewWidget()
@@ -1861,8 +1941,9 @@ class AssetViewerDialog(QDialog):
         else:
             self._model_stack.setCurrentWidget(self.viewport)
             self.viewport.setFocus()
-        self.cmb_uv_set.setVisible(on and len(self._uv_set_names) > 1)
+        self.uv_set_drop.setVisible(on and len(self._uv_set_names) > 1)
         self._update_render_button()
+        self.model_tools.reveal()  # (placed for what's in it now, and on top of the page shown)
 
     def _fit_uvs(self) -> None:
         if self.uv_view is not None:
@@ -1911,7 +1992,10 @@ class AssetViewerDialog(QDialog):
             combo.clear()
             combo.addItems([f"{number + 1}: {name}" for number, name in enumerate(layout.set_names)])  # (sets can share a name)
             combo.setCurrentIndex(layout.set_index)
-        combo.setVisible(len(layout.set_names) > 1 and self.btn_uv.isChecked())
+        self.uv_set_drop.sync()
+        self.uv_set_drop.setVisible(len(layout.set_names) > 1 and self.btn_uv.isChecked())
+        if self.model_tools.showing():
+            self.model_tools.place()
         self._refresh_inspector()
 
     # ------------------------------------------------------------------
@@ -1925,21 +2009,22 @@ class AssetViewerDialog(QDialog):
         self._alpha_token = 0
         view = get_model_view()
 
-        self.btn_tile = QPushButton("Tile")
-        set_icon(self.btn_tile, "tile")
-        self.btn_tile.setCheckable(True)
-        self.btn_tile.setToolTip("Show the image repeated, edge to edge, to check its seams (T)")
+        self.btn_tile = ghost_button("tile", "Show the image repeated, edge to edge, to check its seams (T)", checkable=True)
         layout.addWidget(self.btn_tile)
         self.tile_choice = QButtonGroup(toolbar)
+        tile_buttons = []
         for tiles in TILE_GRIDS:
-            button = QPushButton(f"{tiles}×{tiles}")
-            button.setCheckable(True)
+            button = ghost_button(None, f"Tile {tiles} × {tiles}", f"{tiles}×{tiles}", checkable=True)
             button.setChecked(tiles == view["tile"])
-            button.setToolTip(f"Tile {tiles} × {tiles}")
             self.tile_choice.addButton(button, tiles)
             layout.addWidget(button)
+            tile_buttons.append(button)
 
         def apply_tiles() -> None:
+            for button in tile_buttons:  # (the sizes show only while Tile is on)
+                button.setVisible(self.btn_tile.isChecked())
+            if isinstance(toolbar, FloatingBar) and not toolbar.isHidden():
+                toolbar.place()
             tex_viewer.set_tiles(self.tile_choice.checkedId() if self.btn_tile.isChecked() else 1)
 
         def tiles_picked(tiles: int) -> None:
@@ -1951,11 +2036,11 @@ class AssetViewerDialog(QDialog):
 
         self.btn_tile.toggled.connect(lambda _checked: apply_tiles())
         self.tile_choice.idClicked.connect(tiles_picked)
+        for button in tile_buttons:
+            button.setVisible(False)
 
-        self.btn_3d = QPushButton("3D")
-        set_icon(self.btn_3d, "cube")
-        self.btn_3d.setCheckable(True)
-        self.btn_3d.setToolTip("See this alpha as a 3D surface, with the 3D viewer's materials and lights (3)")
+        self.btn_3d = ghost_button("cube", "See this alpha as a 3D surface, with the 3D viewer's materials and lights (3)",
+                                   "3D", checkable=True)
         self.btn_3d.toggled.connect(self._show_alpha_3d)
         self.btn_3d.hide()
         layout.addWidget(self.btn_3d)
@@ -1965,6 +2050,8 @@ class AssetViewerDialog(QDialog):
         def detected(is_alpha: bool) -> None:
             if is_alpha and self.asset is asset and shiboken6.isValid(self.btn_3d):
                 self.btn_3d.show()
+                if isinstance(toolbar, FloatingBar) and not toolbar.isHidden():
+                    toolbar.place()
 
         run_job(lambda: alphas.detect(path, name), detected)
 
@@ -1975,10 +2062,16 @@ class AssetViewerDialog(QDialog):
                 self._alpha_page = self._build_alpha_page()
                 self._image_stack.addWidget(self._alpha_page)
                 self._load_alpha_mesh()
+            self._alpha_back.blockSignals(True)
+            self._alpha_back.setChecked(True)
+            self._alpha_back.blockSignals(False)
+            self.image_tools.conceal()  # (the surface's own tools take their place)
             self._image_stack.setCurrentWidget(self._alpha_page)
+            self.model_tools.reveal()
             self._alpha_viewport.setFocus()
         else:
             self._image_stack.setCurrentWidget(self.tex_viewer)
+            self.image_tools.reveal()
             self.tex_viewer.setFocus()
 
     def _build_alpha_page(self) -> QWidget:
@@ -1990,37 +2083,31 @@ class AssetViewerDialog(QDialog):
         viewport.set_status(f"Making a 3D surface of {self.asset.name}...")
         self._alpha_viewport = viewport
 
-        bar = QWidget()
-        bar.setObjectName("viewerToolbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(8, 4, 8, 4)
-        row.setSpacing(8)
+        settings = QWidget()  # (above the tools, with the material's)
+        row = QHBoxLayout(settings)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
         label = QLabel("Height")
         label.setObjectName("toolbarLabel")
         row.addWidget(label)
         self.slider_alpha_height = QSlider(Qt.Orientation.Horizontal)
         self.slider_alpha_height.setRange(1, 60)
         self.slider_alpha_height.setValue(15)  # (x 1/100 of the longest side)
-        self.slider_alpha_height.setFixedWidth(160)
+        self.slider_alpha_height.setFixedWidth(120)
         self.slider_alpha_height.setToolTip("How high the white parts rise")
         row.addWidget(self.slider_alpha_height)
-        self.btn_alpha_invert = QPushButton("Invert")
-        set_icon(self.btn_alpha_invert, "invert")
-        self.btn_alpha_invert.setCheckable(True)
-        self.btn_alpha_invert.setToolTip("Turn the heights upside down: for alphas made the other way round (I)")
+        self.btn_alpha_invert = ghost_button("invert", "Invert: turn the heights upside down, for alphas made the other way round (I)",
+                                             checkable=True)
         row.addWidget(self.btn_alpha_invert)
-        self.alpha_detail = QButtonGroup(bar)
+        row.addWidget(bar_separator(18))
+        self.alpha_detail = QButtonGroup(settings)
         for side in ALPHA_PLANE_SIDES:
-            button = QPushButton(f"{side} px")
-            button.setCheckable(True)
+            button = ghost_button(None, f"Detail: {side} points along the longest side "
+                                  + ("(smooth and instant)" if side == ALPHA_PLANE_SIDES[0] else "(finer, for close looks: about 2 million triangles)"),
+                                  f"{side} px", checkable=True)
             button.setChecked(side == get_model_view()["alpha_plane"])
-            button.setToolTip(
-                f"Detail: {side} points along the longest side "
-                + ("(smooth and instant)" if side == ALPHA_PLANE_SIDES[0] else "(finer, for close looks: about 2 million triangles)")
-            )
             self.alpha_detail.addButton(button, side)
             row.addWidget(button)
-        row.addStretch(1)
 
         rebuild = QTimer(page)  # (a slider drag rebuilds once it pauses, not on every step)
         rebuild.setSingleShot(True)
@@ -2034,9 +2121,10 @@ class AssetViewerDialog(QDialog):
             self._load_alpha_mesh()
 
         self.alpha_detail.idClicked.connect(detail_picked)
-        layout.addWidget(bar)
-        layout.addWidget(self._build_model_toolbar(viewport))
         layout.addWidget(viewport, 1)
+        self._alpha_back = ghost_button("cube", "Back to the flat image (3)", "3D", checkable=True)
+        self._alpha_back.toggled.connect(lambda on: on or self.btn_3d.setChecked(False))
+        self.model_tools = self._build_model_tools(viewport, page, tune_extra=settings, leading=[self._alpha_back, bar_separator(20)])
         return page
 
     def _load_alpha_mesh(self) -> None:
@@ -2078,7 +2166,8 @@ class AssetViewerDialog(QDialog):
 
         def changed(color: QColor) -> None:
             viewport.set_color(color, remember=False)
-            self.btn_model_color.setIcon(_swatch_icon(viewport.color))
+            if shiboken6.isValid(self.btn_model_color):
+                self.btn_model_color.setIcon(_swatch_icon(viewport.color))
 
         popup.changed.connect(changed)
         popup.default_picked.connect(lambda: changed(QColor(DEFAULT_COLOR)))
@@ -2087,35 +2176,17 @@ class AssetViewerDialog(QDialog):
         popup.show_beside(QRect(button.mapToGlobal(QPoint(0, 0)), button.size()))
 
     def _build_inspector_panel(self, metadata: dict[str, str]) -> QWidget:
-        """Construct sidebar listing metadata details."""
-        panel = QWidget()
-        panel.setObjectName("infoPanel")
-        outer = QVBoxLayout(panel)
-        outer.setContentsMargins(0, 0, 0, 0)
-        # (it scrolls: a model's details and the file's tags are taller than a small window)
-        scroll = QScrollArea()
-        scroll.setObjectName("infoPanelScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.viewport().setAutoFillBackground(False)
+        """The file's details (the card or panel that holds them scrolls when they're taller than the window)."""
         contents = QWidget()
         contents.setObjectName("infoPanelContents")
         layout = QVBoxLayout(contents)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-        scroll.setWidget(contents)
-        outer.addWidget(scroll)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(8)
 
-        header = QLabel("METADATA INSPECTOR")
-        header.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        header = QLabel("DETAILS")
+        header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         header.setObjectName("inspectorHeader")
         layout.addWidget(header)
-
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setObjectName("inspectorLine")
-        layout.addWidget(line)
 
         for key, val in metadata.items():
             prop_box = QVBoxLayout()
@@ -2137,7 +2208,7 @@ class AssetViewerDialog(QDialog):
             layout.addWidget(self._build_tags_section())
 
         layout.addStretch(1)
-        return panel
+        return contents
 
     def _build_tags_section(self) -> QWidget:
         section = QWidget()
@@ -2168,40 +2239,6 @@ class AssetViewerDialog(QDialog):
         old.deleteLater()
         self._tag_cloud_holder.addWidget(tag_chip_cloud(updated))
 
-    def _build_bottom_bar(self) -> QWidget:
-        """Construct bottom action bar."""
-        bar = QWidget()
-        bar.setObjectName("bottomBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(10)
-
-        btn_open = QPushButton("Open in External App")
-        btn_open.setToolTip("Open the file in the program Windows uses for it")
-        btn_open.clicked.connect(self._open_external)
-        layout.addWidget(btn_open)
-
-        btn_explorer = QPushButton("Show in File Explorer")
-        btn_explorer.setToolTip("Open its folder in File Explorer with the file selected")
-        btn_explorer.clicked.connect(self._reveal_in_explorer)
-        layout.addWidget(btn_explorer)
-
-        btn_copy = QPushButton("Copy Path")
-        btn_copy.setToolTip("Copy the file's full path to the clipboard")
-        btn_copy.clicked.connect(
-            lambda: QGuiApplication.clipboard().setText(str(self.asset.path))
-        )
-        layout.addWidget(btn_copy)
-
-        layout.addStretch(1)
-
-        btn_close = QPushButton("Close")
-        btn_close.setToolTip("Close the viewer (Esc)")
-        btn_close.clicked.connect(self.accept)
-        layout.addWidget(btn_close)
-
-        return bar
-
     # ------------------------------------------------------------------
     # Full screen
     # ------------------------------------------------------------------
@@ -2216,12 +2253,10 @@ class AssetViewerDialog(QDialog):
         if not self.isFullScreen():
             self._state_before_fullscreen = self.windowState() & ~Qt.WindowState.WindowFullScreen
             self.showFullScreen()
-        self.btn_fullscreen.setText(" Exit Full Screen")
-        self.btn_fullscreen.setIcon(self._fullscreen_icons[1])
+        self._show_fullscreen_button(True)
 
     def _leave_fullscreen(self) -> None:
-        self.btn_fullscreen.setText(" Full Screen")
-        self.btn_fullscreen.setIcon(self._fullscreen_icons[0])
+        self._show_fullscreen_button(False)
         if self._state_before_fullscreen & Qt.WindowState.WindowMaximized:
             self.showMaximized()
         else:
@@ -2229,8 +2264,9 @@ class AssetViewerDialog(QDialog):
 
     def _on_video_fullscreen(self, enabled: bool) -> None:
         """Video-only full screen: hide the viewer's own chrome around the player."""
-        for widget in (self.header_bar, self.inspector_panel, self.bottom_bar):
-            widget.setVisible(not enabled)
+        self.header_bar.setVisible(not enabled)
+        if self.details_dock is not None:
+            self.details_dock.setVisible(not enabled and self.btn_info.isChecked())
         if enabled:
             self._was_fullscreen_for_video = self.isFullScreen()
             self._enter_fullscreen()
@@ -2255,6 +2291,8 @@ class AssetViewerDialog(QDialog):
                 self.video_player.set_fullscreen(False)
             else:
                 self._leave_fullscreen()
+        elif shortcuts.matches("viewer.info", event):
+            self.show_details(not self.btn_info.isChecked())
         elif shortcuts.matches("viewer.open_app", event) and self._btn_open_app is not None:
             self._btn_open_app.click()
         elif shortcuts.matches("viewer3d.uv", event) and self.btn_uv is not None:

@@ -206,7 +206,7 @@ def test_hovered_row_is_highlighted(qapp):
     pos = QPointF(rect.center())
     QApplication.sendEvent(viewport, QHoverEvent(QEvent.Type.HoverEnter, pos, viewport.mapToGlobal(pos), QPointF(-1, -1)))
     QApplication.sendEvent(viewport, QHoverEvent(QEvent.Type.HoverMove, pos, viewport.mapToGlobal(pos), pos))
-    qapp.processEvents()
+    pump(qapp, 0.35)  # (the hover fades in: ui.views.HoverFade)
     image = viewport.grab().toImage()
     x = rect.right() - 12  # past the text, on the row's own background
     hovered = image.pixelColor(x, rect.center().y())

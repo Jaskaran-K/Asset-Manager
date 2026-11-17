@@ -30,7 +30,7 @@ BROWSERS = (
 class BrowserLinkWorker(QObject):
     """Listens for the browser helper (core.browser_link.AppLink); arrived is emitted on the link's thread."""
 
-    arrived = Signal(dict)  # {"op": "artbook"} or {"op": "library", "path": ...}
+    arrived = Signal(dict)  # {"op": "artbook"}, {"op": "unsorted"} or {"op": "library", "path": ...}
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -52,7 +52,7 @@ class BrowserLinkWorker(QObject):
 
     def _on_message(self, message: dict[str, Any]) -> dict[str, Any]:
         """(The link's thread.) The reply names the Artbook page pictures go on."""
-        if message.get("op") in ("artbook", "library"):
+        if message.get("op") in ("artbook", "unsorted", "library"):
             self.arrived.emit(dict(message))
         return {"ok": True, "page": page_name(get_artbook_page())}
 

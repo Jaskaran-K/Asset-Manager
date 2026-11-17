@@ -1,38 +1,51 @@
-// Asset Manager's browser extension (Chrome, Opera GX): right-click a picture > Asset Manager >
-// Save to Library / Add to Artbook Page.
+// Asset Manager's browser extension (Chrome, Opera GX). Right-click a picture > Asset Manager > Save to Library /
+// Add to Artbook: Current Page / Add to Artbook: Unsorted. Right-click a page (or a link on it) > Asset Manager >
+// Add This Page (Link) as a Link: Current Page / Unsorted: a link card, with the title, the line about it, the
+// preview picture and the site's icon this browser sees (sites that refuse the app still show them to you).
 //
-// The extension only finds the picture; the app's helper (core/browser_link.py) downloads and saves it. The
-// browser starts that helper for each picture through "native messaging": Asset Manager > Settings > Browser >
-// Set Up registers it, for this extension's ID only (the "key" in manifest.json fixes the ID).
+// The extension only finds things; the app's helper (core/browser_link.py) downloads and saves them. The browser
+// starts that helper through "native messaging": Asset Manager > Settings > Browser > Set Up registers it, for this
+// extension's ID only (the "key" in manifest.json fixes the ID).
 //
-// Permissions: contextMenus (the two entries), nativeMessaging (the helper), activeTab + scripting (look at the
-// clicked picture for a bigger version, and show a note on the page; only on the tab you right-clicked, only
-// then), downloads (when a site refuses the app, e.g. a picture behind a login: the browser downloads it with
-// your login, and the app moves the file into place).
+// Permissions: contextMenus (the entries), nativeMessaging (the helper), activeTab + scripting (look at the
+// clicked picture for a bigger version, read the page's title, preview and icon, and show a note on the page; only on
+// the tab you right-clicked, only then), downloads (when a site refuses the app, e.g. a picture behind a login:
+// the browser downloads it with your login, and the app moves the file into place).
 
 const HOST = "com.assetmanager.browser";
-const MENU = {
-  library: "Save to Library",
-  artbook: "Add to Artbook Page",
+const PICTURE_MENU = { // (right-click a picture) -> where it goes
+  library: ["Save to Library", "library"],
+  artbook: ["Add to Artbook: Current Page", "artbook"],
+  unsorted: ["Add to Artbook: Unsorted", "unsorted"],
+};
+const LINK_MENU = { // (right-click the page, or a link) -> [title, where it goes, which contexts]
+  page_artbook: ["Add This Page as a Link: Current Page", "artbook", "page"],
+  page_unsorted: ["Add This Page as a Link: Unsorted", "unsorted", "page"],
+  link_artbook: ["Add This Link: Current Page", "artbook", "link"],
+  link_unsorted: ["Add This Link: Unsorted", "unsorted", "link"],
 };
 const DOWNLOAD_FOLDER = "Asset Manager"; // in the browser's downloads folder, only while the app takes the file
 const DOWNLOAD_SECONDS = 120;
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
-    for (const [id, title] of Object.entries(MENU)) {
+    for (const [id, [title]] of Object.entries(PICTURE_MENU)) {
       chrome.contextMenus.create({ id, title, contexts: ["image"] });
+    }
+    for (const [id, [title, , context]] of Object.entries(LINK_MENU)) {
+      chrome.contextMenus.create({ id, title, contexts: [context] });
     }
   });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (!(info.menuItemId in MENU)) return;
-  send(info, tab).catch((error) => note(tab, false, "Asset Manager: " + (error && error.message ? error.message : error)));
+  const failed = (error) => note(tab, false, "Asset Manager: " + (error && error.message ? error.message : error));
+  if (info.menuItemId in PICTURE_MENU) send(info, tab).catch(failed);
+  else if (info.menuItemId in LINK_MENU) sendLink(info, tab).catch(failed);
 });
 
 async function send(info, tab) {
-  const target = info.menuItemId;
+  const target = PICTURE_MENU[info.menuItemId][1];
   const page = info.pageUrl || (tab && tab.url) || "";
   const title = (tab && tab.title) || "";
   note(tab, null, target === "library" ? "Saving to Asset Manager..." : "Sending to the Artbook...");
@@ -44,6 +57,112 @@ async function send(info, tab) {
     reply = await ask({ op: "take", target, path, url: reply.in_browser, page, title });
   }
   note(tab, !!reply.ok, reply.message || (reply.ok ? "Done." : "That didn't work."));
+}
+
+// A page (or a link on it) as a link card: its title, the line about it, its site, its preview picture and its
+// site's icon, read here in the browser; the app's helper gets the picture (or, if the site refuses it, the browser
+// downloads it).
+async function sendLink(info, tab) {
+  const [, target, context] = LINK_MENU[info.menuItemId];
+  const url = context === "link" ? info.linkUrl : info.pageUrl || (tab && tab.url) || "";
+  if (!/^https?:/i.test(url || "")) throw new Error("Only web pages (http or https) can be added as links.");
+  note(tab, null, "Sending the link to the Artbook...");
+  let details = { title: "", about: "", site: "", picture: "", icon: "" };
+  if (tab && tab.id !== undefined) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [info.frameId || 0] },
+        func: readPage,
+        args: [context === "link" ? url : ""],
+      });
+      if (result && result.result) details = result.result;
+    } catch (_error) {} // (a page the browser keeps extensions out of: the app reads what it can)
+  }
+  const tabIcon = tab && /^(https?:|data:image\/)/i.test(tab.favIconUrl || "") ? tab.favIconUrl : "";
+  const icon = details.icon || (context === "page" ? tabIcon : ""); // (else the icon the browser shows for the tab)
+  const link = { url, title: details.title, about: details.about, site: details.site, icon };
+  let reply = await ask({ op: "link", target, ...link, picture: details.picture });
+  if (!reply.ok && reply.in_browser) {
+    note(tab, null, "The site wants your login: downloading its picture in the browser...");
+    const path = await downloadInBrowser(reply.in_browser);
+    reply = await ask({ op: "take", target, path, url: reply.in_browser, page: url, title: details.title, link });
+  }
+  note(tab, !!reply.ok, reply.message || (reply.ok ? "Done." : "That didn't work."));
+}
+
+// Runs in the page: what a link card shows. For the page itself, its <meta> tags (Open Graph, Twitter,
+// description), title and icon; for a link on it (linkUrl), the link's own text and its site's icon (the app reads
+// the rest). An icon on this site is read here (as data: the site may refuse the app); one elsewhere goes as its address.
+async function readPage(linkUrl) {
+  const meta = (...names) => {
+    for (const name of names) {
+      const tag = document.querySelector(`meta[property="${name}"], meta[name="${name}"]`);
+      if (tag && tag.content && tag.content.trim()) return tag.content.trim();
+    }
+    return "";
+  };
+  const absolute = (url) => {
+    try {
+      return url ? new URL(url, document.baseURI).href : "";
+    } catch (_error) {
+      return "";
+    }
+  };
+  // The page's icon: the biggest its <link> tags list (an SVG counts as big), else the site's /favicon.ico
+  const pageIcon = () => {
+    let best = "";
+    let bestScore = -1;
+    for (const tag of document.querySelectorAll("link[rel][href]")) {
+      const words = (tag.getAttribute("rel") || "").toLowerCase().split(/\s+/);
+      const touch = words.includes("apple-touch-icon") || words.includes("apple-touch-icon-precomposed");
+      if (!words.includes("icon") && !touch) continue;
+      const sizes = (tag.getAttribute("sizes") || "").toLowerCase();
+      const href = absolute(tag.getAttribute("href"));
+      if (!href) continue;
+      let score;
+      if (/svg/i.test(tag.getAttribute("type") || "") || sizes.includes("any") || /\.svg([?#]|$)/i.test(href)) score = 256;
+      else {
+        const found = [...sizes.matchAll(/(\d+)x\d+/g)].map((m) => parseInt(m[1], 10));
+        score = found.length ? Math.max(...found) : touch ? 180 : 16;
+      }
+      if (score > bestScore) [best, bestScore] = [href, score];
+    }
+    return best || absolute("/favicon.ico");
+  };
+  const readIcon = async (url) => {
+    if (!url || url.startsWith("data:")) return /^data:image\//i.test(url) && url.length < 700000 ? url : "";
+    try {
+      if (new URL(url).origin !== location.origin) return url; // (another site's: the app gets it)
+      const reply = await fetch(url, { credentials: "include" });
+      const blob = reply.ok ? await reply.blob() : null;
+      if (!blob || blob.size > 512 * 1024 || !/^image\//i.test(blob.type)) return url;
+      return await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : url);
+        reader.onerror = () => resolve(url);
+        reader.readAsDataURL(blob);
+      });
+    } catch (_error) {
+      return url;
+    }
+  };
+  if (linkUrl) {
+    const anchor = [...document.querySelectorAll("a[href]")].find((a) => a.href === linkUrl);
+    const text = anchor ? (anchor.innerText || anchor.title || anchor.getAttribute("aria-label") || "").trim() : "";
+    let icon = "";
+    try {
+      const target = new URL(linkUrl);
+      icon = target.origin === location.origin ? await readIcon(pageIcon()) : target.origin + "/favicon.ico";
+    } catch (_error) {}
+    return { title: text.replace(/\s+/g, " ").slice(0, 300), about: "", site: "", picture: "", icon };
+  }
+  return {
+    title: (meta("og:title", "twitter:title") || document.title || "").slice(0, 300),
+    about: meta("og:description", "description", "twitter:description").slice(0, 600),
+    site: meta("og:site_name") || location.hostname.replace(/^www\./, ""),
+    picture: absolute(meta("og:image", "og:image:url", "twitter:image")),
+    icon: await readIcon(pageIcon()),
+  };
 }
 
 // The clicked picture's addresses, best first: an image its link points to, its srcset's biggest, then itself.

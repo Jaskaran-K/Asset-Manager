@@ -471,3 +471,17 @@ def test_replacing_a_scan_that_has_only_just_started(library, qapp):
     assert pump(qapp, lambda: not window.library.is_scanning() and not window.library._stopping_scans)
     assert names_in_grid(window) == ["big_wall.png", "chair.fbx", "small_brick.png"]
     window.close()
+
+
+def test_show_in_library_from_an_artbook_file_card(library, qapp):
+    """An Artbook file card's Show in the Library: the asset view, the search cleared, the file selected."""
+    window = open_window(qapp)
+    window.view_modes.set_mode("artbook")
+    window.search_bar.edit.setText("brick")
+    assert names_in_grid(window) == ["small_brick.png"]
+    window.artbook_panel.board.show_in_library_requested.emit(str(library / "props" / "chair.fbx"))
+    assert window.view_modes.mode == "asset" and window.search_bar.text() == ""
+    assert [a.name for a in window._selected_assets()] == ["chair.fbx"]
+    window.artbook_panel.board.show_in_library_requested.emit(str(library.parent / "elsewhere.fbx"))
+    assert "isn't in the library" in window.artbook_panel.board.toast.text()
+    window.close()

@@ -243,8 +243,8 @@ def test_every_artbook_key_is_claimed_by_the_board():
     from ui.artbook_board import BoardView
 
     artbook_keys = {s.id for s in shortcuts.SHORTCUTS if s.category == shortcuts.ARTBOOK and s.sequence}
-    # Typing keys (Ctrl+B / I / U) are claimed only while typing in a note, when the board takes every key
-    assert artbook_keys - set(BoardView.KEYS) - set(BoardView.TYPING_KEYS) == set()
+    # Typing keys (Ctrl+B / I / U; Tab in a table) are claimed only while typing, when the board takes every key
+    assert artbook_keys - set(BoardView.KEYS) - set(BoardView.TYPING_KEYS) - set(BoardView.TABLE_TYPING_KEYS) == set()
 
 
 def test_shared_key_goes_to_the_focused_board(qapp, panel):

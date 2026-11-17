@@ -366,7 +366,10 @@ def test_board_grayscale_is_shift_g_now(qapp, panel, pictures):
     assert shortcuts.get("artbook.gray_board").keys == "Shift+G" and shortcuts.get("artbook.group").keys == "Ctrl+G"
 
 
-def test_pages_submenu_makes_duplicates_and_renames_pages(qapp, panel, pictures):
+def test_pages_submenu_makes_duplicates_and_renames_pages(qapp, panel, pictures, monkeypatch):
+    from ui import artbook_templates
+
+    monkeypatch.setattr(artbook_templates, "ask_new_page", lambda parent, folder: ("blank", "", "Page 3"))
     board = panel.board
     add(qapp, board, [pictures / "a.png"])
     menu = board.context_menu(QPointF(0, 0))

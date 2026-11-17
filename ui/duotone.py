@@ -405,6 +405,12 @@ def _import(p, primary, secondary):
     _line(p, primary, 2.1, (8, 10.5), (12, 14.5), (16, 10.5))
 
 
+def _export(p, primary, secondary):
+    _body(p, _rounded(3, 12, 18, 9, 2.4), secondary)  # the tray
+    _line(p, primary, 2.1, (12, 15), (12, 3.5))  # an arrow up out of it
+    _line(p, primary, 2.1, (8, 7.5), (12, 3.5), (16, 7.5))
+
+
 def _save(p, primary, secondary):
     _body(p, _rounded(4, 4, 16, 16, 2.6), secondary)  # a disk
     _line(p, primary, 1.7, (8, 4.5), (8, 8.5), (15, 8.5), (15, 4.5))  # its shutter
@@ -718,6 +724,63 @@ def _book(p, primary, secondary):
     _line(p, primary, 1.6, (15.2, 13.8), (18.8, 13.2))
 
 
+def _heading(p, primary, secondary):
+    """A card with a big T and a short line under it: an Artbook heading."""
+    _body(p, _rounded(3, 3.5, 18, 17, 3), secondary)
+    _line(p, primary, 2.2, (7.5, 7.5), (16.5, 7.5))
+    _line(p, primary, 2.2, (12, 7.5), (12, 14))
+    _line(p, primary, 2.0, (9.5, 17.2), (14.5, 17.2))
+
+
+def _todo(p, primary, secondary):
+    """A card with a ticked box and an empty one: an Artbook to-do."""
+    _body(p, _rounded(4, 3, 16, 18, 3), secondary)
+    _line(p, primary, 1.9, (7.2, 8.4), (8.6, 9.8), (11, 7))
+    _line(p, primary, 1.9, (13, 8.6), (17, 8.6))
+    _outline(p, _rounded(7, 13, 4, 4, 1), primary, 1.5)
+    _line(p, primary, 1.9, (13, 15), (17, 15))
+
+
+def _column(p, primary, secondary):
+    """A tall panel with a title and two cards stacked in it: an Artbook column."""
+    _body(p, _rounded(5, 2.5, 14, 19, 3), secondary)
+    _line(p, primary, 2.0, (8.5, 6.4), (15.5, 6.4))
+    _outline(p, _rounded(8, 9.6, 8, 4.2, 1.2), primary, 1.5)
+    _outline(p, _rounded(8, 15.4, 8, 3.8, 1.2), primary, 1.5)
+
+
+def _table(p, primary, secondary):
+    """A card ruled into a header and rows, split down the middle: an Artbook table."""
+    _body(p, _rounded(3, 4, 18, 16, 3), secondary)
+    _line(p, primary, 2.1, (6.5, 8.6), (17.5, 8.6))
+    _line(p, primary, 1.6, (6.5, 12.6), (17.5, 12.6))
+    _line(p, primary, 1.6, (6.5, 16.2), (17.5, 16.2))
+    _line(p, primary, 1.6, (11.5, 10.4), (11.5, 17.4))
+
+
+def _tray(p, primary, secondary):
+    """An open tray with an arrow coming down into it: the Artbook's Unsorted tray."""
+    _body(p, _rounded(3, 11, 18, 10, 3), secondary)
+    _line(p, primary, 1.9, (3.8, 14.5), (8.5, 14.5), (9.8, 16.8), (14.2, 16.8), (15.5, 14.5), (20.2, 14.5))
+    _line(p, primary, 2.1, (12, 3.5), (12, 11.2))
+    _line(p, primary, 2.1, (8.8, 8.2), (12, 11.4), (15.2, 8.2))
+
+
+def _add(p, primary, secondary):
+    """A plus on a disc: add one (a table's row or column)."""
+    _body(p, _circle(12, 12, 9), secondary)
+    _line(p, primary, 2.2, (12, 7.5), (12, 16.5))
+    _line(p, primary, 2.2, (7.5, 12), (16.5, 12))
+
+
+def _line_arrow(p, primary, secondary):
+    """Two cards joined by an arrow: an Artbook line."""
+    _body(p, _rounded(2.5, 3, 8, 7, 2), secondary)
+    _body(p, _rounded(13.5, 14, 8, 7, 2), secondary)
+    _line(p, primary, 1.9, (11, 6.5), (17.5, 6.5), (17.5, 11.6))
+    _line(p, primary, 1.9, (15.3, 9.6), (17.5, 11.8), (19.7, 9.6))
+
+
 def _shading(p, primary, secondary):
     """A ball lit on one side: how a 3D model is drawn (shaded, wireframe...)."""
     _body(p, _circle(12, 12, 9), secondary)
@@ -839,7 +902,7 @@ ICONS: dict[str, IconPainter] = {
     "align_left": _align_left,
     "align_center": _align_center,
     "align_right": _align_right,
-    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "save": _save, "palette": _palette, "import": _import, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
+    "chevron_down": _chevron_down, "eyedropper": _eyedropper, "copy": _copy, "save": _save, "palette": _palette, "import": _import, "export": _export, "lock": _lock, "eraser": _eraser, "smooth": _smooth,
     "zoom_in": _zoom_in, "zoom_out": _zoom_out, "fit_width": _fit_width, "hand": _hand, "text_select": _text_select,
     "sticky_note": _sticky_note, "undo": _undo, "redo": _redo,
     "light": _light, "cube": _cube, "archive": _archive, "extract": _extract, "back": _back, "tile": _tile, "invert": _invert,
@@ -848,7 +911,8 @@ ICONS: dict[str, IconPainter] = {
     "more": _more, "info": _info, "search": _search, "fullscreen": _fullscreen, "checker": _checker,
     "shading": _shading, "turn_light": _turn_light, "turntable": _turntable,
     "crop": _crop, "flip_h": _flip_h, "flip_v": _flip_v, "align_objects": _align_objects,
-    "keyboard": _keyboard, "book": _book,
+    "keyboard": _keyboard, "book": _book, "heading": _heading, "todo": _todo, "column": _column, "line": _line_arrow,
+    "table": _table, "add": _add, "tray": _tray,
 }
 
 

@@ -25,7 +25,7 @@ import uuid
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from core import artbook_store as store
 
@@ -53,10 +53,17 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def export_page(page_id: str, target: Path) -> int:
+KINDS = ("image", "note", "stroke", "column", "line", "table", "link", "file", "page_card", "point")
+CARD_KINDS = ("link", "file", "page_card")  # (cards whose picture, if any, is kept in the page)  # the item kinds a shared page brings in (others are dropped)
+
+
+def export_page(page_id: str, target: Path, prepare: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None) -> int:
     """Write a page to target (an .artbook file); returns how many of its images were missing
-    (they stay on the page, as missing). Safe off the UI thread."""
+    (they stay on the page, as missing). prepare: changes the page first (a copy: a template leaves out its pictures,
+    say). Safe off the UI thread."""
     page = store.load_page(page_id)
+    if prepare is not None:
+        page = prepare(page)
     pictures: dict[str, Path] = {}  # name in the archive -> file to pack
     missing = 0
     items = []
@@ -80,8 +87,15 @@ def export_page(page_id: str, target: Path) -> int:
                 missing += 1
             item["source"] = {"path": None, "blob": name}
             item.pop("original", None)  # (an upscaled image travels as it looks: its original stays here)
+        elif item.get("kind") in CARD_KINDS:  # (a link's / file's picture, a link's site icon, travel with it)
+            for key in ("picture", "favicon"):
+                blob = item.get(key)
+                if isinstance(blob, str) and _IMAGE_NAME.fullmatch(blob) and store.blob_path(page_id, blob).is_file():
+                    pictures[blob] = store.blob_path(page_id, blob)
+                else:
+                    item.pop(key, None)
         items.append(item)
-    shared = {k: v for k, v in page.items() if k not in ("id", "items")}
+    shared = {k: v for k, v in page.items() if k not in ("id", "items", "trash")}  # (its Trash stays here)
     shared["items"] = items
 
     target = Path(target)
@@ -139,6 +153,21 @@ def _read_json(archive: zipfile.ZipFile, entry: str, name: str) -> Any:
         raise ShareError(f"{name} is damaged: {exc}") from exc
 
 
+def _comments(value: Any, renamed: dict[str, str]) -> list[dict[str, Any]]:
+    """The shared page's comment threads: on cards that came along (their new ids), and pins."""
+    out = []
+    for thread in value if isinstance(value, list) else []:
+        if not isinstance(thread, dict) or not isinstance(thread.get("notes"), list):
+            continue
+        item = thread.get("item")
+        if item is not None:
+            if not isinstance(item, str) or item not in renamed:
+                continue  # (its card didn't come)
+            item = renamed[item]
+        out.append({**thread, "id": uuid.uuid4().hex, "item": item})
+    return out
+
+
 def _groups(value: Any) -> dict[str, dict[str, Any]]:
     """The page's groups' settings, as far as they're sane: {group id: {"fill": "#rrggbb" / "#aarrggbb",
     "locked": True}} (either may be left out)."""
@@ -191,15 +220,39 @@ def import_page(source: Path) -> dict[str, Any]:
                 return stored[name]
 
             items = []
+            renamed: dict[str, str] = {}  # old id -> new (a column lists its cards by id)
             for item in shared["items"]:
-                if not isinstance(item, dict) or item.get("kind", "image") not in ("image", "note", "stroke"):
-                    continue
+                if not isinstance(item, dict) or item.get("kind", "image") not in KINDS:
+                    continue  # (from someone else: only kinds this version reads; each new card adds its own)
                 item = dict(item)
+                old = item.get("id")
                 item["id"] = uuid.uuid4().hex
+                if isinstance(old, str):
+                    renamed[old] = item["id"]
                 if item.get("kind", "image") == "image":
                     source_info = item.get("source") if isinstance(item.get("source"), dict) else {}
                     item["source"] = {"path": None, "blob": picture(source_info.get("blob"))}
+                elif item.get("kind") in CARD_KINDS:
+                    for key in ("picture", "favicon"):
+                        name = picture(item.get(key))
+                        if name:
+                            item[key] = name
+                        else:
+                            item.pop(key, None)
                 items.append(item)
+            for item in items:
+                if item.get("kind") == "column":
+                    members = item.get("members") if isinstance(item.get("members"), list) else []
+                    item["members"] = [renamed[m] for m in members if isinstance(m, str) and m in renamed]
+                if item.get("kind") == "line":  # (its ends name what they join)
+                    for key in ("start", "end"):
+                        end = dict(item[key]) if isinstance(item.get(key), dict) else {}
+                        if end.get("item") is not None:
+                            end["item"] = renamed.get(end["item"]) if isinstance(end["item"], str) else None
+                            if end["item"] is None:
+                                item["kind"] = "dropped"  # (it joined something that didn't come along)
+                        item[key] = end
+            items = [item for item in items if item.get("kind") != "dropped"]
             now = time.time()
             name = shared.get("name")
             page = {
@@ -209,6 +262,7 @@ def import_page(source: Path) -> dict[str, Any]:
                 "view": shared.get("view") if isinstance(shared.get("view"), dict) else None,
                 "items": items,
                 "groups": _groups(shared.get("groups")),
+                "comments": _comments(shared.get("comments"), renamed),
             }
             store.save_page(page)
             if "thumb.png" in entries and entries["thumb.png"].file_size < MAX_JSON_BYTES:

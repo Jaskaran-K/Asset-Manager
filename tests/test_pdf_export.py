@@ -151,9 +151,11 @@ def test_the_main_window_puts_a_sent_page_on_an_artbook_page(qapp):
         message = window.artbook_sender.send_image_to_artbook(picture, "book, p. 4", None)
         assert message.startswith("Sent 1 image")
         board = window.artbook_panel.board
-        assert pump(qapp, lambda: len(board.items_list()) == 1)
-        (item,) = board.items_list()
-        assert item.name == "book, p. 4" and item.natural == (120, 80)
+        from ui.artbook_board import ImageItem
+
+        assert pump(qapp, lambda: any(isinstance(i, ImageItem) for i in board.items_list()))
+        (item,) = [i for i in board.items_list() if isinstance(i, ImageItem)]  # (a new page: its header, and the picture)
+        assert item.name == "book, p. 4" and item.natural == (120, 80) and board.title_note() is not None
     finally:
         window.close()
         window.deleteLater()

@@ -108,9 +108,12 @@ def test_fallback_copies_are_small_and_keep_transparency(qapp):
 # ----------------------------------------------------------------------
 def test_files_are_added_side_by_side_linked_with_a_fallback(qapp, panel, pictures):
     board = panel.board
-    wide, tall = add_and_wait(qapp, board, [pictures / "wide.png", pictures / "tall.png", pictures / "model.fbx"])
-    assert "skipped 1" in board.toast.text()  # the .fbx isn't an image
-    items = sorted(board.items_list(), key=lambda i: i.pos().x())
+    from ui.artbook_board import ImageItem, RefCardItem
+
+    wide, tall, model = add_and_wait(qapp, board, [pictures / "wide.png", pictures / "tall.png", pictures / "model.fbx"])
+    assert isinstance(model, RefCardItem) and model.kind == "file"  # (a file that isn't a picture: a card linked to it)
+    assert model.data["path"] == str(pictures / "model.fbx") and model.sceneBoundingRect().left() > tall.sceneBoundingRect().right()
+    items = sorted([i for i in board.items_list() if isinstance(i, ImageItem)], key=lambda i: i.pos().x())
     assert [i.natural for i in items] == [(400, 200), (100, 300)]
     left, right = items
     assert right.sceneBoundingRect().left() > left.sceneBoundingRect().right()  # lined up, not stacked
@@ -423,10 +426,13 @@ def menu_layout(menu, depth=0):
 def test_menu_layout(qapp, panel):
     menu = panel.board.context_menu(QPointF(0, 0))
     assert menu_layout(menu) == [
-        "Undo", "Redo", "---", "Copy >", "  Image", "  File Path", "Paste", "Note", "Colour Picker", "Draw", "---",
+        "Add Here >", "  Note", "  Heading", "  To-do", "  Column", "  Table", "  Page Title", "  Page Link >", "    (No other pages yet)", "  ---", "  Pictures...", "  Line", "  Draw", "---",
+        "Comment", "Card Colour >", "  ", "  ---", "  Custom...", "---", "Undo", "Redo", "---", "Duplicate", "Copy >", "  Selection",
+        "  File Path", "Paste", "Move to Page >", "  (No other pages yet)", "Copy to Page >", "  (No other pages yet)", "Colour Picker", "---",
         "Canvas >", "  Frame Everything", "  Zoom to 100%", "  Grayscale Board",
-        "  Values Board", "  Values Board Tones >", "    2 Tones", "    3 Tones", "    4 Tones", "    5 Tones", "  Mirror Board",
-        "  ---", "  Export as PNG...",
+        "  Values Board", "  Values Board Tones >", "    2 Tones", "    3 Tones", "    4 Tones", "    5 Tones", "  Mirror Board", "  Navigation Hints",
+        "  ---", "  Export >", "    Export as PNG...", "    Export as JPG...", "    Export as PDF...", "    Copy as Image",
+        "    ---", "    Export Options...",
         "Images >", "  Select All", "  Image List",
         "  Selection >",
         "    Crop", "    Grayscale",
@@ -445,7 +451,7 @@ def test_menu_layout(qapp, panel):
         "  Match Size >", "    Same Height", "    Same Width",
         "  File >", "    Show in Explorer", "    Open Source File", "    ---", "    Replace Image...",
         "    Relink Missing Images...",
-        "Pages >", "  New Page", "  Duplicate Page", "  Rename Page...", "  Earlier Versions...", "  ---", "  Export Page (.artbook)...",
+        "Pages >", "  New Page", "  Duplicate Page", "  Rename Page...", "  Earlier Versions...", "  Save as Template...", "  Go to Page...", "  Add Headers to Every Page...", "  ---", "  Export Page (.artbook)...",
     ]
     submenus = [a for a in all_actions(menu) if a.menu()]
     assert submenus and all(a.isEnabled() for a in submenus)  # always open: greyed items show what's there
@@ -465,7 +471,7 @@ def test_menu_greys_out_what_cant_be_done(qapp, panel, pictures):
     menu = open_menu()
     assert not menu["Undo"] and not menu["Redo"]
     assert not menu["Paste"] and not menu["Select All"] and not menu["Frame Everything"]
-    assert not any(menu[name] for name in ("Image", "File Path", "Flip Horizontally", "Bring to Front", "Delete"))
+    assert not any(menu[name] for name in ("Duplicate", "File Path", "Flip Horizontally", "Bring to Front", "Delete"))
 
     QApplication.clipboard().setText(str(pictures / "wide.png"))  # a copied file path can be pasted
     (item,) = add_and_wait(qapp, board, [pictures / "wide.png"])
@@ -473,10 +479,10 @@ def test_menu_greys_out_what_cant_be_done(qapp, panel, pictures):
     menu = open_menu()
     assert menu["Undo"]  # the image was added
     assert menu["Paste"] and menu["Select All"] and menu["Frame Everything"]
-    assert not menu["Delete"] and not menu["Image"]  # nothing selected yet
+    assert not menu["Delete"] and not menu["Duplicate"]  # nothing selected yet
     item.setSelected(True)
     menu = open_menu()
-    assert all(menu[name] for name in ("Image", "File Path", "Show in Explorer", "Flip Horizontally", "Bring to Front", "Delete", "Frame Selection"))
+    assert all(menu[name] for name in ("Duplicate", "File Path", "Show in Explorer", "Flip Horizontally", "Bring to Front", "Delete", "Frame Selection"))
 
 
 def test_frame_from_the_menu_matches_the_f_key(qapp, panel, pictures):

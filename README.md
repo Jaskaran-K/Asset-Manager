@@ -199,7 +199,8 @@ app with it.
 
 ### Browser extension
 Right-click a picture on a web page in **Chrome** or **Opera GX** > **Asset Manager** > **Save to Library**, or
-**Add to Artbook Page**. The app needn't be open.
+**Add to Artbook**: **Current Page** or **Unsorted**. Right-click the page itself (or a link) > **Add This Page as a
+Link**: Current Page or Unsorted. The app needn't be open.
 - **Save to Library** puts it in the profile's web folder (**Web Images** in its first library folder unless you pick
   another in **Settings > Browser**; each profile has its own), in a folder per site (`artstation.com`,
   `pinterest.com`), under the picture's own name, or the page's title when that's a code. The biggest version is
@@ -207,8 +208,13 @@ Right-click a picture on a web page in **Chrome** or **Opera GX** > **Asset Mana
   original. The same picture isn't saved twice, and a type the profile doesn't show (WebP, AVIF) is saved as PNG or
   JPG. Right-click it in the library > **Open Source Page** for the page it came from. To tag them as they arrive,
   give the folder a folder rule.
-- **Add to Artbook Page** puts it on the page that's open (or the one last open). With the app closed, it goes on
-  the page when the app next opens.
+- **Add to Artbook > Current Page** puts it on the page that's open (or the one last open); **Unsorted** puts it in
+  the Artbook's Unsorted tray (**U**), to place on any page later. With the app closed, it arrives when the app next
+  opens.
+- **Add This Page as a Link** makes a link card: the page's title, a line about it, its picture and the site's
+  icon, read in your browser (so sites that turn the app away, such as ArtStation, still give a preview).
+- **After updating the app,** click **Reload** on the extension in the browser's extensions page, so it picks up
+  the new version.
 - **Pictures behind a login** (when a site refuses the app): the browser downloads it with your login and the app
   moves it into place.
 - **Setting it up:** **Settings > Browser > Set Up**, then in each browser open its extensions page (buttons there),
@@ -245,13 +251,64 @@ making your first board. The list below is the full reference.
   **H** / **V** flip, **]** / **[** bring to front / send to back, **R** resets, **Delete** removes, **Ctrl+Z** /
   **Ctrl+Y** undo and redo. The wheel zooms toward the cursor, middle-drag (or Space+drag) pans, **F** frames
   everything, double-click zooms to an image. A lighter **active area** sits behind everything on the page and
-  grows, shrinks and moves with it as you add or spread out images (exports leave it out).
+  grows, shrinks and moves with it as you add or spread out images (exports leave it out). The mouse controls
+  show in light words at the bottom right of the board (brighter on hover; right-click > Canvas > **Navigation
+  Hints** hides them).
+- **Moving things neatly:** a dragged card or picture snaps into line with its neighbours (edges or middles) and to
+  equal gaps; dashed lines and the gaps' sizes show what it lined up with. Hold **Alt** to drag freely. The arrow
+  keys nudge the selection a pixel (**Shift**: ten); with nothing selected they move about the board.
+- **Cards:** the **tool rail** on the left adds a **Note**, a **Heading** (**Shift+T**), a **To-do** (**X**), a
+  **Column** (**Shift+C**) or a **Table** (**Shift+B**): click one for it in the middle, or drag it where you want
+  it. It also has Pictures, the **Line** tool and Draw. Double-click empty space (or right-click > **Add Here**)
+  for the same choices, plus **Link...**.
+  - **Notes** turn `#`, `##`, `-`, `1.` or `[]` then Space at the start of a line into a heading, a list or a
+    checklist. A **heading** is a big title with an accent line.
+  - **To-dos:** click a box to tick it; done lines sink to the bottom, and the count and bar show how far along it
+    is. Drag a line's dots to reorder.
+  - **Columns:** drag cards onto a column to stack them in it (pictures take its width), and out again to take
+    them out. The arrow folds it to its title and count. Its x deletes it, with its cards or keeping them.
+  - **Tables:** Task, Time and Status to start with. Each column is text, a number (with a total, in its unit) or
+    status chips (**Edit Statuses** renames, recolours, adds and removes them), aligned left, centre or right.
+    Tab, Shift+Tab and Enter move between cells; hover for the + that adds a row or column; drag a column's edge.
+  - **Link, file and page cards:** paste or drop a web address for a **link card** (its title, about line,
+    picture and the site's icon), a file that isn't a picture for a **file card**, or drag a page from the Pages
+    list for a **page card**. Each comes **Big** (a picture card) or **Compact** (a row), and new cards take the
+    look you used last. Double-click to open it: the web page, the file in its app (Maya first), or the page
+    (**Back**, at the top, returns). Link and file cards can **Set / Paste / Remove Picture**.
+  - **Colours:** right-click > **Card Colour** gives a card a colour: a strip down its edge, a column's outline, a
+    heading's line.
+- **Lines:** hover a card for the dots on its sides and drag one to another card (with several selected: one line
+  to each), or use the **Line** tool (**Shift+L**). Lines are curved, straight or elbow, with arrows at the end,
+  both ends or none, any colour and width, dashed or solid; drag a selected line's ends to rejoin them or its
+  middle to bend it. Lines can join groups and columns too. Double-click a line's label to type it (a line with no
+  label: select it and press Enter).
+  - **Points on lines:** double-click a line for a point there. The line becomes two lines meeting at it: drag the
+    point to route the line round things, and join other lines to it as to a card. Curved lines flow through it,
+    straight ones make a corner. Deleting a point with two lines joins them back into one.
+- **Duplicate, copy and move:** **Ctrl+D** duplicates the selection beside it (the lines between the cards too).
+  **Ctrl+C** / **Ctrl+V** copy the cards themselves, to this page or any other, with their pictures and comments
+  (other apps still get the text or picture). Right-click > **Move to Page** / **Copy to Page** sends them to
+  another page, and Undo takes them back.
+- **Comments** (**M**): on the selected card or picture (a badge on its corner), or a numbered pin where the mouse
+  is. Click a badge or pin to read the thread, write more, or tick it done; drag a pin to move it.
+- **The tray** (**U**): **Unsorted** holds what your browser sent there (drag it onto any page), and **Trash** holds
+  what was deleted from this page for 30 days (Restore puts it back where it was).
+- **The page's header:** a page starts with its name in big letters, a line about it and what's on it (images,
+  cards, to-dos done). Double-click it to rename the page. Older pages get one from right-click > Pages > **Add
+  Headers to Every Page...**.
+- **Finding things:** **Ctrl+F** finds words on this page or on every page: matches light up and the rest fades,
+  Enter steps through them. **Ctrl+P** goes to a page by typing a few letters of its name (your recent pages
+  first).
+- **Templates:** a new page can start blank, from a built-in template (Project board, Mood board, Character sheet,
+  Review notes) or from one of yours: right-click a page > **Save as Template...**.
 - **The image bar** (a trial) floats under the selected images: Crop, Flip Horizontally / Vertically, **Adjust**
   (Grayscale, Pixelated, Values, Guides, Opacity), **Arrange** (Auto-Arrange, Align, Distribute, Stack, Match Size:
   two or more images), Group / Ungroup, Upscale and Remove Background, and **More** (Reset, Bring to Front / Send to
   Back, Caption, Revert to Original, File, Export, Delete). Everything on it is in the right-click menu too.
-- **Right-click menu:** Undo / Redo, Copy / Paste, then **Canvas** (frame, 100%, grayscale board) and **Images**
-  (Select All, and the Selection, Arrange, Align and Match Size submenus). Greyed-out items need a selection.
+- **Right-click menu:** Add Here, then Comment and Card Colour, Undo / Redo, Duplicate, Copy / Paste, Move / Copy to
+  Page, then **Canvas** (frame, 100%, grayscale and values board, mirror, navigation hints, export), **Images**
+  (Select All, and the Selection, Arrange, Align and Match Size submenus) and **Pages**. Greyed-out items need a
+  selection.
 - **Adjusting images:** **C** crops the selected image: drag the handles inward (or back out), Enter or C keeps
   it, Esc cancels. The whole image is kept, so Right-click > Images > Selection > **Reset** > Crop brings it all
   back. The same Reset submenu undoes rotation, size, flips or crop one at a time (**R** resets all but the crop). **G** turns grayscale on / off for the selected images, the same menu has an **Opacity** slider, and
@@ -318,7 +375,7 @@ making your first board. The list below is the full reference.
   - Drag pages and folders to reorder them, or drop one on a folder to move it inside.
   - Right-click to duplicate, move or delete. Deleted pages go to the Recycle Bin. Deleting a folder keeps
     its pages: they move up a level.
-  - The search box filters pages by name, or by folder name.
+  - The search box finds pages by name, by folder name, or by what's on them (hover a result for the match).
   - Like the library's sidebar, it can be pinned beside the board or float over it on frosted glass.
   - **Share a page:** right-click a page > **Export Page...** (or right-click the board > Canvas > Export Page)
     saves it as one `.artbook` file with its images inside (linked files go in whole), ready to send.
@@ -327,8 +384,11 @@ making your first board. The list below is the full reference.
     positions, sizes, rotation, flips, crops, opacity, notes, image names, groups (with their colour) and
     drawings (each stroke with its colour and width; a drawing's strokes are grouped, so they move as one).
     Pick several at once. Boards from PureRef 1.x need opening and saving in PureRef 2 first.
-- **Export as PNG:** **Ctrl+E** (or right-click > Canvas) saves the selection, or the whole board, as one picture on
-  the board's colour, as sharp as its images allow (up to 16384 pixels on the longest side).
+- **Export:** the **Export** button at the top (or right-click > Canvas > Export) saves the selection or the whole
+  page as a **PNG**, a **JPG** or a **PDF** (with clickable link and file cards), or copies it as a picture
+  (**Ctrl+Shift+C**). **Export Options...** (**Ctrl+Shift+E**) picks the size, the background, and whether
+  comments come along; **Ctrl+E** exports a PNG with your last settings. Pictures are as sharp as their images
+  allow (up to 16384 pixels on the longest side).
 - **Saving:** pages save themselves a couple of seconds after each change, and when you switch page or quit.
   Library images are *linked* (the page keeps a small copy in case the file moves); pasted and web images are
   stored in the page. Images you've deleted from a page are cleared from its folder the next time it opens.

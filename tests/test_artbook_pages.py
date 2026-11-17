@@ -1,524 +1,468 @@
-"""The Artbook's Pages: the index (folders, order, self-repair), page operations, thumbnails,
-and the Pages sidebar (opening, renaming, moving, searching, deleting)."""
+"""Board cards Batch I: the page's header (its name, a line about it, what's on the page), search on a page and
+across pages, templates for new pages, and exporting (the Export dialog, the quick menu, PDF with clickable cards)."""
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
-import time
-
 import pytest
-from PIL import Image
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QAbstractItemView
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtTest import QTest
 
 from core import artbook_store as store
-from ui.animations import set_motion_mode
-
-Position = QAbstractItemView.DropIndicatorPosition
-
-
-def pump(qapp, condition=lambda: False, seconds=10.0):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        qapp.processEvents()
-        if condition():
-            return True
-        time.sleep(0.01)
-    return condition()
+from tests.test_artbook import pump  # noqa: F401  (shared helpers)
+from tests.test_artbook_cards import make_note, make_table, make_todo, no_motion, panel, wait_for  # noqa: F401
 
 
-@pytest.fixture(autouse=True)
-def no_motion():
-    set_motion_mode("off")
-    yield
-    set_motion_mode("on")
-
-
-@pytest.fixture
-def trash(monkeypatch):
-    """The Recycle Bin, faked: what was sent there (moved to a folder of the test's own)."""
-    sent = []
-
-    def move_to_trash(path):
-        sent.append(path)
-        shutil.rmtree(path)
-        return True
-
-    monkeypatch.setattr(store.QFile, "moveToTrash", staticmethod(move_to_trash))
-    return sent
-
-
-@pytest.fixture
-def picture(tmp_path):
-    path = tmp_path / "red.png"
-    Image.new("RGB", (400, 200), "red").save(path)
-    return path
-
-
-@pytest.fixture
-def panel(qapp, monkeypatch):
-    from ui import artbook_pages
-    from ui.artbook import ArtbookPanel
-
-    monkeypatch.setattr(artbook_pages, "confirm", lambda *_args: True)
-    widget = ArtbookPanel()
-    widget.resize(1000, 700)
-    widget.show()
+def double_click(qapp, board, scene_point) -> None:
+    point = board.mapFromScene(scene_point)
+    QTest.mouseMove(board.viewport(), point + QPointF(40, 40).toPoint())  # (the first move only enters the view)
+    QTest.mouseMove(board.viewport(), point)
+    QTest.mouseDClick(board.viewport(), Qt.MouseButton.LeftButton, pos=point)
     qapp.processEvents()
-    yield widget
-    widget.close()
-
-
-def names(panel):
-    """The Pages list as text: folders as 'name/', children indented."""
-    rows = []
-
-    def visit(item, depth):
-        kind = item.data(0, Qt.ItemDataRole.UserRole)[0]
-        hidden = " (hidden)" if item.isHidden() else ""
-        rows.append("  " * depth + item.text(0) + ("/" if kind == "folder" else "") + hidden)
-        for i in range(item.childCount()):
-            visit(item.child(i), depth + 1)
-
-    root = panel.pages.tree.invisibleRootItem()
-    for i in range(root.childCount()):
-        visit(root.child(i), 0)
-    return rows
-
-
-def add_image(qapp, panel, path):
-    before = len(panel.board.items_list())
-    panel.board.add_files([path])
-    assert pump(qapp, lambda: len(panel.board.items_list()) == before + 1)
 
 
 # ----------------------------------------------------------------------
-# The index
+# The page's header
 # ----------------------------------------------------------------------
-def test_index_repairs_itself(qapp):
-    a, b, c = store.new_page("A"), store.new_page("B"), store.new_page("C")  # not filed in the index
-    folder = store.create_folder("Refs")
-    tree = store.page_tree()
-    assert tree["pages"] == [a["id"], b["id"], c["id"]]  # unlisted pages show at the top level, oldest first
-    store.move_page(b["id"], folder)
-
-    # A damaged index: a gone page, a page listed twice, junk, a folder listed twice
-    index = json.loads(store.index_path().read_text(encoding="utf-8"))
-    index["pages"] += ["gone", a["id"], 42]
-    index["folders"].append(dict(index["folders"][0]))
-    index["folders"].append("junk")
-    store.index_path().write_text(json.dumps(index), encoding="utf-8")
-    tree = store.page_tree()
-    assert tree["pages"] == [a["id"], c["id"]]
-    assert [f["id"] for f in tree["folders"]] == [folder] and tree["folders"][0]["pages"] == [b["id"]]
-
-    store.index_path().write_text("not json", encoding="utf-8")  # unreadable: its backup is used (core.json_files)
-    tree = store.page_tree()
-    assert set(tree["pages"]) == {a["id"], c["id"]} and tree["folders"][0]["pages"] == [b["id"]]
-    for name in ("index.json", "index.json.bak"):
-        (store.pages_dir() / name).write_text("not json", encoding="utf-8")  # neither readable: all at the top level
-    assert set(store.page_tree()["pages"]) == {a["id"], b["id"], c["id"]}
+def test_a_new_page_has_a_header_with_its_name_and_whats_on_it(qapp, panel):
+    board = panel.board
+    page_id = panel.new_page(name="Mage costume")
+    title = board.title_note()
+    assert title is not None and title.style == "title" and title.toPlainText() == "Mage costume"
+    assert title.stats == "Nothing on it yet" and title.toolTip().startswith("The page's name")
+    assert not board.undo_stack.canUndo()  # (a new page's header isn't an undo step)
+    make_todo(qapp, board, "Hood", ("Rim", "Lining", "Silhouette"))
+    make_note(qapp, board, QPointF(400, 400), "Straps: two thin ones")
+    hood = next(n for n in board.items_list() if getattr(n, "check_rows", None) and n.check_rows())
+    board.toggle_check(hood, hood.check_rows()[0].blockNumber())
+    assert wait_for(qapp, lambda: title.stats == "2 cards · 1 of 3 to-dos done")
+    panel.save_now()
+    summary = store.page_summary(page_id)
+    assert summary["counts"] == (0, 2, 1, 3)  # (page cards show the same: the header isn't a card)
+    assert store.counts_text(summary["counts"]) == title.stats
+    assert board.add_here_entries(QPointF(0, 0))[5][0] == "Page Title" and not board.add_here_entries(QPointF(0, 0))[5][3]
+    assert board.add_page_title() is title  # (one per page: shown, not made again)
 
 
-def test_folders_nest_move_and_delete_into_their_parent(qapp):
-    outer = store.create_folder("Outer")
-    inner = store.create_folder("Inner", outer)
-    deep = store.create_folder("Deep", inner)
-    page = store.create_page("In inner", inner)
-    other = store.create_folder("Other")
-    with pytest.raises(store.PageError):
-        store.move_folder(outer, deep)  # not into its own sub-folder
-    with pytest.raises(store.PageError):
-        store.create_folder("  ")
-
-    store.rename_folder(inner, "  Renamed   inner ")
-    store.delete_folder(inner)  # its folder and page move up into Outer, where it was
-    tree = store.page_tree()
-    (outer_node, other_node) = tree["folders"]
-    assert [f["name"] for f in outer_node["folders"]] == ["Deep"]
-    assert outer_node["pages"] == [page["id"]]
-    store.move_folder(other, None, 0)
-    assert [f["id"] for f in store.page_tree()["folders"]] == [other, outer]
-    store.move_folder(deep, other)
-    assert store.page_tree()["folders"][0]["folders"][0]["id"] == deep
+def test_typing_the_headers_name_renames_the_page_and_undo_renames_it_back(qapp, panel):
+    board = panel.board
+    page_id = panel.new_page(name="Page 7")
+    title = board.title_note()
+    double_click(qapp, board, title.mapToScene(title.boundingRect().topLeft() + QPointF(30, 25)))
+    assert board.editing_note() is title
+    QTest.keySequence(board, "Ctrl+A")
+    QTest.keyClicks(board, "Mage   costume ")
+    QTest.keyClick(board, Qt.Key.Key_Return)  # (Enter: done, one line)
+    assert board.editing_note() is None and title.toPlainText() == "Mage costume"
+    assert wait_for(qapp, lambda: panel.page["name"] == "Mage costume")
+    assert store.load_page(page_id)["name"] == "Mage costume" and "Mage costume" in panel.lbl_page.text()
+    board.undo_stack.undo()
+    assert wait_for(qapp, lambda: panel.page["name"] == "Page 7") and title.toPlainText() == "Page 7"
+    panel.rename_page(page_id, "Hunter armor")  # (renamed in Pages: the header follows)
+    assert title.toPlainText() == "Hunter armor" and board.page_name == "Hunter armor"
 
 
-def test_moving_pages_counts_positions_like_the_drop_indicator(qapp):
-    ids = [store.create_page(name)["id"] for name in "ABCD"]
-    store.move_page(ids[0], None, 3)  # A dropped above D (row 3): lands just before D
-    assert store.page_tree()["pages"] == [ids[1], ids[2], ids[0], ids[3]]
-    store.move_page(ids[3], None, 0)
-    assert store.page_tree()["pages"] == [ids[3], ids[1], ids[2], ids[0]]
-    folder = store.create_folder("F")
-    store.move_page(ids[2], folder)
-    assert store.page_folder(ids[2]) == folder
-    assert store.ordered_page_ids() == [ids[2], ids[3], ids[1], ids[0]]  # folders come first
+def test_the_line_under_the_name_is_typed_in_place_and_saved(qapp, panel):
+    board = panel.board
+    page_id = panel.new_page(name="Mage costume")
+    title = board.title_note()
+    assert not title.about_shown()
+    under = title.mapToScene(title.about_rect().center())
+    double_click(qapp, board, under)
+    assert board._renaming is not None and board._renaming["item"] is title and title.about_item.isVisible()
+    QTest.keyClicks(board, "Mentorship project: week 3")
+    QTest.keyClick(board, Qt.Key.Key_Return)
+    assert title.about == "Mentorship project: week 3" and title.about_shown()
+    board.undo_stack.undo()
+    assert title.about == "" and not title.about_shown()
+    board.undo_stack.redo()
+    panel.save_now()
+    data = next(d for d in store.load_page(page_id)["items"] if d.get("style") == "title")
+    assert data["about"] == "Mentorship project: week 3"
+    board.load_page(store.load_page(page_id))
+    again = board.title_note()
+    assert again.about == "Mentorship project: week 3" and again.about_item.toPlainText() == again.about
 
 
-def test_duplicate_copies_images_and_sits_after_the_original(qapp):
-    first = store.create_page("Mood")
-    second = store.create_page("Other")
-    blob = store.store_blob(first["id"], b"image data", ".png")
-    first["items"] = [{"id": "x", "kind": "image", "source": {"path": None, "blob": blob}}]
-    first["modified"] = time.time()
-    store.save_page(first)
-    copy = store.duplicate_page(first["id"])
-    assert copy["name"] == "Mood copy" and copy["id"] != first["id"]
-    assert store.blob_path(copy["id"], blob).read_bytes() == b"image data"
-    assert store.load_page(copy["id"])["items"][0]["id"] == "x"
-    assert store.page_tree()["pages"] == [first["id"], copy["id"], second["id"]]
+def test_a_header_added_to_an_old_page_goes_above_whats_there_and_stays_one(qapp, panel):
+    from ui.artbook_board import NoteItem
 
-
-def test_trashed_page_stays_gone(qapp, trash):
-    page = store.create_page("Bye")
-    stale = dict(page, modified=time.time())
-    store.trash_page(page["id"])
-    assert trash and not store.page_dir(page["id"]).exists()
-    store.save_page(stale)  # an autosave that was in flight
-    with pytest.raises(store.PageError):
-        store.store_blob(page["id"], b"late image", ".png")
-    store.save_thumbnail(page["id"], b"png")
-    assert not store.page_dir(page["id"]).exists()
-    assert page["id"] not in store.ordered_page_ids()
-
-
-def test_an_older_save_never_replaces_a_newer_one(qapp):
-    page = store.create_page("Order")
-    newer = dict(page, name="Newer", modified=time.time() + 10)
-    older = dict(page, name="Older", modified=time.time())
-    store.save_page(newer)
-    store.save_page(older)  # e.g. an autosave finishing after a save made on switching page
-    assert store.load_page(page["id"])["name"] == "Newer"
-
-
-def test_unique_page_names(qapp):
-    assert store.unique_page_name() == "Page 1"
-    store.create_page("Page 1")
-    store.create_page("page 3")
-    assert store.unique_page_name() == "Page 2"
+    board = panel.board
+    note = make_note(qapp, board, QPointF(200, 300), "Hood: keep the rim thin")
+    title = board.add_page_title()
+    assert board.title_note() is title and title.sceneBoundingRect().bottom() < note.sceneBoundingRect().top()
+    assert abs(title.sceneBoundingRect().left() - note.sceneBoundingRect().left()) < 1
+    board.undo_stack.undo()
+    assert board.title_note() is None
+    board.undo_stack.redo()
+    title.setSelected(True)
+    board.delete_selection()  # (into the Trash)
+    board.add_page_title()
+    board.restore_all_trash()  # (the old header back: a heading, as one page has one header)
+    styles = sorted(n.style for n in board.items_list() if isinstance(n, NoteItem))
+    assert styles.count("title") == 1 and "heading" in styles
+    board.note_bar_target = lambda: title  # (the format bar can't turn the header into a card)
+    board.set_note_style("card")
+    assert title.style == "title"
 
 
 # ----------------------------------------------------------------------
-# Damaged pages, and image files no item uses
+# Search: this page, every page, the Pages sidebar
 # ----------------------------------------------------------------------
-def damage(page_id):
-    (store.page_dir(page_id) / "page.json").write_text("{not json", encoding="utf-8")
+def test_searching_saved_pages_finds_every_kind_with_words_around_it():
+    from core import artbook_search
+
+    page = {"items": [
+        {"kind": "note", "id": "n", "text": "Straps and belts: two thin ones", "html": "<p>x</p>"},
+        {"kind": "note", "id": "t", "style": "title", "text": "Mage costume", "about": "Leather strap study"},
+        {"kind": "note", "id": "d", "text": "Hood\nTop straps\nStrap buckle", "html": '<li class="unchecked">'},
+        {"kind": "table", "id": "tb", "title": "Plan", "columns": [{"name": "Task"}], "rows": [["Strap buckle"], ["Hood"]]},
+        {"kind": "link", "id": "l", "title": "Strap study", "about": "", "site": "Portfolio"},
+        {"kind": "image", "id": "i", "name": "strap_detail.png", "source": {}},
+        {"kind": "stroke", "id": "s"},
+    ], "comments": [{"id": "c", "item": None, "notes": [{"text": "the straps read too thick"}]}]}
+    hits = artbook_search.search_page(page, "STRAP")
+    assert [(h["item"], h["kind"], h["count"]) for h in hits] == [
+        ("n", "note", 1), ("t", "title", 1), ("d", "todo", 2), ("tb", "table", 1), ("l", "link", 1), ("i", "image", 1),
+        (None, "comment", 1)]
+    assert (hits[0]["before"], hits[0]["match"], hits[0]["after"]) == ("", "Strap", "s and belts: two thin ones")
+    long = "word " * 30 + "strap" + " more" * 30
+    before, match, after = artbook_search.snippet(long, long.index("strap"), 5)
+    assert before.startswith("...") and after.endswith("...") and match == "strap" and len(before) < 45
+    assert artbook_search.search_page(page, "   ") == []
 
 
-def test_each_save_keeps_the_one_before_as_a_backup(qapp):
-    page = store.create_page("Mood")
-    folder = store.page_dir(page["id"])
-    assert not (folder / "page.json.bak").exists()  # (nothing before the first save)
-    store.save_page(dict(page, name="Second", modified=time.time() + 1))
-    assert json.loads((folder / "page.json.bak").read_text(encoding="utf-8"))["name"] == "Mood"
-    store.save_page(dict(page, name="Third", modified=time.time() + 2))
-    assert json.loads((folder / "page.json.bak").read_text(encoding="utf-8"))["name"] == "Second"
-    assert not list(folder.glob("*.tmp"))
+def test_find_on_this_page_marks_the_matches_and_steps_through_them(qapp, panel):
+    from ui.artbook_board import TableItem
+
+    board = panel.board
+    panel.new_page(name="Mage costume")
+    straps = make_todo(qapp, board, "Straps", ("Top straps", "Strap buckle"))
+    straps.setPos(-400, 0)
+    hood = make_note(qapp, board, QPointF(300, 0), "Hood: thin rim")
+    table = make_table(qapp, board, QPointF(0, 600), (("Strap buckle", "1.5 h"),))
+    board.setFocus()
+    QTest.keySequence(board, "Ctrl+F")
+    bar = board.find_bar
+    assert bar.isVisible() and bar.edit.hasFocus() and all(b.toolTip() for b in (bar.btn_next, bar.btn_previous, bar.btn_page, bar.btn_all))
+    QTest.keyClicks(bar.edit, "strap")
+    bar.run()
+    assert bar.count.text() == "1 of 4" and board.find_position() == (1, 4)
+    matches = board._find_matches
+    assert [m["item"] for m in matches] == [straps, straps, straps, table] and matches[3]["cell"] == (0, 0)
+    assert hood not in [m["item"] for m in matches]
+    rects = board._text_rects(straps, matches[1]["start"], matches[1]["length"])
+    from PySide6.QtGui import QFontMetricsF
+
+    word = QFontMetricsF(straps.font()).horizontalAdvance("strap") * straps.scale()
+    assert len(rects) == 1 and abs(rects[0].width() - word) < 2  # (around "strap" in "Top straps")
+    board.viewport().grab()  # (draws the faded board, the marks and outlines)
+    QTest.keyClick(bar.edit, Qt.Key.Key_Return)
+    assert bar.count.text() == "2 of 4"
+    QTest.keyClick(bar.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    QTest.keyClick(bar.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    assert bar.count.text() == "4 of 4"  # (round to the last)
+    view = board.mapToScene(board.viewport().rect()).boundingRect()
+    assert view.intersects(table.sceneBoundingRect())  # (the board went there)
+    table.setSelected(True)
+    board.delete_selection()  # (changed: found again)
+    assert wait_for(qapp, lambda: board.find_position()[1] == 3)
+    QTest.keyClick(bar.edit, Qt.Key.Key_Escape)
+    assert not bar.isVisible() and board.find_position() == (0, 0) and not isinstance(board.item(table.item_id), TableItem)
 
 
-def test_a_damaged_page_opens_from_its_backup(qapp, monkeypatch):
-    from core import crash_log
+def test_find_on_every_page_lists_where_and_opens_the_page_at_the_match(qapp, panel):
+    from ui.artbook_board import NoteItem
 
-    logged = []
-    monkeypatch.setattr(crash_log, "log_error", lambda title, details="": logged.append(title))
-    page = store.create_page("Mood")
-    store.save_page(dict(page, name="Saved twice", modified=time.time() + 1))
-    damage(page["id"])
-    assert store.load_page(page["id"])["name"] == "Mood"  # (the save before)
-    assert store.take_restored(page["id"]) and not store.take_restored(page["id"])  # (said once)
-    assert [p["name"] for p in store.list_pages()] == ["Mood"]
-    assert len(logged) == 1 and "couldn't be read" in logged[0]  # (once, however often it's read)
-
-    # Saving again sets the damaged file aside, rather than making it the backup
-    store.save_page(dict(page, name="Fixed", modified=time.time() + 2))
-    folder = store.page_dir(page["id"])
-    assert (folder / "page.json.damaged").read_text(encoding="utf-8") == "{not json"
-    assert json.loads((folder / "page.json.bak").read_text(encoding="utf-8"))["name"] == "Mood"
-    assert store.load_page(page["id"])["name"] == "Fixed"
-
-
-def test_a_page_too_damaged_to_open_keeps_its_place(qapp):
-    folder_id = store.create_folder("Refs")
-    page = store.create_page("Broken", folder_id)
-    damage(page["id"])  # (and no backup: it was saved once)
-    with pytest.raises(store.PageError, match="damaged"):
-        store.load_page(page["id"])
-    assert [(p["name"], p.get("damaged")) for p in store.list_pages()] == [("Damaged page", True)]
-    index = store.page_tree()
-    assert index["folders"][0]["pages"] == [page["id"]]  # still filed in its folder
-    assert page["id"] in json.loads(store.index_path().read_text(encoding="utf-8"))["folders"][0]["pages"]
-
-
-def test_opening_a_damaged_page_says_what_happened(qapp, panel, monkeypatch):
-    messages = []
-    monkeypatch.setattr(panel.board, "show_message", messages.append)
-    restorable = store.create_page("Restorable")
-    store.save_page(dict(restorable, modified=time.time() + 1))
-    broken = store.create_page("Broken")
-    damage(restorable["id"])
-    damage(broken["id"])
-    panel.pages.rebuild()
-    assert "Damaged page" in names(panel) and "Restorable" in names(panel)
-
-    panel.open_page(restorable["id"])
-    assert panel.page["id"] == restorable["id"] and "previous save was opened" in messages[-1]
-    panel.open_page(broken["id"])
-    assert panel.page["id"] != broken["id"] and "couldn't be opened" in messages[-1]
-    assert broken["id"] in store.ordered_page_ids()  # (still listed, to delete or fix)
+    board = panel.board
+    other = panel.new_page(name="Armor references")
+    rivets = make_note(qapp, board, QPointF(2000, 2000), "Shoulder strap rivets: brass")
+    panel.save_now()
+    here = panel.new_page(name="Mage costume")
+    make_note(qapp, board, QPointF(0, 0), "Straps and belts")
+    board.open_find()
+    bar = board.find_bar
+    bar.btn_all.click()
+    assert bar.all_pages() and bar.edit.placeholderText() == "Find on every page"
+    bar.edit.setText("strap")
+    bar.run()
+    assert wait_for(qapp, lambda: bar.results.isVisible() and bar.list.count() == 4)
+    texts = [bar.list.item(n).text() for n in range(bar.list.count())]
+    assert texts[0].startswith("MAGE COSTUME  ·  THIS PAGE") and texts[2].startswith("ARMOR REFERENCES")
+    assert bar.list.item(3).data(Qt.ItemDataRole.UserRole) == (other, rivets.item_id, None)
+    QTest.keyClick(bar.edit, Qt.Key.Key_Down)
+    QTest.keyClick(bar.edit, Qt.Key.Key_Down)
+    assert bar.list.currentRow() == 3  # (headers are skipped)
+    QTest.keyClick(bar.edit, Qt.Key.Key_Return)
+    assert panel.current_page_id() == other and panel.btn_back.isVisible()
+    note = next(n for n in board.items_list() if isinstance(n, NoteItem) and n.style != "title")
+    assert board._find_matches[board._find_index]["item"] is note
+    view = board.mapToScene(board.viewport().rect()).boundingRect()
+    assert view.intersects(note.sceneBoundingRect())
+    panel.go_back()
+    assert panel.current_page_id() == here
 
 
-def test_image_files_no_item_uses_are_removed_when_the_page_opens(qapp, panel, monkeypatch):
-    page = store.create_page("Board")
-    used = store.store_blob(page["id"], b"used", ".png")
-    only_in_backup = store.store_blob(page["id"], b"backup", ".png")
-    unused = store.store_blob(page["id"], b"unused", ".png")
-    new_unused = store.store_blob(page["id"], b"just added", ".png")
-    store.save_page(dict(page, items=[{"id": "b", "kind": "image", "source": {"path": None, "blob": only_in_backup}}],
-                         modified=time.time() + 1))
-    store.save_page(dict(page, items=[{"id": "a", "kind": "image", "source": {"path": "C:/x.png", "blob": used}}],
-                         modified=time.time() + 2))
-    old = time.time() - 2 * store.UNUSED_IMAGE_AGE
-    for name in (used, only_in_backup, unused):
-        os.utime(store.blob_path(page["id"], name), (old, old))
-
-    panel.open_page(page["id"])
-    left = {f.name for f in store.images_dir(page["id"]).iterdir()}
-    assert left == {used, only_in_backup, new_unused}  # (an unused one added in the last hour stays too)
-
-
-def test_storing_an_image_already_there_marks_it_as_new(qapp):
-    page = store.create_page("Board")
-    name = store.store_blob(page["id"], b"data", ".png")
-    old = time.time() - 2 * store.UNUSED_IMAGE_AGE
-    os.utime(store.blob_path(page["id"], name), (old, old))
-    assert store.store_blob(page["id"], b"data", ".png") == name  # (e.g. dropped in again)
-    assert store.remove_unused_images(store.load_page(page["id"])) == 0
-
-
-# ----------------------------------------------------------------------
-# The Pages sidebar
-# ----------------------------------------------------------------------
-def test_sidebar_lists_folders_and_pages(qapp, panel):
-    folder = store.create_folder("Characters")
-    store.create_page("Hero", folder)
-    store.create_page("Loose")
-    panel.pages.rebuild()
-    assert names(panel) == ["Characters/", "  Hero", "Page 1", "Loose"]
-    current = panel.pages.item_for("page", panel.page["id"])
-    assert current.font(0).bold() and panel.pages.tree.currentItem() is current
-    assert panel.sidebar.is_open() and panel.btn_pages.isChecked()
-
-
-def test_clicking_a_page_saves_the_current_one_and_opens_it(qapp, panel, picture):
-    first = panel.page["id"]
-    other = store.create_page("Other")
-    panel.pages.rebuild()
-    add_image(qapp, panel, picture)
-    panel.pages.tree.itemClicked.emit(panel.pages.item_for("page", other["id"]), 0)
-    assert panel.page["id"] == other["id"] and panel.board.items_list() == []
-    assert len(store.load_page(first)["items"]) == 1  # saved on the way out, with no autosave wait
-    assert store.thumbnail_path(first).exists()  # and its picture for the list
-    assert panel.pages.item_for("page", other["id"]).font(0).bold()
-
-    panel.pages.tree.itemClicked.emit(panel.pages.item_for("page", first), 0)
-    assert len(panel.board.items_list()) == 1  # the edit survived the switch
-
-
-def test_renaming_in_place(qapp, panel):
-    other = store.create_page("Other")
-    panel.pages.rebuild()
-    item = panel.pages.item_for("page", panel.page["id"])
-    item.setText(0, "  My   board ")  # what the editor commits
-    qapp.processEvents()
-    assert panel.page["name"] == "My board" and "My board" in panel.lbl_page.text()
-    assert store.load_page(panel.page["id"])["name"] == "My board"
-    panel.pages.item_for("page", other["id"]).setText(0, "Renamed")
-    qapp.processEvents()
-    assert store.load_page(other["id"])["name"] == "Renamed"
-    assert "Renamed" in names(panel)
-
-    panel.pages.item_for("page", other["id"]).setText(0, "   ")  # an empty name is refused
-    qapp.processEvents()
-    assert store.load_page(other["id"])["name"] == "Renamed" and "Renamed" in names(panel)
-
-
-def test_autosave_keeps_a_rename_and_refreshes_the_thumbnail(qapp, panel, picture):
-    page_id = panel.page["id"]
-    add_image(qapp, panel, picture)
-    panel.rename_page(page_id, "Named")
-    panel.board.flip(True)
-    panel._save_in_background()
-    assert pump(qapp, lambda: not panel._saving)
-    assert store.load_page(page_id)["name"] == "Named"
-    assert store.thumbnail_path(page_id).exists()
-    thumb = panel.pages.item_for("page", page_id).icon(0)
-    assert not thumb.isNull()
-
-
-def test_new_page_and_folder_go_in_the_selected_folder(qapp, panel):
-    folder = store.create_folder("Refs")
-    panel.pages.rebuild()
-    panel.pages.tree.setCurrentItem(panel.pages.item_for("folder", folder))
-    panel.pages.btn_new_page.click()
-    assert store.page_folder(panel.page["id"]) == folder  # created there and opened
-    assert panel.page["name"] == "Page 2"
-    assert panel.pages.tree.state() == QAbstractItemView.State.EditingState  # its name is ready to type
-    panel.pages.tree.closePersistentEditor(panel.pages.tree.currentItem())
-
-    panel.pages.btn_new_folder.click()  # the selection is now the new page: in its folder
-    (sub,) = store.page_tree()["folders"][0]["folders"]
-    assert sub["name"] == "New Folder"
-
-
-def test_dragging_pages_and_folders(qapp, panel):
-    folder = store.create_folder("Refs")
-    second = store.create_folder("More")
-    a = store.create_page("A")
-    panel.pages.rebuild()
+def test_the_pages_sidebar_finds_pages_by_whats_on_them(qapp, panel):
+    board = panel.board
+    other = panel.new_page(name="Armor references")
+    make_note(qapp, board, QPointF(0, 0), "Shoulder strap rivets: brass")
+    panel.save_now()
+    panel.new_page(name="Mage costume")
     pages = panel.pages
-    pages.move_item(pages.item_for("page", a["id"]), pages.item_for("folder", folder), Position.OnItem)
-    pump(qapp, seconds=0.1)
-    assert store.page_folder(a["id"]) == folder
-    assert names(panel) == ["Refs/", "  A", "More/", "Page 1"]
-
-    pages.move_item(pages.item_for("page", a["id"]), pages.item_for("page", panel.page["id"]), Position.BelowItem)
-    pump(qapp, seconds=0.1)
-    assert names(panel) == ["Refs/", "More/", "Page 1", "A"]
-
-    pages.move_item(pages.item_for("folder", second), pages.item_for("folder", folder), Position.AboveItem)
-    pump(qapp, seconds=0.1)
-    assert names(panel)[:2] == ["More/", "Refs/"]
-    pages.move_item(pages.item_for("folder", folder), pages.item_for("folder", second), Position.OnItem)
-    pump(qapp, seconds=0.1)
-    assert names(panel)[:2] == ["More/", "  Refs/"]
-    pages.move_item(pages.item_for("folder", second), pages.item_for("folder", folder), Position.OnItem)
-    pump(qapp, seconds=0.1)  # into its own sub-folder: refused, nothing changes
-    assert names(panel)[:2] == ["More/", "  Refs/"]
-
-
-def test_search_filters_pages_and_keeps_folders_of_matches(qapp, panel):
-    folder = store.create_folder("Characters")
-    store.create_page("Hero sketch", folder)
-    store.create_page("Villain", folder)
-    store.create_page("Hero colors")
-    panel.pages.rebuild()
-    panel.pages.search.setText("hero")
-    assert names(panel) == ["Characters/", "  Hero sketch", "  Villain (hidden)", "Page 1 (hidden)", "Hero colors"]
-    panel.pages.search.setText("characters")  # a folder's name: all of it
-    assert names(panel) == ["Characters/", "  Hero sketch", "  Villain", "Page 1 (hidden)", "Hero colors (hidden)"]
-    panel.pages.search.clear()
-    assert all("(hidden)" not in row for row in names(panel))
-
-
-def test_folders_remember_being_collapsed(qapp, panel):
-    folder = store.create_folder("Refs")
-    store.create_page("Inside", folder)
-    panel.pages.rebuild()
-    panel.pages.item_for("folder", folder).setExpanded(False)
-    assert store.page_tree()["folders"][0]["open"] is False
-    panel.pages.rebuild()
-    assert not panel.pages.item_for("folder", folder).isExpanded()
-
-
-def test_deleting_the_open_page_opens_the_next(qapp, panel, trash):
-    first = panel.page["id"]
-    second = store.create_page("Second")
-    panel.pages.rebuild()
-    panel.pages.delete_page(first)
-    assert panel.page["id"] == second["id"]
-    assert not store.page_dir(first).exists() and len(trash) == 1
-    assert names(panel) == ["Second"]
-
-    panel.pages.delete_page(second["id"])  # the last one: a fresh page takes its place
-    assert panel.page is not None and panel.page["id"] != second["id"]
-    assert names(panel) == ["Page 1"]
-
-
-def test_deleting_asks_first(qapp, panel, trash, monkeypatch):
-    from ui import artbook_pages
-
-    monkeypatch.setattr(artbook_pages, "confirm", lambda *_args: False)
-    panel.pages.delete_page(panel.page["id"])
-    assert not trash and store.page_dir(panel.page["id"]).exists()
-
-
-def test_duplicating_the_open_page_copies_what_is_on_the_board(qapp, panel, picture):
-    add_image(qapp, panel, picture)  # not autosaved yet
-    panel.pages._duplicate(panel.page["id"])
-    copy_id = next(p for p in store.ordered_page_ids() if p != panel.page["id"])
-    assert len(store.load_page(copy_id)["items"]) == 1
-    assert names(panel) == ["Page 1", "Page 1 copy"]
-
-
-def test_sidebar_remembers_its_own_state(qapp, panel):
-    from core.settings import get_sidebar_state
-
-    panel.sidebar.set_pinned(False)
-    panel.sidebar.set_sidebar_width(300)
-    assert get_sidebar_state("artbook_sidebar")["pinned"] is False
-    assert get_sidebar_state("artbook_sidebar")["width"] == 300
-    assert get_sidebar_state()["pinned"] is True  # the library's sidebar is separate
+    pages.search.setText("rivets")
+    row = pages.item_for("page", other)
+    assert row.isHidden()  # (its name doesn't have it: until what's on pages is searched)
+    assert wait_for(qapp, lambda: not row.isHidden())
+    assert "Found on the page: “Shoulder strap rivets: brass”" in row.toolTip(0)
+    assert pages.item_for("page", panel.current_page_id()).isHidden()
+    pages.search.clear()
+    assert not pages.item_for("page", panel.current_page_id()).isHidden() and "Found" not in row.toolTip(0)
 
 
 # ----------------------------------------------------------------------
-# Ctrl+B in the main window: the side you're working in
+# Templates
 # ----------------------------------------------------------------------
-def test_ctrl_b_toggles_the_sidebar_of_the_focused_side(qapp):
-    from PySide6.QtTest import QTest
+def test_the_built_in_templates_make_real_pages(qapp, panel):
+    from ui import artbook_templates
+    from ui.artbook_board import ColumnItem, NoteItem, TableItem
 
-    import main
+    board = panel.board
+    folder = store.create_folder("Mentorship")
+    for kind, name, _about in artbook_templates.BUILT_INS:
+        panel.create_page("built_in", kind, f"My {name}", folder)
+        assert panel.page["name"] == f"My {name}" and store.page_folder(panel.page["id"]) == folder
+        title = board.title_note()
+        assert title is not None and title.toPlainText() == f"My {name}" and title.about
+        columns = [i for i in board.items_list() if isinstance(i, ColumnItem)]
+        assert columns and all(board.item(m) is not None for c in columns for m in c.members)
+        for column in columns:  # (its cards laid out inside it)
+            for card in board.column_cards(column):
+                assert column.sceneBoundingRect().contains(card.sceneBoundingRect().center())
+    board_kinds = {type(i).__name__ for i in board.items_list()}
+    assert board_kinds == {"NoteItem", "ColumnItem"}  # (Review notes: columns of notes and to-dos)
+    panel.create_page("built_in", "project", "Hunter", None)
+    table = next(i for i in board.items_list() if isinstance(i, TableItem))
+    assert [c[0] for c in table.columns] == ["Task", "Time", "Status"] and table.rows[0] == ["Blockout", "", "To do"]
+    todos = [n for n in board.items_list() if isinstance(n, NoteItem) and n.check_rows()]
+    assert [n.toPlainText().split("\n")[0] for n in todos] == ["Blockout", "Details", "Now"]
+    assert board.title_note().stats == "4 cards \u00b7 0 of 5 to-dos done"
 
-    win = main.MainWindow()
-    win.resize(1600, 800)
-    win.show()
-    win.activateWindow()
-    QTest.qWaitForWindowActive(win)
-    pump(qapp, seconds=0.2)
-    win.view_modes.set_mode("split")
-    pump(qapp, seconds=0.2)
+
+def test_the_new_page_window_shows_every_template_with_a_preview(qapp, panel):
+    from core import artbook_templates as templates
+    from ui.artbook_templates import NewPageDialog
+
+    panel.new_page(name="Mage costume")
+    make_note(qapp, panel.board, QPointF(0, 300), "Straps: two thin ones")
+    panel.save_now()
+    templates.save_template(panel.page["id"], "Costume layout")
+    dialog = NewPageDialog(None, "Mentorship")
     try:
-        assets, pages = win.sidebar.is_open(), win.artbook_panel.sidebar.is_open()
-        win.artbook_panel.board.setFocus()
-        QTest.keyClick(win.artbook_panel.board, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
-        assert win.artbook_panel.sidebar.is_open() != pages and win.sidebar.is_open() == assets
-        win.btn_sidebar.setFocus()  # anything on the asset side
-        QTest.keyClick(win.btn_sidebar, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
-        assert win.sidebar.is_open() != assets and win.artbook_panel.sidebar.is_open() != pages
-
-        win.view_modes.set_mode("artbook")  # the asset side is hidden: focus moves to the board
-        pump(qapp, seconds=0.1)
-        assert win.artbook_panel.isAncestorOf(qapp.focusWidget())
-        win.view_modes.set_mode("asset")
-        pump(qapp, seconds=0.1)
-        assert win.asset_panel.isAncestorOf(qapp.focusWidget())
+        tiles = [dialog.list.item(n) for n in range(dialog.list.count())]
+        assert [t.text().split("\n")[0] for t in tiles] == ["Blank", "Project board", "Mood board", "Character sheet",
+                                                              "Review notes", "Costume layout"]
+        assert tiles[-1].text().endswith("Yours: from \u201cMage costume\u201d")
+        assert all(not t.icon().isNull() for t in tiles) and dialog.choice() == ("blank", "")
+        assert dialog.btn_create.toolTip() and dialog.name().startswith("Page ")
+        dialog.list.setCurrentRow(5)
+        dialog.edit.setText("  Hunter   armor ")
+        assert dialog.choice() == ("yours", templates.list_templates()[0]["id"]) and dialog.name() == "Hunter armor"
     finally:
-        win.close()
-        pump(qapp, seconds=0.2)
+        dialog.deleteLater()
 
 
-def test_the_pencil_renames_without_opening_or_closing(qapp, panel):
-    from PySide6.QtTest import QTest
+def test_a_page_saved_as_a_template_starts_new_pages(qapp, panel, tmp_path):
+    from PIL import Image
 
+    from core import artbook_templates as templates
+    from ui.artbook_board import ImageItem, NoteItem
+
+    board = panel.board
+    page_id = panel.new_page(name="Mage costume")
+    picture = tmp_path / "ref.png"
+    Image.new("RGB", (40, 30), "red").save(picture)
+    board.add_files([picture])
+    straps = make_todo(qapp, board, "Straps", ("Top straps", "Buckle"))
+    board.toggle_check(straps, straps.check_rows()[0].blockNumber())
+    board.open_comments(straps)
+    board.post_comment(board._open_thread["id"], "Too thick")
+    board.close_comments()
+    assert wait_for(qapp, lambda: any(isinstance(i, ImageItem) for i in board.items_list()))
+    panel.save_now()
+    entry = templates.save_template(page_id, "Costume layout", keep_pictures=False, untick=True)
+    assert [e["name"] for e in templates.list_templates()] == ["Costume layout"] and templates.thumbnail(entry["id"])
+    folder = store.create_folder("Mentorship")
+    panel.create_page("yours", entry["id"], "Hunter armor", folder)
+    assert wait_for(qapp, lambda: panel.page["name"] == "Hunter armor")
+    assert store.page_folder(panel.page["id"]) == folder and panel.page["id"] != page_id
+    assert not any(isinstance(i, ImageItem) for i in board.items_list())  # (pictures left out)
+    todo = next(n for n in board.items_list() if isinstance(n, NoteItem) and n.check_rows())
+    assert todo.progress() == (0, 2) and board.page_comments() == []  # (unticked; no comments)
+    assert board.title_note().toPlainText() == "Hunter armor"
+    templates.rename_template(entry["id"], "Costume")
+    assert templates.list_templates()[0]["name"] == "Costume"
+    templates.delete_template(entry["id"])
+    assert templates.list_templates() == []
+
+
+def test_new_page_asks_for_a_name_and_template_and_your_templates_move_with_your_pages(qapp, panel, monkeypatch, tmp_path):
+    from core import artbook_templates as templates
+    from ui import artbook_templates
+
+    asked = []
+    monkeypatch.setattr(artbook_templates, "ask_new_page", lambda parent, folder: asked.append(folder) or ("built_in", "mood", "Moods"))
     folder = store.create_folder("Refs")
-    store.create_page("Inside", folder)
     panel.pages.rebuild()
-    tree = panel.pages.tree
-    item = panel.pages.item_for("folder", folder)
-    tree.setCurrentItem(item)  # the selected row shows the pencil
-    index = tree.indexFromItem(item)
-    spot = tree.pencil_rect(index).center()
-    assert tree._pencil_at(spot) == index
-    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, spot)
-    assert tree.state() == QAbstractItemView.State.EditingState
-    assert item.isExpanded()  # not toggled
-    tree.closePersistentEditor(item)
+    panel.pages.new_page(folder)
+    assert asked == ["Refs"] and panel.page["name"] == "Moods" and store.page_folder(panel.page["id"]) == folder
+    monkeypatch.setattr(artbook_templates, "ask_new_page", lambda parent, folder: None)  # (cancelled)
+    count = len(store.list_pages())
+    panel.pages.new_page(None)
+    assert len(store.list_pages()) == count
+    panel.save_now()
+    templates.save_template(panel.page["id"], "Moods")
+    store.move_pages(tmp_path / "moved")
+    assert [e["name"] for e in templates.list_templates()] == ["Moods"]
+    assert templates.folder() == tmp_path / "moved" / store.TEMPLATES_FOLDER
 
-    # A plain click on the folder opens / closes it; a double-click doesn't rename it
-    away = tree.visualItemRect(item).center()
-    away.setX(60)
-    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, away)
-    assert not item.isExpanded()
-    panel.pages._on_item_double_clicked(item, 0)
-    assert tree.state() != QAbstractItemView.State.EditingState
+
+# ----------------------------------------------------------------------
+# Exporting
+# ----------------------------------------------------------------------
+def make_export_page(qapp, panel, tmp_path):
+    """A page with a header, two notes, a link card, a file card and a comment."""
+    board = panel.board
+    panel.new_page(name="Mage costume")
+    hood = make_note(qapp, board, QPointF(0, 300), "Hood")
+    straps = make_note(qapp, board, QPointF(600, 300), "Straps")
+    model = tmp_path / "Mage_Bust.fbx"
+    model.write_bytes(b"fbx")
+    board.add_link_entries([({"url": "https://example.org/strap-study", "title": "Strap study", "site": "example.org"}, None, None)],
+                           QPointF(0, 700))
+    board.add_files([model], QPointF(600, 700))
+    assert wait_for(qapp, lambda: len(board.cards()) == 2)
+    board.open_comments(hood)
+    board.post_comment(board._open_thread["id"], "Rim too thick")
+    board.close_comments()
+    board._scene.clearSelection()
+    return board, hood, straps
+
+
+def test_what_an_export_takes_its_size_and_background(qapp, panel, tmp_path):
+    board, hood, straps = make_export_page(qapp, panel, tmp_path)
+    title = board.title_note()
+    everything, bounds, density, _r = board.export_plan("page", "2")
+    assert title in everything and len(everything) == 5 and density == 2.0
+    no_title, _b, _d, _r = board.export_plan("page", "1", title=False)
+    assert title not in no_title and len(no_title) == 4
+    hood.setSelected(True)
+    assert board.export_plan("auto")[0] == [hood] and board.export_plan("selection")[0] == [hood]
+    assert len(board.export_plan("page")[0]) == 5  # (the whole page, though something's selected)
+    board.set_view(1.0, hood.sceneBoundingRect().center())
+    in_view, view_bounds, _d, _r = board.export_plan("view", "1")
+    assert hood in in_view and view_bounds == board.mapToScene(board.viewport().rect()).boundingRect()
+    board._scene.clearSelection()
+    one = board.export_image({}, "page", "1", background="white")
+    two = board.export_image({}, "page", "2", background="clear")
+    assert abs(two.width() - 2 * one.width()) <= 2
+    assert one.pixelColor(1, 1).name() == "#ffffff" and two.pixelColor(1, 1).alpha() == 0
+    pinned = board.export_image({}, "page", "1", background="white", pins=True)
+    assert pinned.width() == one.width() and pinned.height() > one.height()  # (the comments listed under it)
+    assert board.export_comment_lines(board.export_threads(everything, bounds))[0][0] == "1"
+
+
+def test_a_pdf_export_keeps_cards_clickable_and_lists_the_comments(qapp, panel, tmp_path):
+    import re
+
+    board, _hood, _straps = make_export_page(qapp, panel, tmp_path)
+    path = tmp_path / "page.pdf"
+    assert board.export_pdf(path, {}, "page", pins=True, links=True)
+    data = path.read_bytes()
+    assert data.startswith(b"%PDF")
+    uris = re.findall(rb"/URI\s*\(([^)]*)\)", data)
+    assert b"https://example.org/strap-study" in uris and any(u.endswith(b"Mage_Bust.fbx") for u in uris)
+    assert len(re.findall(rb"/Type\s*/Page\b", data)) == 2  # (the comments on a second page)
+    card = next(c for c in board.cards() if c.kind == "link")
+    _items, bounds, _d, _r = board.export_plan("page")
+    rects = [list(map(float, r.split())) for r in re.findall(rb"/Rect\s*\[([^\]]*)\]", data)]
+    left = card.sceneBoundingRect().left() - bounds.left()
+    assert any(abs(r[0] - left) < 3 and r[2] - r[0] > card.sceneBoundingRect().width() * 0.9 for r in rects)
+    plain = tmp_path / "plain.pdf"
+    board.export_pdf(plain, {}, "page", pins=False, links=False)
+    assert b"/URI" not in plain.read_bytes() and len(re.findall(rb"/Type\s*/Page\b", plain.read_bytes())) == 1
+
+
+def test_the_panel_exports_png_jpg_pdf_and_copies(qapp, panel, tmp_path, monkeypatch):
+    from PIL import Image
+    from PySide6.QtWidgets import QApplication
+
+    from core.settings import set_artbook_export
+
+    board, _hood, _straps = make_export_page(qapp, panel, tmp_path)
+    asked = []
+    monkeypatch.setattr(panel, "_ask_save_path", lambda title, stem, suffix, _filter: asked.append((title, stem)) or tmp_path / f"out{suffix}")
+    set_artbook_export(background="clear", size="1")
+    panel.export("png")
+    assert wait_for(qapp, lambda: (tmp_path / "out.png").is_file()) and asked[0] == ("Export as PNG", "Mage costume")
+    panel.export("jpg")
+    assert wait_for(qapp, lambda: (tmp_path / "out.jpg").is_file())
+    assert (tmp_path / "out.jpg").read_bytes()[:2] == b"\xff\xd8"
+    assert Image.open(tmp_path / "out.jpg").getpixel((1, 1)) == (255, 255, 255)  # (see-through: white in a JPG)
+    panel.export("pdf")
+    assert wait_for(qapp, lambda: (tmp_path / "out.pdf").is_file())
+    QApplication.clipboard().clear()
+    panel.export("copy")
+    assert wait_for(qapp, lambda: not QApplication.clipboard().image().isNull())
+
+
+def test_the_export_dialog_remembers_its_choices(qapp, panel, tmp_path):
+    from core.settings import get_artbook_export
+    from ui.artbook_export import ExportDialog, settings_text
+
+    board, hood, _straps = make_export_page(qapp, panel, tmp_path)
+    dialog = ExportDialog(board)
+    try:
+        assert not dialog.rb_selection.isEnabled() and dialog.rb_page.isChecked()
+        assert dialog.preview.pixmap() is not None and not dialog.preview.pixmap().isNull()
+        assert dialog.size_note.text().endswith("px") and dialog.cb_title.isEnabled() and dialog.cb_pins.isEnabled()
+        assert all(b.toolTip() for b in dialog.formats.buttons() + dialog.sizes.buttons() + dialog.backgrounds.buttons())
+        dialog.set_choice(dialog.backgrounds, "clear")
+        dialog.set_choice(dialog.formats, "jpg")
+        clear = next(b for b in dialog.backgrounds.buttons() if b.property("value") == "clear")
+        assert not clear.isEnabled() and dialog.options()["background"] == "white" and not dialog.cb_links.isEnabled()
+        dialog.set_choice(dialog.formats, "pdf")
+        dialog.refresh()
+        assert dialog.cb_links.isEnabled() and " in: " in dialog.size_note.text() and dialog.btn_export.text() == "Export PDF..."
+        dialog.set_choice(dialog.sizes, "4")
+        dialog.cb_pins.setChecked(True)
+        dialog._on_export()
+        saved = get_artbook_export()
+        assert (saved["format"], saved["size"], saved["background"], saved["pins"], saved["area"]) == ("pdf", "4", "white", True, "page")
+        assert settings_text() == "Whole page · 4× · white · with the title · comment pins"
+    finally:
+        dialog.deleteLater()
+    hood.setSelected(True)
+    dialog = ExportDialog(board)
+    try:
+        assert dialog.rb_selection.isEnabled() and dialog.rb_selection.text() == "The selection (1 thing)"
+    finally:
+        dialog.deleteLater()
+
+
+def test_the_quick_export_menu_and_keys(qapp, panel, tmp_path):
+    from ui.artbook_export import settings_text
+
+    board, _hood, _straps = make_export_page(qapp, panel, tmp_path)
+    assert panel.btn_export.toolTip().startswith("Export:")
+    panel._fill_export_menu()
+    texts = [a.text() for a in panel.export_menu.actions() if not a.isSeparator()]
+    assert texts[:4] == ["Export as PNG...", "Export as JPG...", "Export as PDF...", "Copy as Image"]
+    assert texts[-3:] == [settings_text(), "Export Options...", "Export Page (.artbook)..."]
+    asked = []
+    board.export_requested.disconnect()
+    board.export_requested.connect(lambda fmt, area: asked.append((fmt, area)))
+    board.setFocus()
+    QTest.keySequence(board, "Ctrl+E")
+    QTest.keySequence(board, "Ctrl+Shift+E")
+    QTest.keySequence(board, "Ctrl+Shift+C")
+    assert asked == [("png", ""), ("options", ""), ("copy", "")]

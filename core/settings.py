@@ -632,6 +632,87 @@ def set_artbook_page(page_id: str) -> None:
     _update_config("artbook_page", page_id)
 
 
+ARTBOOK_CARD_STYLES = ("big", "compact")
+
+
+def get_artbook_card_style(kind: str) -> str:
+    """The look last used for an Artbook card kind ("link", "file", "page_card"): "big" (the default) or "compact"."""
+    styles = _load_raw_config().get("artbook_card_styles")
+    style = styles.get(kind) if isinstance(styles, dict) else None
+    return style if style in ARTBOOK_CARD_STYLES else "big"
+
+
+def set_artbook_card_style(kind: str, style: str) -> None:
+    if style not in ARTBOOK_CARD_STYLES or get_artbook_card_style(kind) == style:
+        return
+    styles = _load_raw_config().get("artbook_card_styles")
+    styles = dict(styles) if isinstance(styles, dict) else {}
+    styles[kind] = style
+    _update_config("artbook_card_styles", styles)
+
+
+ARTBOOK_EXPORT_DEFAULTS = {"format": "png", "area": "auto", "size": "full", "background": "board", "title": True,
+                           "pins": False, "links": True}
+ARTBOOK_EXPORT_CHOICES = {"format": ("png", "jpg", "pdf"), "area": ("auto", "page", "selection", "view"),
+                          "size": ("1", "2", "4", "full"), "background": ("board", "white", "clear")}
+
+
+def get_artbook_export() -> dict:
+    """The Artbook's export settings, as last used (the Export dialog sets them; the quick exports use them)."""
+    saved = _load_raw_config().get("artbook_export")
+    saved = saved if isinstance(saved, dict) else {}
+    out = dict(ARTBOOK_EXPORT_DEFAULTS)
+    for key, choices in ARTBOOK_EXPORT_CHOICES.items():
+        if saved.get(key) in choices:
+            out[key] = saved[key]
+    for key in ("title", "pins", "links"):
+        if isinstance(saved.get(key), bool):
+            out[key] = saved[key]
+    return out
+
+
+def set_artbook_export(**changes) -> None:
+    current = get_artbook_export()
+    for key, value in changes.items():
+        if key in ARTBOOK_EXPORT_CHOICES and value in ARTBOOK_EXPORT_CHOICES[key]:
+            current[key] = value
+        elif key in ("title", "pins", "links") and isinstance(value, bool):
+            current[key] = value
+    _update_config("artbook_export", current)
+
+
+MAX_RECENT_PAGES = 20
+
+
+def get_artbook_recent_pages() -> list[str]:
+    """The Artbook pages opened last, the latest first (the page switcher lists them first)."""
+    pages = _load_raw_config().get("artbook_recent_pages")
+    return [p for p in pages if isinstance(p, str)][:MAX_RECENT_PAGES] if isinstance(pages, list) else []
+
+
+def add_artbook_recent_page(page_id: str) -> None:
+    pages = [page_id] + [p for p in get_artbook_recent_pages() if p != page_id]
+    if pages != get_artbook_recent_pages():
+        _update_config("artbook_recent_pages", pages[:MAX_RECENT_PAGES])
+
+
+def get_artbook_headers_hint_shown() -> bool:
+    return _load_raw_config().get("artbook_headers_hint") is True
+
+
+def set_artbook_headers_hint_shown() -> None:
+    _update_config("artbook_headers_hint", True)
+
+
+def get_artbook_nav_hints() -> bool:
+    """Whether the board shows its mouse controls in the bottom-right corner (on to start with)."""
+    return _load_raw_config().get("artbook_nav_hints") is not False
+
+
+def set_artbook_nav_hints(shown: bool) -> None:
+    _update_config("artbook_nav_hints", bool(shown))
+
+
 def get_pages_dir() -> str:
     """The folder the Artbook's pages are kept in, or "" for the default one (core.artbook_store)."""
     folder = _load_raw_config().get("artbook_pages_dir")
@@ -650,6 +731,16 @@ def get_last_import_dir() -> str:
 
 def set_last_import_dir(folder: str) -> None:
     _update_config("artbook_import_dir", folder)
+
+
+def get_last_pictures_dir() -> str:
+    """Where pictures were last added to an Artbook page from (the rail's Pictures), or ""."""
+    folder = _load_raw_config().get("artbook_pictures_dir")
+    return folder if isinstance(folder, str) else ""
+
+
+def set_last_pictures_dir(folder: str) -> None:
+    _update_config("artbook_pictures_dir", folder)
 
 
 def get_last_export_dir() -> str:

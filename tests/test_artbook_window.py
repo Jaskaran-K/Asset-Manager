@@ -286,13 +286,15 @@ def test_send_to_artbook_lists_every_page_and_new_page(qapp, main_window):
     select(main_window, "red.png", "chair.fbx")
     menu = QMenu()
     main_window.artbook_sender.add_send_menu(menu, [a.path for a in main_window._selected_assets()])
-    assert menu_titles(menu) == ["Send to Artbook/", "  New Page", "  Refs/", "    Inside", "  Loose"]
+    assert menu_titles(menu) == ["Send to Artbook/", "  Unsorted (the Artbook's tray)", "  New Page", "  Refs/", "    Inside", "  Loose"]
 
-    select(main_window, "chair.fbx")  # no images: nothing to send
+    select(main_window, "chair.fbx")  # no images: only Unsorted takes it (pages take pictures)
     menu = QMenu()
     main_window.artbook_sender.add_send_menu(menu, [a.path for a in main_window._selected_assets()])
     (send,) = menu.actions()
-    assert not send.isEnabled() and "images only" in send.text()
+    assert send.isEnabled()
+    assert menu_titles(menu) == ["Send to Artbook/", "  Unsorted (the Artbook's tray)", "  (Pages take pictures: other files go to Unsorted)"]
+    assert not send.menu().actions()[-1].isEnabled()
 
 
 def test_sending_adds_the_images_to_the_chosen_page(qapp, main_window):

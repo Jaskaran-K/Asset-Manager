@@ -159,13 +159,15 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         from .version import APP_VERSION
 
         return {"ok": True, "version": APP_VERSION, "app": ask_app({"op": "hello"}) is not None}
-    if op not in ("save", "take"):
+    if op not in ("save", "take", "link"):
         return {"ok": False, "message": "Asset Manager didn't understand that: update the app and the extension."}
     target = request.get("target")
-    if target not in ("library", "artbook"):
+    if target not in ("library", "artbook", "unsorted") or (op == "link" and target == "library"):
         return {"ok": False, "message": "Asset Manager didn't understand where to put it."}
     page = request.get("page") if isinstance(request.get("page"), str) and web_images.is_web_url(request["page"]) else ""
     title = request.get("title") if isinstance(request.get("title"), str) else ""
+    if op == "link":
+        return _link(request, target)
     if op == "take":
         return _take(request, target, page, title[:300])
     raw = request.get("sources")
@@ -224,6 +226,11 @@ def _take(request: dict[str, Any], target: str, page: str, title: str) -> dict[s
         if ext is None:
             return {"ok": False, "message": "What the browser downloaded isn't a picture."}
         url = request.get("url") if isinstance(request.get("url"), str) else ""
+        if isinstance(request.get("link"), dict):  # (a link card's preview picture)
+            link = _link_details(request["link"])
+            if not link["url"]:
+                return {"ok": False, "message": "Asset Manager didn't get the link's address."}
+            return deliver_link(target, link, (data, ext), _link_icon(request["link"], link["url"]))
         return deliver(target, data, ext, url, page, title)
     finally:
         try:
@@ -239,7 +246,96 @@ def _take(request: dict[str, Any], target: str, page: str, title: str) -> dict[s
 def deliver(target: str, data: bytes, ext: str, url: str, page: str, title: str) -> dict[str, Any]:
     if target == "artbook":
         return _to_artbook(data, ext, url, page, title)
+    if target == "unsorted":
+        return _to_unsorted(data, ext, url, page, title)
     return _to_library(data, ext, url, page, title)
+
+
+def _to_unsorted(data: bytes, ext: str, url: str, page: str, title: str) -> dict[str, Any]:
+    """A picture for the Artbook's Unsorted tray: it waits there, on every page, to be placed."""
+    from . import artbook_unsorted
+
+    artbook_unsorted.add("image", {"name": file_stem(url, title), "source": site_name(page or url), "url": url}, (data, ext))
+    ask_app({"op": "unsorted"})
+    return {"ok": True, "message": "Added to the Artbook's Unsorted tray: drag it onto a page from there."}
+
+
+def _link_details(raw: dict[str, Any]) -> dict[str, str]:
+    """A link card's details as the browser sent them (cleaned): url, title, about, site."""
+    def text(key: str, limit: int) -> str:
+        value = raw.get(key)
+        return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+    url = raw.get("url") if isinstance(raw.get("url"), str) and web_images.is_web_url(raw["url"]) else ""
+    return {"url": url[:4000], "title": text("title", 300), "about": text("about", 600), "site": text("site", 200)}
+
+
+def _link_icon(raw: dict[str, Any], url: str) -> Optional[tuple[bytes, str]]:
+    """The site icon the browser sent with a link (its data, read in the page, or its address), as
+    web_images.icon_data; None: none (or it couldn't be had: the card shows the plain web mark)."""
+    icon = raw.get("icon")
+    if not isinstance(icon, str) or not (web_images.is_web_url(icon) or icon.startswith("data:image/")):
+        return None
+    return web_images.fetch_icon(icon, url)
+
+
+def _link(request: dict[str, Any], target: str) -> dict[str, Any]:
+    """A page (or a link on it) for the Artbook, as a link card: its details as the browser saw them, and its
+    preview picture (the site refuses the app: the browser downloads it, "in_browser"). A link on a page: the
+    app reads the page it leads to for what the browser didn't send."""
+    link = _link_details(request)
+    if not link["url"]:
+        return {"ok": False, "message": "Only web pages (http or https) can be added as links."}
+    raw_picture = request.get("picture")
+    picture_url = raw_picture if isinstance(raw_picture, str) and (
+        web_images.is_web_url(raw_picture) or raw_picture.startswith("data:image/")) else ""
+    if not picture_url and not link["about"]:
+        try:
+            kind, found = web_images.read_link(link["url"])
+        except Exception:  # pylint: disable=broad-except
+            kind, found = "", {}
+        if kind == "page":
+            link = {**link, "title": link["title"] or found.get("title") or "", "about": found.get("about") or "",
+                    "site": link["site"] or found.get("site") or ""}
+            data = found.get("picture")
+            ext = web_images.image_ext(data) if data else None
+            icon = found.get("icon") or _link_icon(request, link["url"])  # (the page's own icon, else the browser's)
+            return deliver_link(target, link, (data, ext) if ext else None, icon)
+    icon = _link_icon(request, link["url"])
+    picture = None
+    if picture_url:
+        try:
+            picture = web_images.fetch_image(picture_url, link["url"])
+        except web_images.Refused as exc:
+            return {"ok": False, "in_browser": picture_url, "message": str(exc)}
+        except Exception:  # pylint: disable=broad-except
+            picture = None  # (a card without its picture)
+    return deliver_link(target, link, picture, icon)
+
+
+def deliver_link(target: str, link: dict[str, str], picture: Optional[tuple[bytes, str]],
+                 icon: Optional[tuple[bytes, str]] = None) -> dict[str, Any]:
+    """A link card for the page that's open (through the Artbook inbox, as pictures go) or for Unsorted, with its
+    preview picture and its site's icon (each (data, ".png"...) or None)."""
+    if target == "unsorted":
+        from . import artbook_unsorted
+
+        artbook_unsorted.add("link", {**link, "source": link["site"] or site_name(link["url"])}, picture, icon)
+        ask_app({"op": "unsorted"})
+        return {"ok": True, "message": "Added the link to the Artbook's Unsorted tray."}
+    folder_path = inbox()
+    folder_path.mkdir(parents=True, exist_ok=True)
+    stem = f"{time.time_ns()}-{uuid.uuid4().hex[:6]}"
+    if picture is not None:
+        _write(folder_path / f"{stem}{picture[1]}", picture[0])
+    if icon is not None:
+        _write(folder_path / f"{stem}.icon{icon[1]}", icon[0])
+    (folder_path / f"{stem}.json").write_text(json.dumps({"kind": "link", **link}), encoding="utf-8")
+    reply = ask_app({"op": "artbook"})
+    if reply is None:
+        return {"ok": True, "message": "Saved for the Artbook: the link goes on your page when Asset Manager next opens."}
+    name = reply.get("page") if isinstance(reply.get("page"), str) else ""
+    return {"ok": True, "message": f'Added the link to the Artbook page "{name}".' if name else "Sent the link to the Artbook."}
 
 
 def _to_library(data: bytes, ext: str, url: str, page: str, title: str) -> dict[str, Any]:
@@ -296,15 +392,50 @@ def take_inbox() -> list[tuple[bytes, str, str]]:
     for meta in sorted(folder_path.glob("*.json")):
         pictures = [p for p in folder_path.glob(f"{meta.stem}.*") if p.suffix != ".json"]
         try:
-            name = json.loads(meta.read_text(encoding="utf-8")).get("name", "")
+            details = json.loads(meta.read_text(encoding="utf-8"))
+            name = details.get("name", "")
         except (OSError, ValueError, AttributeError):
-            name = ""
+            details, name = {}, ""
+        if isinstance(details, dict) and details.get("kind") == "link":
+            continue  # (a link card: take_inbox_links)
         for picture in pictures:
             try:
                 taken.append((picture.read_bytes(), picture.suffix.lower(), str(name or "")))
                 picture.unlink()
             except OSError:
                 continue
+        meta.unlink(missing_ok=True)
+    return taken
+
+
+def take_inbox_links() -> list[tuple[dict[str, str], Optional[bytes], Optional[bytes]]]:
+    """The link cards waiting for the Artbook's open page, oldest first, as (details, preview picture's data, site
+    icon's data); taken out of the inbox."""
+    folder_path = inbox()
+    if not folder_path.is_dir():
+        return []
+    taken = []
+    for meta in sorted(folder_path.glob("*.json")):
+        try:
+            details = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(details, dict) or details.get("kind") != "link":
+            continue
+        picture = icon = None
+        for path in folder_path.glob(f"{meta.stem}.*"):
+            if path.suffix != ".json":
+                try:
+                    if path.name.startswith(f"{meta.stem}.icon."):
+                        icon = icon or path.read_bytes()
+                    else:
+                        picture = picture or path.read_bytes()
+                    path.unlink()
+                except OSError:
+                    pass
+        link = _link_details(details)
+        if link["url"]:
+            taken.append((link, picture, icon))
         meta.unlink(missing_ok=True)
     return taken
 
@@ -587,7 +718,11 @@ def needs_refresh() -> bool:
     except (OSError, ValueError, AttributeError):
         copied = None
     wanted = ".".join(str(int(p)) for p in re.findall(r"\d+", APP_VERSION)[:4]) or "1.0"
-    return registered.get("path") != str(host_command()) or copied != wanted
+    try:  # (its code changed without a new version number: a build between releases)
+        changed = (extension_folder() / "background.js").read_bytes() != (bundled_extension() / "background.js").read_bytes()
+    except OSError:
+        changed = True
+    return registered.get("path") != str(host_command()) or copied != wanted or changed
 
 
 def remove() -> None:

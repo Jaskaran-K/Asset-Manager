@@ -14,7 +14,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage
 from PySide6.QtWidgets import QMenu, QWidget
 
-from core import app_helpers, apps, artbook_store
+from core import app_helpers, apps, artbook_store, artbook_unsorted
 from core.hdr_image import HDR_EXTENSIONS
 from core.picture_look import color_name, hex_of
 from core.scanner import AssetItem
@@ -42,14 +42,24 @@ class ArtbookSender:
     def add_send_menu(
         self, menu: QMenu, paths: Sequence[Path], resolve: Optional[Callable[[list[Path]], list[Path]]] = None
     ) -> None:
-        """Send to Artbook: a new page, or any page (in its folders). Image files only.
-        resolve(paths): the real files to send, when picked (files inside archives unpacked)."""
-        paths = [p for p in paths if p.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
-        send = menu.addMenu("Send to Artbook" if paths else "Send to Artbook (images only)")
+        """Send to Artbook: Unsorted (any file: it waits in the Artbook's tray), a new page, or any page (in its
+        folders: images only). resolve(paths): the real files to send, when picked (files inside archives unpacked)."""
+        files = list(paths)
+        paths = [p for p in files if p.suffix.lower() in artbook_store.IMAGE_EXTENSIONS]
+        send = menu.addMenu("Send to Artbook")
         set_icon(send.menuAction(), "view_artbook")
-        send.setEnabled(bool(paths))
+        send.setEnabled(bool(files))
+        if not files:
+            return
+        unsorted = send.addAction("Unsorted (the Artbook's tray)")
+        set_icon(unsorted, "tray")
+        unsorted.setToolTip("It waits in the Artbook's Unsorted tray (U), for whichever page you drag it onto")
+        unsorted.triggered.connect(lambda: self.send_to_unsorted(resolve(files) if resolve else files))
+        send.addSeparator()
         if paths:
             self.fill_artbook_menu(send, lambda page_id: self.send_files(resolve(paths) if resolve else paths, page_id))
+        else:
+            send.addAction("(Pages take pictures: other files go to Unsorted)").setEnabled(False)
 
     def fill_artbook_menu(self, send: QMenu, on_pick: Callable[[Optional[str]], None]) -> None:
         """Fill a "Send to Artbook" menu: New Page, then every page (in its folders). on_pick(page id,
@@ -77,6 +87,16 @@ class ArtbookSender:
                 action.triggered.connect(lambda _checked=False, pid=page_id: on_pick(pid))
 
         add(send, artbook_store.page_tree())
+
+    def send_to_unsorted(self, paths: list[Path]) -> None:
+        """Files for the Artbook's Unsorted tray (linked: placed, a picture or a file card)."""
+        count = 0
+        for path in paths:
+            if Path(path).is_file():
+                artbook_unsorted.add("file", {"path": str(path), "name": Path(path).name, "source": "the asset grid"})
+                count += 1
+        self.panel.unsorted_arrived()
+        self._status(f"Sent {count} file{'s' if count != 1 else ''} to the Artbook's Unsorted tray (U shows it).")
 
     def send_files(self, paths: list[Path], page_id: Optional[str]) -> None:
         """Add image files to an Artbook page (None: a new one), which becomes the open page."""
@@ -115,6 +135,23 @@ class ArtbookSender:
         name = panel.page.get("name") or "Untitled"
         hint = " Ctrl+2 shows the Artbook." if not panel.isVisible() else ""
         self._status(f'Added {count} picture{"s" if count != 1 else ""} from the browser to "{name}".{hint}')
+
+    def send_links(self, links: list) -> None:
+        """Link cards sent from the browser (core.browser_link: details as the browser saw them, and the preview's
+        data) to the Artbook page that's open, or the last one open."""
+        panel = self.panel
+        if panel.current_page_id() is None:
+            try:
+                panel.open_page(get_artbook_page())
+            except (artbook_store.PageError, OSError) as exc:
+                self._status(f"Couldn't open the Artbook page: {exc}")
+                return
+            if panel.current_page_id() is None:
+                return
+        panel.board.add_link_entries(links)
+        name = panel.page.get("name") or "Untitled"
+        count = len(links)
+        self._status(f'Added {count} link{"s" if count != 1 else ""} from the browser to "{name}".')
 
     def _open_page(self, page_id: Optional[str]) -> str:
         """Open an Artbook page to send things to (None: a new one): "" or what went wrong."""

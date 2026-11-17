@@ -3,7 +3,9 @@
 Folders (which can hold folders) and pages, in the order kept by core.artbook_store's index,
 each page with a small picture of its board. Click a page to open it, or a folder to open /
 close it; the pencil on the hovered or selected row (or F2, or double-clicking a page) renames
-in place; drag to reorder, or drop on a folder to move inside it; right-click for the rest. The search box filters pages by name (a folder's name matching shows all of it).
+in place; drag to reorder, or drop on a folder to move inside it; right-click for the rest. The search box filters pages by name
+(a folder's name matching shows all of it) and by what's on them (core.artbook_search, off the UI thread: the match shows
+on hover).
 
 Page changes go through the ArtbookPanel (the open page lives there, newer than its file);
 folder changes go straight to the store. Neither has undo: a deleted page goes to the
@@ -125,6 +127,16 @@ class PagesTree(QTreeWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.invisibleRootItem().setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
 
+    def mimeData(self, items):
+        """A dragged page carries its id too: dropped on the board, it's a page card (artbook.page_card_drag)."""
+        mime = super().mimeData(items)
+        ids = [item.data(0, KIND_ROLE)[1] for item in items if item.data(0, KIND_ROLE) and item.data(0, KIND_ROLE)[0] == "page"]
+        if mime is not None and ids:
+            from ui.artbook_board import PAGE_MIME
+
+            mime.setData(PAGE_MIME, " ".join(ids).encode("utf-8"))
+        return mime
+
     # ------------------ the rename pencil ------------------
     def pencil_rect(self, index: QModelIndex) -> QRect:
         row = self.visualRect(index)
@@ -209,14 +221,21 @@ class PagesPanel(QWidget):
         self._items: dict[tuple[str, str], QTreeWidgetItem] = {}
         self._names: dict[str, str] = {}  # page id -> name
         self._open: dict[str, bool] = {}  # folder id -> expanded (outside a search)
+        self._found: dict[str, str] = {}  # page id -> the words around a match on it (searching by what's on pages)
+        self._search_generation = 0
+        self._content_timer = QTimer(self)
+        self._content_timer.setSingleShot(True)
+        self._content_timer.setInterval(220)
+        self._content_timer.timeout.connect(self._search_content)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 0)
         layout.setSpacing(6)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search pages")
+        self.search.setToolTip("Find pages by name, or by what's on them")
         self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._apply_filter)
+        self.search.textChanged.connect(self._on_search_typed)
         layout.addWidget(self.search)
         self.tree = PagesTree(self)
         layout.addWidget(self.tree, 1)
@@ -333,6 +352,34 @@ class PagesPanel(QWidget):
             QTimer.singleShot(0, self.rebuild)  # the theme changed: the cards' colors come from it
 
     # ------------------ search ------------------
+    def _on_search_typed(self) -> None:
+        self._found = {}  # (what's on pages: looked for again once typing pauses)
+        self._search_generation += 1
+        self._apply_filter()
+        if self.search.text().strip():
+            self._content_timer.start()
+
+    def _search_content(self) -> None:
+        from core import artbook_search
+        from ui.tag_widgets import run_job
+
+        query = self.search.text().strip()
+        generation = self._search_generation
+        if query:
+            self.artbook.save_now()  # (the open page's latest, for its file to be searched)
+            run_job(lambda: artbook_search.search_pages(query), lambda found: self._on_content_found(generation, found),
+                    lambda _error: None)
+
+    def _on_content_found(self, generation: int, found: list) -> None:
+        if generation != self._search_generation:
+            return  # (typed on since)
+        self._found = {}
+        for page in found:
+            if page["hits"]:
+                hit = page["hits"][0]
+                self._found[page["page"]] = f"{hit['before']}{hit['match']}{hit['after']}"
+        self._apply_filter()
+
     def _apply_filter(self) -> None:
         words = self.search.text().casefold().split()
 
@@ -340,9 +387,14 @@ class PagesPanel(QWidget):
             return all(word in text.casefold() for word in words)
 
         def visit(item: QTreeWidgetItem, parent_matches: bool) -> bool:
-            kind = item.data(0, KIND_ROLE)[0]
+            kind, item_id = item.data(0, KIND_ROLE)
             here = parent_matches or matches(item.text(0))
             if kind == "page":
+                found = self._found.get(item_id) if words else None
+                name = self._names.get(item_id, "Untitled")
+                tip = f"{name}\nClick to open. The pencil (or double-click) renames it"
+                item.setToolTip(0, f"{name}\nFound on the page: “{found}”\nClick to open it" if found else tip)
+                here = here or found is not None
                 item.setHidden(not here)
                 return here
             shown = [visit(item.child(i), here) for i in range(item.childCount())]
@@ -448,13 +500,19 @@ class PagesPanel(QWidget):
             self.artbook.import_boards([Path(p) for p in paths], folder_id)
 
     def new_page(self, folder_id: Optional[str]) -> None:
-        """A new page in folder_id: opened, with its name ready to type over."""
-        try:
-            page_id = self.artbook.new_page(folder_id)
-        except store.PageError as exc:
-            self.artbook.board.show_message(str(exc))
-            return
-        self._start_rename("page", page_id)
+        """New Page: the New Page window (a name and a template), then the page in folder_id, opened."""
+        from ui import artbook_templates
+
+        folder = self._folder_name(folder_id)
+        picked = artbook_templates.ask_new_page(self.window(), folder)
+        if picked is not None:
+            self.artbook.create_page(*picked, folder_id=folder_id)
+
+    def _folder_name(self, folder_id: Optional[str]) -> Optional[str]:
+        if folder_id is None:
+            return None
+        item = self.item_for("folder", folder_id)
+        return item.text(0) if item is not None else None
 
     def new_folder(self, parent_id: Optional[str]) -> None:
         try:
@@ -567,6 +625,7 @@ class PagesPanel(QWidget):
                 rename.triggered.connect(lambda: self.tree.editItem(item, 0))
                 menu.addAction("Duplicate").triggered.connect(lambda: self._duplicate(item_id))
                 menu.addAction("Earlier Versions...").triggered.connect(lambda: self.artbook.show_versions(item_id))
+                menu.addAction("Save as Template...").triggered.connect(lambda: self.artbook.save_as_template(item_id))
                 menu.addAction("Export Page...").triggered.connect(lambda: self.artbook.export_page(item_id))
                 self._add_move_menu(menu, kind, item_id, item)
                 menu.addSeparator()

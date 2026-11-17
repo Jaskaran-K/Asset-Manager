@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         elif pages_dir:  # (a drive that isn't plugged in: the setting stays, for next time)
             pages_note = f"Your pages folder ({pages_dir}) isn't available, so the default one is used for now."
         self.artbook_panel = ArtbookPanel()
+        self.artbook_panel.show_in_library.connect(self._show_in_library)
         # Sends images from the grid, and PDF pages from the viewer, to Artbook pages
         self.artbook_sender = ArtbookSender(self.artbook_panel, self._show_status)
         # Pictures sent from the browser extension (core.browser_link): the helper saves them, the app hears of it
@@ -382,6 +383,9 @@ class MainWindow(QMainWindow):
         """The browser extension saved a picture (core.browser_link; on the UI thread: BrowserLinkWorker)."""
         if message.get("op") == "artbook":
             self._take_browser_pictures()
+        elif message.get("op") == "unsorted":
+            self.artbook_panel.unsorted_arrived()
+            self._show_status("Sent from the browser to the Artbook's Unsorted tray (U shows it).")
         elif message.get("op") == "library" and isinstance(message.get("path"), str):
             self._show_status(f"Saved from the browser: {Path(message['path']).name}")
 
@@ -389,6 +393,9 @@ class MainWindow(QMainWindow):
         pictures = browser_link.take_inbox()
         if pictures:
             self.artbook_sender.send_pictures(pictures)
+        links = browser_link.take_inbox_links()
+        if links:
+            self.artbook_sender.send_links(links)
 
     def _find_apps(self) -> None:
         run_job(apps.detect, self._on_apps_found)
@@ -2285,6 +2292,27 @@ class MainWindow(QMainWindow):
                 self.status_label.setText(f"'{path.name}' isn't there any more.")
         except OSError as exc:
             self.status_label.setText(f"Couldn't open File Explorer: {exc}")
+
+    def _show_in_library(self, path: str) -> None:
+        """An Artbook file card's Show in the Library: the asset browser (All Assets, no search) with that file
+        selected and in view."""
+        try:
+            keys = {os.path.normcase(str(Path(path))), os.path.normcase(str(Path(path).resolve()))}
+        except OSError:
+            keys = {os.path.normcase(str(Path(path)))}
+        asset = next((a for a in self.library.assets if os.path.normcase(str(a.path)) in keys), None)
+        if asset is None:
+            self.artbook_panel.board.show_message(f"{Path(path).name} isn't in the library (it's not in one of its folders).")
+            return
+        if self.view_modes.mode == "artbook":
+            self.view_modes.set_mode("asset")
+        self.filter_mode, self.filter_value = "all", None
+        self.search_bar.set_query_text("")
+        self._refresh_grid_display()
+        self._select_paths({str(asset.path)}, asset)
+        row = self.grid_model.row_of(str(asset.path))
+        if row is not None:
+            self.list_grid.scrollTo(self.grid_model.index(row), QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def show_crash_notice(self) -> None:
         box = QMessageBox(self)

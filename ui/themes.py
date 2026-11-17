@@ -510,10 +510,10 @@ QListWidget::item:selected { background-color: $accent_soft; color: $card_select
 #noteBar, #groupBar, #drawBar, #imageBar { background-color: $raised; border: 1px solid $border; border-radius: 12px; }
 #noteBar QToolButton, #groupBar QToolButton, #drawBar QToolButton, #imageBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 3px; color: $text; }
 #noteBar QToolButton:hover, #groupBar QToolButton:hover, #drawBar QToolButton:hover, #imageBar QToolButton:hover { background: $hover; }
-#noteBar QToolButton:checked, #groupBar QToolButton:checked, #drawBar QToolButton:checked, #imageBar QToolButton:checked { background: $accent_soft; border-color: transparent; }
+#noteBar QToolButton:checked, #groupBar QToolButton:checked, #drawBar QToolButton:checked, #imageBar QToolButton:checked { background: $accent_soft; border-color: transparent; color: $card_selected_text; }
 #drawBar QToolButton#ghostText, #imageBar QToolButton#ghostText { padding: 3px 9px 3px 7px; font-weight: 500; }
-#imageBar QToolButton#ghostDrop { padding: 3px 22px 3px 7px; font-weight: 500; }
-#imageBar QToolButton::menu-indicator { image: none; width: 0px; }
+#imageBar QToolButton#ghostDrop, #noteBar QToolButton#ghostDrop { padding: 3px 22px 3px 7px; font-weight: 500; }
+#imageBar QToolButton::menu-indicator, #noteBar QToolButton#ghostDrop::menu-indicator { image: none; width: 0px; }
 #noteBar QComboBox, #drawBar QComboBox { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 3px 6px; }
 #noteBar QComboBox:hover, #drawBar QComboBox:hover { background: $hover; }
 #noteBarDivider { background: $border; }
@@ -521,6 +521,7 @@ QListWidget::item:selected { background-color: $accent_soft; color: $card_select
 #imageListTitle { color: $text_muted; font-size: 11px; font-weight: bold; letter-spacing: 1px; }
 #imageList QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px; }
 #imageList QToolButton:hover { background: $hover; }
+#imageList QToolButton:checked { background: $accent_soft; color: $card_selected_text; }
 #imageListView { background: transparent; border: none; }
 #colorPopupTitle { color: $text_strong; font-size: 13px; }
 #colorPopup QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px; color: $text; }

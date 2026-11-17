@@ -52,6 +52,7 @@ INDEX_VERSION = 1
 MAX_DECODE_SIDE = 4096  # a new image is decoded this big (the board loads other sizes as needed)
 FALLBACK_SIDE = 1024  # size of the copy kept for linked files
 MAX_NAME = 120
+TEMPLATES_FOLDER = "templates"  # in the pages folder: your page templates (core.artbook_templates)
 PAGE_FILE = "page.json"
 BACKUP_FILE = "page.json.bak"
 DAMAGED_FILE = "page.json.damaged"  # (a damaged page.json, set aside rather than overwritten)
@@ -138,6 +139,9 @@ def move_pages(target: Path) -> int:
             if (source / "index.json").is_file():
                 copied.append(target / "index.json")
                 shutil.copy2(source / "index.json", target / "index.json")
+            if (source / TEMPLATES_FOLDER).is_dir():  # (your templates go with your pages)
+                copied.append(target / TEMPLATES_FOLDER)
+                shutil.copytree(source / TEMPLATES_FOLDER, target / TEMPLATES_FOLDER, ignore=shutil.ignore_patterns("*.tmp"))
         except OSError as exc:
             for path in copied:
                 if path.is_dir():
@@ -149,6 +153,7 @@ def move_pages(target: Path) -> int:
         for name in names:  # (best effort: the copies are what's used now)
             shutil.rmtree(source / name, ignore_errors=True)
         (source / "index.json").unlink(missing_ok=True)
+        shutil.rmtree(source / TEMPLATES_FOLDER, ignore_errors=True)
         return len(names)
 
 
@@ -415,11 +420,43 @@ def page_summary(page_id: str) -> Optional[dict[str, Any]]:
     page, _from_backup = _read_page(page_id)
     if page is not None:
         summary = {k: page.get(k) for k in ("name", "created", "modified")}
+        summary["counts"] = content_counts(page.get("items", []))  # (images, cards, to-dos done, to-dos)
     else:
         summary = {"name": "Damaged page", "created": None, "modified": None, "damaged": True}
     summary["id"] = page_id  # the folder's name is the id the index uses
     _summaries[page_id] = (stamps, summary)
     return dict(summary)
+
+
+CARD_ITEM_KINDS = ("note", "table", "link", "file", "page_card")  # what counts as a card (columns hold them)
+
+
+def content_counts(items: Any) -> tuple[int, int, int, int]:
+    """What's on a page, from its saved items: (images, cards, to-do lines done, to-do lines). The page's
+    header (a "title" note) isn't a card."""
+    images = cards = done = total = 0
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind", "image")
+        if kind == "image":
+            images += 1
+        elif kind in CARD_ITEM_KINDS and not (kind == "note" and item.get("style") == "title"):
+            cards += 1
+            html = item.get("html") if kind == "note" and isinstance(item.get("html"), str) else ""
+            ticked = html.count('<li class="checked"')
+            done += ticked
+            total += ticked + html.count('<li class="unchecked"')
+    return images, cards, done, total
+
+
+def counts_text(counts: tuple[int, int, int, int], empty: str = "Nothing on it yet") -> str:
+    """ "24 images · 9 cards · 4 of 12 to-dos done" (what there is)."""
+    images, cards, done, total = counts
+    parts = [f"{n} {what}{'' if n == 1 else 's'}" for n, what in ((images, "image"), (cards, "card")) if n]
+    if total:
+        parts.append(f"{done} of {total} to-do{'' if total == 1 else 's'} done")
+    return " \u00b7 ".join(parts) or empty
 
 
 def list_pages() -> list[dict[str, Any]]:

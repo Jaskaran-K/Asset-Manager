@@ -1,6 +1,7 @@
 """The format bar that floats above the selected note on the Artbook board.
 
-Text colour, highlight and the note's fill colour (each: the theme default (no highlight), white,
+Style (a card, a heading: a card with an accent line, or plain text on the board) and Paragraph (text, heading 1
+or 2, a bulleted or a numbered list; or typed: # , ## , - or 1. then Space at a line's start). Text colour, highlight and the note's fill colour (each: the theme default (no highlight), white,
 black, or a custom one picked live in ui.color_popup), bold / italic / underline, font size and font, and a menu with alignment and
 clearing the formatting. With text selected while typing, changes apply to that text; otherwise
 to the whole note. The board (ui.artbook_board) does the formatting and records it for undo.
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from ui import shortcuts
 from ui.color_popup import ColorPopup, color_text
-from ui.controls import GhostButton, fit_popup, soft_shadow
+from ui.controls import DropButton, GhostButton, fit_popup, soft_shadow
 from ui.duotone import set_icon
 
 if TYPE_CHECKING:
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
 
 FONT_SIZES = (8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 64, 72, 96)
 SWATCHES = (("White", "#ffffff"), ("Black", "#111111"))
+STYLES = {"card": ("sticky_note", "Card"), "heading": ("heading", "Heading"), "plain": ("text_color", "Plain")}
+PARAGRAPHS = {"text": ("Text", "Type normally"), "h1": ("Heading 1", "# then Space"), "h2": ("Heading 2", "## then Space"),
+              "bullet": ("Bulleted List", "- then Space"), "number": ("Numbered List", "1. then Space"),
+              "check": ("Checklist", "[] then Space")}
 
 
 def swatch_icon(color: Optional[str]) -> QIcon:
@@ -145,6 +150,33 @@ class NoteBar(QFrame):
         layout.setSpacing(3)
         soft_shadow(self)
 
+        self.btn_style = DropButton("sticky_note", "Card", "Style: a card, a heading (a card with an accent line), or "
+                                    "plain text on the board")
+        self.btn_style.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.style_actions = {}
+        for style, (_icon, name) in STYLES.items():
+            action = self.btn_style.menu().addAction(name if style != "plain" else "Plain (no card)")
+            action.setCheckable(True)
+            action.setData(style)
+            action.triggered.connect(self._on_style_picked)
+            self.style_actions[style] = action
+        layout.addWidget(self.btn_style)
+        layout.addWidget(self._divider())
+        self.btn_paragraph = DropButton(None, "Text", "Paragraph: text, heading 1 or 2, a bulleted or a numbered list, "
+                                                      "a checklist (or type # , ## , - , 1. or [] then Space at the start of a line)")
+        self.btn_paragraph.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.paragraph_actions = {}
+        for kind, (name, typed) in PARAGRAPHS.items():
+            if kind == "bullet":
+                self.btn_paragraph.menu().addSeparator()
+            action = self.btn_paragraph.menu().addAction(f"{name}\t{typed}")
+            action.setCheckable(True)
+            action.setData(kind)
+            action.triggered.connect(self._on_paragraph_picked)
+            self.paragraph_actions[kind] = action
+        layout.addWidget(self.btn_paragraph)
+        layout.addWidget(self._divider())
+
         live, avoid = board.live_change, self.avoid_rect
         self.btn_color = ColorButton("text_color", "Text colour", board.set_note_text_color, live, avoid)
         self.btn_highlight = ColorButton(
@@ -236,6 +268,12 @@ class NoteBar(QFrame):
     def _on_font_picked(self, _index: int) -> None:
         self.board.set_note_font_family(self.font_box.currentFont().family())
 
+    def _on_style_picked(self) -> None:
+        self.board.set_note_style(self.sender().data())
+
+    def _on_paragraph_picked(self) -> None:
+        self.board.set_note_paragraph(self.sender().data())
+
     def _on_align_picked(self) -> None:
         self.board.set_note_alignment(self.sender().data())
 
@@ -256,6 +294,18 @@ class NoteBar(QFrame):
     # ------------------ showing ------------------
     def sync(self, formats: dict[str, Any]) -> None:
         """Show a note's formatting (from BoardView.note_formats)."""
+        style = formats.get("style", "card")
+        icon, name = STYLES.get(style, ("heading", "Page Title") if style == "title" else STYLES["card"])
+        self.btn_style.set_choice_icon(icon)
+        self.btn_style.setText(name)
+        self.btn_style.setEnabled(style != "title")  # (the page's header stays one)
+        for key, action in self.style_actions.items():
+            action.setChecked(key == style)
+        paragraph = formats.get("paragraph", "text")
+        self.btn_paragraph.setText(PARAGRAPHS.get(paragraph, PARAGRAPHS["text"])[0])
+        for key, action in self.paragraph_actions.items():
+            action.setChecked(key == paragraph)
+        self.btn_fill.setEnabled(style not in ("plain", "title"))  # (plain text and the header have no card to colour)
         self.btn_color.set_color(formats["color"])
         self.btn_highlight.set_color(formats["highlight"])
         self.btn_fill.set_color(formats["fill"])

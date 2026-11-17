@@ -10,21 +10,25 @@ also refreshes the page's thumbnail in the Pages list.
 
 from __future__ import annotations
 
+import os
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QImage
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QImage, QPainter
+from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QMenu, QToolButton, QVBoxLayout, QWidget
 
-from core import artbook_share, pur_import
+from core import artbook_share, artbook_unsorted, pur_import
 from core import artbook_store as store
 from core.settings import (
+    add_artbook_recent_page,
+    get_artbook_headers_hint_shown,
     get_artbook_page,
     get_board_link,
     get_last_export_dir,
+    set_artbook_headers_hint_shown,
     set_artbook_page,
     set_board_link,
     set_last_export_dir,
@@ -65,6 +69,7 @@ class ArtbookPanel(QWidget):
     """Toolbar plus board and Pages sidebar. toolbar_slot is where the window's shared controls can go."""
 
     page_saved = Signal(str)  # a page (and its thumbnail) was written
+    show_in_library = Signal(str)  # a file card's Show in the Library: the asset browser shows that file
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -99,10 +104,30 @@ class ArtbookPanel(QWidget):
         self.lbl_page = QLabel()
         self.lbl_page.setObjectName("mutedLabel")
         bar_layout.addWidget(self.lbl_page)
+        # After a page card opened another page: back to the one it's on (as it was left)
+        self.btn_back = ghost_button("back", "Back to the page you came from, where you were on it", "Back")
+        self.btn_back.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_back.hide()
+        self.btn_back.clicked.connect(self.go_back)
+        bar_layout.addWidget(self.btn_back)
+        self._back: list[tuple[str, dict[str, Any]]] = []  # (page id, its view) for each page card followed
+        self._following = False  # (opening a page from a page card, or going back: the way back stays)
         bar_layout.addStretch(1)
 
+        # Export: each format in one click, with the last settings (Export Options... changes them)
+        self.btn_export = ghost_button("export", f"Export: PNG ({shortcuts.get('artbook.export_png').keys}), JPG, PDF or "
+                                       f"copy it, with your last settings; Export Options... ({shortcuts.get('artbook.export_options').keys}) changes them")
+        self.export_menu = QMenu(self.btn_export)
+        self.export_menu.aboutToShow.connect(self._fill_export_menu)
+        self.btn_export.setMenu(self.export_menu)
+        self.btn_export.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        bar_layout.addWidget(self.btn_export)
         self.btn_images = ghost_button("grid", "Images: show / hide the list of every image on the page (L)", checkable=True)
         bar_layout.addWidget(self.btn_images)
+        self.btn_tray = ghost_button("tray", "Tray: Unsorted (sent from your browser, waiting to go on a page) and this "
+                                     "page's Trash (U)", checkable=True)
+        self.btn_tray.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        bar_layout.addWidget(self.btn_tray)
         self.btn_fit = ghost_button("fit", "Fit: frame the selection, or everything on the page (F)")
         bar_layout.addWidget(self.btn_fit)
         self.btn_zoom = ghost_button(None, "Current zoom. Click for 100% (Ctrl+0)", "100%")
@@ -125,6 +150,7 @@ class ArtbookPanel(QWidget):
             close_shortcut="pages.close_sidebar", content_name="the board", picking="open a page",
         )
         self.sidebar.watch(self.board.viewport())  # floating: your images show through the glass
+        self.board.rail.set_cover(self.sidebar.panel)  # (floating over the board: the tool rail moves out from under it)
         self.sidebar.open_changed.connect(self.btn_pages.setChecked)
         self.btn_pages.setChecked(self.sidebar.is_open())
         self.btn_pages.clicked.connect(self._on_pages_clicked)
@@ -134,19 +160,36 @@ class ArtbookPanel(QWidget):
         toggle_pages.setShortcut(shortcuts.sequence("pages.sidebar"))
         toggle_pages.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         toggle_pages.triggered.connect(self.sidebar.toggle)
+        # Ctrl+P: go to a page (the page switcher)
+        switch = QAction(self)
+        switch.setShortcut(shortcuts.sequence("pages.switch"))
+        switch.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        switch.triggered.connect(self.show_switcher)
+        self.addAction(switch)
+        self._switcher = None
+        self._hinted = False  # (the older pages' headers: said once, a little after the Artbook first shows)
         self.addAction(toggle_pages)
 
         self.board.changed.connect(self._schedule_save)
         self.board.boards_dropped.connect(self._on_boards_dropped)
-        self.board.export_image_requested.connect(self.export_image)
+        self.board.export_requested.connect(self.export)
         self.board.export_page_requested.connect(self._on_export_page_requested)
+        self.board.page_rename_requested.connect(self._on_header_renamed)
         self.board.page_menu = self._page_menu
         self.btn_images.clicked.connect(self.board.toggle_image_list)
         self.board.image_list_toggled.connect(self.btn_images.setChecked)
+        self.btn_tray.clicked.connect(self._on_tray_clicked)
+        self.board.tray_toggled.connect(self.btn_tray.setChecked)
+        self.board.unsorted_changed.connect(self.show_unsorted_count)
+        self.board.tray_toggled.connect(self._on_tray_toggled)
+        self.show_unsorted_count()
         self.board.zoom_changed.connect(self._on_zoom_changed)
         self.btn_fit.clicked.connect(self._on_fit_clicked)
         self.btn_zoom.clicked.connect(self._on_zoom_clicked)
         self.page_saved.connect(self.pages.refresh_thumbnail)
+        self.page_saved.connect(self.board.refresh_page_cards)
+        self.board.page_open_requested.connect(self.follow_page)
+        self.board.show_in_library_requested.connect(self.show_in_library)
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -157,6 +200,21 @@ class ArtbookPanel(QWidget):
         super().resizeEvent(event)
         self.toolbar.update()
 
+    def _on_tray_clicked(self) -> None:
+        self.board.toggle_tray()
+
+    def _on_tray_toggled(self, _shown: bool) -> None:
+        self.btn_images.setChecked(self.board.image_list_open())
+
+    def show_unsorted_count(self) -> None:
+        """The tray button: how many things wait in Unsorted (none: no number)."""
+        count = artbook_unsorted.count()
+        self.btn_tray.setText(str(count) if count else "")
+
+    def unsorted_arrived(self) -> None:
+        """The browser extension sent something to Unsorted."""
+        self.board.unsorted_changed.emit()
+
     def _on_pages_clicked(self) -> None:
         self.sidebar.toggle()
 
@@ -165,6 +223,9 @@ class ArtbookPanel(QWidget):
         super().showEvent(event)
         if self.page is None:
             self.open_page(get_artbook_page())
+        if not self._hinted:
+            self._hinted = True
+            QTimer.singleShot(4000, self._offer_headers)  # (older pages' headers: said once)
 
     def current_page_id(self) -> Optional[str]:
         return self.page["id"] if self.page is not None else None
@@ -195,11 +256,53 @@ class ArtbookPanel(QWidget):
         self.page = page
         self._dirty = False
         set_artbook_page(page["id"])
+        add_artbook_recent_page(page["id"])
         self._show_name()
         self.board.load_page(page)
         self.pages.rebuild()
+        if not self._following:
+            self._back.clear()  # (a page opened another way: no way back)
+        self._show_back()
         if problem:
             self.board.show_message(problem)
+
+    def follow_page(self, page_id: str) -> None:
+        """A page card was opened: show its page, with Back (at the top) to return to this one as it is now."""
+        if self.page is None or page_id == self.page["id"]:
+            return
+        self._back.append((self.page["id"], self.board.view_state()))
+        del self._back[:-20]
+        self._following = True
+        try:
+            self.open_page(page_id)
+        finally:
+            self._following = False
+        if self.current_page_id() != page_id:  # (it couldn't be opened: no way back to keep)
+            self._back.pop()
+            self._show_back()
+
+    def go_back(self) -> None:
+        """Back: the page the last page card was on, where it was left."""
+        if not self._back:
+            return
+        page_id, view = self._back.pop()
+        self._following = True
+        try:
+            self.open_page(page_id)
+        finally:
+            self._following = False
+        if self.current_page_id() == page_id:
+            self.board.set_view(float(view.get("zoom", 1.0)), QPointF(float(view.get("x", 0)), float(view.get("y", 0))))
+        self._show_back()
+
+    def _show_back(self) -> None:
+        if not self._back:
+            self.btn_back.hide()
+            return
+        summary = store.page_summary(self._back[-1][0])
+        name = (summary or {}).get("name") or "the last page"
+        self.btn_back.setText(f"Back to {name}" if len(name) <= 40 else f"Back to {name[:38]}...")
+        self.btn_back.show()
 
     def leave_pages(self) -> None:
         """Save and let go of the open page (before the pages folder changes; reload_pages after)."""
@@ -215,19 +318,159 @@ class ArtbookPanel(QWidget):
     def _show_name(self) -> None:
         self.lbl_page.setText(f"·  {self.page.get('name') or 'Untitled'}" if self.page else "")
 
-    def new_page(self, folder_id: Optional[str] = None) -> str:
-        """Create a page ("Page N") in a folder and open it; returns its id."""
-        page = store.create_page(store.unique_page_name(), folder_id)
+    def new_page(self, folder_id: Optional[str] = None, name: Optional[str] = None) -> str:
+        """Create a page ("Page N", or name) in a folder and open it, with its header; returns its id."""
+        page = store.create_page(name or store.unique_page_name(), folder_id)
         self.open_page(page["id"])
+        self.board.add_page_title(QPointF(0, 0), record=False)
+        self.save_now()
         return page["id"]
 
     def rename_page(self, page_id: str, name: str) -> None:
         if page_id == self.current_page_id():
             self.page["name"] = store.clean_name(name)
+            self.board.set_page_name(self.page["name"])  # (its header follows)
             self.save_now()  # this copy is newer than the file: it carries the name
             self._show_name()
         else:
             store.rename_page(page_id, name)
+
+    def create_page(self, kind: str, template_id: str, name: str, folder_id: Optional[str] = None) -> None:
+        """A page from the New Page window: blank (with its header), from a built-in template, or from one of yours
+        (made off the UI thread: it may hold pictures)."""
+        from core import artbook_templates as templates
+        from ui import artbook_templates
+
+        try:
+            if kind == "built_in":
+                page = artbook_templates.create_built_in(template_id, name, folder_id)
+                self.open_page(page["id"])
+                self.board.frame()
+            elif kind == "yours":
+                self.board.show_message("Making the page...")
+                run_job(lambda: templates.page_from_template(template_id, name, folder_id),
+                        self._on_template_page_made, lambda error: self.board.show_message(f"Couldn't make the page: {error}"))
+                return
+            else:
+                self.new_page(folder_id, name)
+        except store.PageError as exc:
+            self.board.show_message(str(exc))
+            return
+        self.pages.rebuild()
+
+    def _on_template_page_made(self, page: dict[str, Any]) -> None:
+        self.open_page(page["id"])
+        self.board.frame()
+        self.board.toast.hide()
+        self.pages.rebuild()
+
+    def save_as_template(self, page_id: Optional[str] = None) -> None:
+        """Right-click a page > Save as Template: its name, whether to keep its pictures and untick its to-dos."""
+        from core import artbook_templates as templates
+        from ui import artbook_templates
+
+        page_id = page_id or self.current_page_id()
+        if page_id is None:
+            return
+        if page_id == self.current_page_id():
+            self.save_now()  # (what's on the board, not the last autosave)
+        summary = store.page_summary(page_id) or {}
+        picked = artbook_templates.ask_save_template(self.window(), summary.get("name") or "Page")
+        if picked is None:
+            return
+        name, keep, untick = picked
+        run_job(lambda: templates.save_template(page_id, name, keep, untick),
+                lambda entry: self.board.show_message(f"Saved the template “{entry['name']}”: New Page lists it."),
+                lambda error: self.board.show_message(f"Couldn't save the template: {error}"))
+
+    # ------------------ going to a page ------------------
+    def show_switcher(self) -> None:
+        """Ctrl+P: the page switcher (type a page's name; Enter opens it)."""
+        from ui.artbook_switcher import PageSwitcher
+
+        if self._switcher is None:
+            self._switcher = PageSwitcher(self)
+        self._switcher.open()
+
+    # ------------------ headers for older pages ------------------
+    @staticmethod
+    def pages_without_header() -> list[str]:
+        """The pages (by id) that have no header (pages made before headers came, mostly)."""
+        out = []
+        for page_id in store.ordered_page_ids():
+            try:
+                page = store.load_page(page_id)
+            except store.PageError:
+                continue
+            if not any(isinstance(d, dict) and d.get("kind") == "note" and d.get("style") == "title" for d in page.get("items", [])):
+                out.append(page_id)
+        return out
+
+    def add_headers_to_all_pages(self) -> int:
+        """Pages > Add Headers to Every Page...: a header (the page's name, what's on it) above what's on each page
+        that has none, after asking; how many got one."""
+        from PySide6.QtWidgets import QMessageBox
+
+        if self.page is not None:
+            self.save_now()
+        missing = self.pages_without_header()
+        if not missing:
+            self.board.show_message("Every page has a header already.")
+            return 0
+        answer = QMessageBox.question(
+            self.window(), "Add Headers",
+            f"{len(missing)} page{'s have' if len(missing) != 1 else ' has'} no header. Add one to each, above what's on it "
+            "(its name, a line about it, what's on it)?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return 0
+        return self.add_headers(missing)
+
+    def add_headers(self, page_ids: list[str]) -> int:
+        from ui.artbook_board import page_header_dict
+
+        done = 0
+        for page_id in page_ids:
+            if page_id == self.current_page_id():
+                if self.board.title_note() is None:
+                    self.board.add_page_title(record=False)
+                    self.save_now()
+                    done += 1
+                continue
+            try:
+                page = store.load_page(page_id)
+                page["items"] = [page_header_dict(page)] + list(page.get("items", []))
+                store.save_page_now(page)
+                done += 1
+            except (store.PageError, OSError):
+                continue
+        self.board.show_message(f"Added a header to {done} page{'s' if done != 1 else ''}.")
+        return done
+
+    def _offer_headers(self) -> None:
+        """Once: older pages have no header; say how to add them all."""
+        if get_artbook_headers_hint_shown():
+            return
+
+        def check() -> int:
+            return len(self.pages_without_header())
+
+        def done(count: int) -> None:
+            if count and not get_artbook_headers_hint_shown():
+                set_artbook_headers_hint_shown()
+                self.board.show_message(f"{count} older page{'s have' if count != 1 else ' has'} no header (its name and "
+                                        "what's on it): right-click > Pages > Add Headers to Every Page adds them.")
+
+        run_job(check, done, lambda _error: None)
+
+    def _on_header_renamed(self, name: str) -> None:
+        """The page's name was typed in its header (or undone there): the page is renamed."""
+        if self.page is None:
+            return
+        try:
+            self.rename_page(self.page["id"], name)
+        except store.PageError:
+            return
+        self.pages.rebuild()
 
     def duplicate_page(self, page_id: str) -> dict[str, Any]:
         if page_id == self.current_page_id():
@@ -294,6 +537,9 @@ class ArtbookPanel(QWidget):
             ("Duplicate Page", None, self._menu_duplicate_page, self.page is not None),
             ("Rename Page...", None, self._menu_rename_page, self.page is not None),
             ("Earlier Versions...", None, self.show_versions, self.page is not None),
+            ("Save as Template...", None, self.save_as_template, self.page is not None),
+            ("Go to Page...", "pages.switch", self.show_switcher, True),
+            ("Add Headers to Every Page...", None, self.add_headers_to_all_pages, True),
             None,
             ("Export Page (.artbook)...", None, self._on_export_page_requested, self.page is not None),
         ]
@@ -414,32 +660,115 @@ class ArtbookPanel(QWidget):
         set_last_export_dir(str(path.parent))
         return path
 
-    def export_image(self) -> None:
-        """Ctrl+E: save the selection (or the whole board) as a PNG."""
+    def _fill_export_menu(self) -> None:
+        """The top bar's Export menu: each format with the last settings (shown), the options, the .artbook file."""
+        from ui.artbook_export import settings_text
+
+        menu = self.export_menu
+        menu.clear()
+        has = self.page is not None and bool(self.board.items_list())
+        for text, fmt, shortcut_id in (("Export as PNG...", "png", "artbook.export_png"), ("Export as JPG...", "jpg", None),
+                                       ("Export as PDF...", "pdf", None), ("Copy as Image", "copy", "artbook.copy_image")):
+            action = menu.addAction(text)
+            if shortcut_id:
+                action.setShortcut(shortcuts.sequence(shortcut_id))  # (a hint: the board handles the key)
+            action.setEnabled(has)
+            action.triggered.connect(lambda _checked=False, fmt=fmt: self.export(fmt))
+        menu.addSeparator()
+        menu.addSection("Using your last settings")
+        info = menu.addAction(settings_text())
+        info.setEnabled(False)
+        options = menu.addAction("Export Options...")
+        options.setShortcut(shortcuts.sequence("artbook.export_options"))
+        options.setEnabled(has)
+        options.triggered.connect(lambda: self.export("options"))
+        menu.addSeparator()
+        page = menu.addAction("Export Page (.artbook)...")
+        page.setEnabled(self.page is not None)
+        page.triggered.connect(self._on_export_page_requested)
+
+    def export(self, fmt: str, area: str = "") -> None:
+        """Export what's on the board: fmt png / jpg / pdf (asks where), copy (to the clipboard), or options (the
+        Export dialog first). With the last export settings; area: a different what (the selection, say)."""
+        from core.settings import get_artbook_export
+
         if self.page is None:
             return
-        plan = self.board.export_plan()
+        if fmt == "options":
+            self.show_export_dialog()
+            return
+        options = get_artbook_export()
+        if area:
+            options["area"] = area
+        plan = self.board.export_plan(options["area"], options["size"], options["title"])
         if plan is None:
             self.board.show_message("Nothing to export: the board is empty.")
             return
-        stem = self.page.get("name") or "Page"
-        path = self._ask_save_path("Export as PNG", stem, ".png", "PNG image (*.png)")
-        if path is None:
-            return
-        self.board.show_message(f"Exporting {path.name}...")
+        path = None
+        if fmt != "copy":
+            stem = self.page.get("name") or "Page"
+            suffix, file_filter = {"png": (".png", "PNG image (*.png)"), "jpg": (".jpg", "JPG image (*.jpg)"),
+                                   "pdf": (".pdf", "PDF document (*.pdf)")}[fmt]
+            path = self._ask_save_path(f"Export as {fmt.upper()}", stem, suffix, file_filter)
+            if path is None:
+                return
+            self.board.show_message(f"Exporting {path.name}...")
         page_id, requests = self.page["id"], plan[3]
         # The sharp pictures are decoded in the background (the board may only have small copies)
-        run_job(lambda: export_pictures(page_id, requests), lambda pictures: self._save_export(path, pictures), self._on_export_failed)
+        run_job(lambda: export_pictures(page_id, requests), lambda pictures: self._save_export(fmt, path, pictures, options),
+                self._on_export_failed)
 
-    def _save_export(self, path: Path, pictures: dict) -> None:
-        image = self.board.export_image(pictures)
-        if image is None:
+    def show_export_dialog(self) -> None:
+        """Export Options... (Ctrl+Shift+E): the Export dialog; then export (or copy) as chosen."""
+        from ui.artbook_export import ExportDialog
+
+        if self.page is None or not self.board.items_list():
             self.board.show_message("Nothing to export: the board is empty.")
             return
+        dialog = ExportDialog(self.board, self.window())
+        try:
+            if dialog.exec() != ExportDialog.DialogCode.Accepted:
+                return
+            options = dialog.options()
+            action = dialog.action
+        finally:
+            dialog.deleteLater()
+        self.export("copy" if action == "copy" else options["format"], options["area"])
+
+    def _save_export(self, fmt: str, path: Optional[Path], pictures: dict, options: dict) -> None:
+        board = self.board
+        background = "white" if fmt == "jpg" and options["background"] == "clear" else options["background"]
+        if fmt == "pdf":
+            try:
+                board.export_pdf(path, pictures, options["area"], options["size"], options["title"], background,
+                                 options["pins"], options["links"])
+            except (store.PageError, OSError) as exc:
+                self._on_export_failed(str(exc))
+                return
+            self._on_exported(path.name)
+            return
+        image = board.export_image(pictures, options["area"], options["size"], options["title"], background, options["pins"])
+        if image is None:
+            board.show_message("Nothing to export: the board is empty.")
+            return
+        if fmt == "copy":
+            QApplication.clipboard().setImage(image)
+            board.show_message(f"Copied: {image.width()} × {image.height()} px, ready to paste")
+            return
+        if fmt == "jpg":
+            flat = QImage(image.size(), QImage.Format.Format_RGB32)  # (no see-through parts in a JPG)
+            flat.fill(Qt.GlobalColor.white)
+            painter = QPainter(flat)
+            painter.drawImage(0, 0, image)
+            painter.end()
+            image = flat
 
         def save() -> str:
-            if not image.save(str(path), "PNG"):
+            temp = path.with_name(path.name + ".tmp")  # (whole, or not there)
+            if not image.save(str(temp), "JPG" if fmt == "jpg" else "PNG", 92 if fmt == "jpg" else -1):
+                temp.unlink(missing_ok=True)
                 raise store.PageError(f"Couldn't save {path.name}.")
+            os.replace(temp, path)
             return path.name
 
         run_job(save, self._on_exported, self._on_export_failed)
@@ -475,6 +804,8 @@ class ArtbookPanel(QWidget):
         page = dict(self.page)
         page["items"] = self.board.page_items()
         page["groups"] = self.board.page_groups()
+        page["comments"] = self.board.page_comments(saving=True)
+        page["trash"] = self.board.page_trash()
         page["view"] = self.board.view_state()
         page["modified"] = time.time()
         return page

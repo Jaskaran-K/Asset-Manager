@@ -48,6 +48,13 @@ def data_url(data: bytes, kind: str = "png") -> str:
     return f"data:image/{kind};base64," + base64.b64encode(data).decode()
 
 
+def icon_bytes() -> bytes:
+    """A site's icon: an .ico holding a 16, a 32 and a 64 px picture."""
+    buffer = io.BytesIO()
+    Image.new("RGBA", (64, 64), (30, 144, 255, 255)).save(buffer, "ICO", sizes=[(16, 16), (32, 32), (64, 64)])
+    return buffer.getvalue()
+
+
 @pytest.fixture
 def library(tmp_path):
     root = tmp_path / "Library"
@@ -434,3 +441,138 @@ def test_the_extension_with_stand_in_browser_apis():
     done = subprocess.run(["node", str(ROOT / "tests" / "browser_extension_harness.js"), str(ROOT / "browser-extension" / "background.js")],
                           capture_output=True, text=True, timeout=60)
     assert done.returncode == 0 and "ALL OK" in done.stdout, done.stdout + done.stderr
+
+
+# ----------------------------------------------------------------------
+# Board cards Batch H: the Artbook's Unsorted tray, and link cards, from the browser
+# ----------------------------------------------------------------------
+def test_pictures_and_links_for_unsorted_wait_in_its_tray():
+    from core import artbook_unsorted
+
+    reply = browser_link.handle({"op": "save", "target": "unsorted", "sources": [data_url(picture())], "page": PAGE,
+                                 "title": "Hooded mage"})
+    assert reply["ok"] and "Unsorted" in reply["message"]
+    reply = browser_link.handle({"op": "link", "target": "unsorted", "url": PAGE, "title": "Hooded mage: costume",
+                                 "about": "Fold studies", "site": "ArtStation", "picture": data_url(picture(color=(9, 9, 9)))})
+    assert reply["ok"]
+    image, link = artbook_unsorted.entries()
+    assert image["kind"] == "image" and image["name"] == "Hooded mage" and image["source"] == "artstation.com"
+    assert image["picture_path"].is_file()
+    assert (link["kind"], link["title"], link["about"], link["site"], link["url"]) == (
+        "link", "Hooded mage: costume", "Fold studies", "ArtStation", PAGE)
+    assert link["picture_path"].is_file() and artbook_unsorted.count() == 2
+    assert browser_link.handle({"op": "link", "target": "library", "url": PAGE})["ok"] is False  # (links: the Artbook)
+    artbook_unsorted.remove(image["id"])
+    assert [e["id"] for e in artbook_unsorted.entries()] == [link["id"]] and not image["picture_path"].exists()
+
+
+def test_a_link_for_the_open_page_waits_in_the_inbox_with_its_preview():
+    reply = browser_link.handle({"op": "link", "target": "artbook", "url": PAGE, "title": "Mage", "about": "Cloth",
+                                 "site": "ArtStation", "picture": data_url(picture())})
+    assert reply["ok"]
+    assert browser_link.take_inbox() == []  # (pictures only)
+    (link, data, icon), = browser_link.take_inbox_links()
+    assert link == {"url": PAGE, "title": "Mage", "about": "Cloth", "site": "ArtStation"} and data.startswith(b"\x89PNG")
+    assert icon is None  # (none sent)
+    assert browser_link.take_inbox_links() == []
+
+
+def test_a_refused_preview_is_downloaded_by_the_browser_and_handed_over(tmp_path, monkeypatch):
+    from core import artbook_unsorted, web_images
+
+    def refuse(url, referer=""):
+        raise web_images.Refused("The site refused it (403).")
+
+    monkeypatch.setattr(web_images, "fetch_image", refuse)
+    request = {"op": "link", "target": "unsorted", "url": PAGE, "title": "Mage", "about": "Cloth", "site": "ArtStation",
+               "picture": "https://cdna.artstation.com/p/cover.jpg"}
+    reply = browser_link.handle(request)
+    assert reply["ok"] is False and reply["in_browser"] == "https://cdna.artstation.com/p/cover.jpg"
+    downloads = tmp_path / "Downloads" / browser_link.DOWNLOAD_FOLDER
+    downloads.mkdir(parents=True)
+    (downloads / "123").write_bytes(picture())
+    link = {k: request[k] for k in ("url", "title", "about", "site")}
+    reply = browser_link.handle({"op": "take", "target": "unsorted", "path": str(downloads / "123"),
+                                 "url": request["picture"], "page": PAGE, "link": link})
+    assert reply["ok"]
+    entry, = artbook_unsorted.entries()
+    assert entry["kind"] == "link" and entry["title"] == "Mage" and entry["picture_path"].is_file()
+    assert not (downloads / "123").exists()
+
+
+def test_the_open_page_gets_links_from_the_browser(qapp, library):
+    from tests.test_main_window import open_window
+    from ui.artbook_board import RefCardItem
+
+    window = open_window(qapp)
+    try:
+        reply = browser_link.handle({"op": "link", "target": "artbook", "url": PAGE, "title": "Hooded mage",
+                                     "about": "Cloth folds", "site": "ArtStation", "picture": data_url(picture()),
+                                     "icon": data_url(icon_bytes(), "x-icon")})
+        assert reply["ok"]
+        board = window.artbook_panel.board
+        assert pump(qapp, lambda: any(isinstance(i, RefCardItem) for i in board.items_list()))
+        card = next(i for i in board.items_list() if isinstance(i, RefCardItem))
+        assert (card.kind, card.title(), card.data["about"], card.data["site"]) == ("link", "Hooded mage", "Cloth folds", "ArtStation")
+        assert card.image is not None  # (the preview the browser saw)
+        assert card.has_favicon() and card.favicon.width() == 64  # (its site's icon: the .ico's biggest)
+        assert window.status_label.text().startswith("Added 1 link from the browser")
+        browser_link.handle({"op": "save", "target": "unsorted", "sources": [data_url(picture())], "page": PAGE, "title": "Later"})
+        assert pump(qapp, lambda: window.artbook_panel.btn_tray.text() == "1")  # (the tray button counts it)
+    finally:
+        window.close()
+
+
+def test_a_sites_icon_is_found_and_kept_small():
+    from core import web_images
+
+    icons = [("icon", "/i16.png", "16x16", ""), ("apple-touch-icon", "/touch.png", "", ""), ("stylesheet", "/x.css", "", "")]
+    assert web_images.best_icon("https://s.com/a/b", icons) == "https://s.com/touch.png"  # (the biggest it lists)
+    assert web_images.best_icon("https://s.com/a", [("icon", "/i.svg", "", "image/svg+xml"),
+                                                    ("icon", "/big.png", "192x192", "")]) == "https://s.com/i.svg"
+    assert web_images.best_icon("https://s.com/a/b", []) == "https://s.com/favicon.ico"  # (none listed: the usual place)
+    page = '<html><head><link rel="shortcut icon" href="/fav.ico"><link sizes="96x96" rel="icon" href="//cdn.s.com/i96.png"></head></html>'
+    assert web_images.page_details("https://s.com/p", page)["icon"] == "https://cdn.s.com/i96.png"
+    data, ext = web_images.icon_data(icon_bytes())
+    assert ext == ".png" and Image.open(io.BytesIO(data)).size == (64, 64)  # (an .ico: its biggest, as a PNG)
+    data, ext = web_images.icon_data(picture(size=(512, 256)))
+    assert Image.open(io.BytesIO(data)).size == (128, 64)  # (kept small)
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"/>'
+    assert web_images.icon_data(svg) == (svg, ".svg")  # (the app draws it)
+    assert web_images.icon_data(b"<html>not an icon</html>") is None
+    assert web_images.fetch_icon("file:///C:/icon.png") is None and web_images.fetch_icon("data:image/png;base64,!!") is None
+
+
+def test_link_cards_from_the_browser_bring_their_sites_icon(tmp_path, monkeypatch):
+    from core import artbook_unsorted, web_images
+
+    reply = browser_link.handle({"op": "link", "target": "unsorted", "url": PAGE, "title": "Mage", "about": "Cloth",
+                                 "icon": data_url(icon_bytes(), "x-icon")})  # (read in the page, as data)
+    assert reply["ok"]
+    entry, = artbook_unsorted.entries()
+    assert entry["picture_path"] is None and entry["icon_path"].name == entry["id"] + ".icon.png"
+    with Image.open(entry["icon_path"]) as icon:
+        assert icon.size == (64, 64)
+    artbook_unsorted.remove(entry["id"])
+    assert not entry["icon_path"].exists()  # (it goes with its entry)
+
+    browser_link.handle({"op": "link", "target": "artbook", "url": PAGE, "title": "Mage", "about": "Cloth",
+                         "icon": "file:///C:/Windows/icon.png"})  # (only web addresses or data)
+    (_link, data, icon), = browser_link.take_inbox_links()
+    assert data is None and icon is None
+
+    def refuse(url, referer=""):
+        raise web_images.Refused("The site refused it (403).")
+
+    monkeypatch.setattr(web_images, "fetch_image", refuse)  # (its preview: refused; the browser downloads it)
+    request = {"op": "link", "target": "artbook", "url": PAGE, "title": "Mage", "about": "Cloth", "site": "ArtStation",
+               "picture": "https://cdna.artstation.com/p/cover.jpg", "icon": data_url(icon_bytes(), "x-icon")}
+    assert browser_link.handle(request)["in_browser"]
+    downloads = tmp_path / "Downloads" / browser_link.DOWNLOAD_FOLDER
+    downloads.mkdir(parents=True)
+    (downloads / "123").write_bytes(picture())
+    link = {k: request[k] for k in ("url", "title", "about", "site", "icon")}
+    assert browser_link.handle({"op": "take", "target": "artbook", "path": str(downloads / "123"),
+                                "url": request["picture"], "page": PAGE, "link": link})["ok"]
+    (taken, data, icon), = browser_link.take_inbox_links()
+    assert taken["title"] == "Mage" and data.startswith(b"\x89PNG") and icon.startswith(b"\x89PNG")

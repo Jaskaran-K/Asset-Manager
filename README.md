@@ -413,6 +413,57 @@ making your first board. The list below is the full reference.
 - **Motion:** arranging, aligning, stacking and undoing glide images to their new places, and pictures fade in
   as they load. The Motion setting in Settings > Appearance turns this off (or follows Windows).
 
+## Courses
+
+**Course View** (**Ctrl+5**, or the View button's arrow > Course View) opens your courses in a window of their own:
+lesson videos with their scene files and references, in an order of your own, with your progress and notes.
+
+- **The Courses page:** a card per course, with a frame from its first lesson, how far you are and one button to
+  carry on (**Continue: 05 Head blockout**). Right-click a card to rename it, show its folder, or delete it: the
+  course's list, progress and notes go to the Recycle Bin, never its videos or files. If the window was open when you
+  quit, it opens again with the app.
+- **Open Folder as Course...** drafts a course from a folder.
+  - **Lessons:** numbered by their names (`01_`, `Lesson 3`, `Part 2`). Without numbers, by the steps their names
+    speak of, in a 3D course's usual order (intro, references, modeling and sculpting, retopology, UVs, baking,
+    texturing, rigging, lighting, rendering, wrap-up: `ModelingAndSculpting` before `BakingAndTexturing`), else in
+    name order, else by date (unzipping keeps each file's date from the archive). Folders of videos become chapters.
+    Files with no number go with the lesson whose step their name or folder speaks of (`Zbrush`, `Bakes`,
+    `Marmoset`).
+  - **Files:** each goes with the lesson its name, or a folder it's in, is numbered as (`05_Head.ztl`,
+    `02_SettingUp/concept/front.png`). Documents with no number belong to the whole course. Anything else waits in the
+    **Course files** tray to be dragged onto its lesson (a folder of brushes or alphas as one entry).
+  - **Zipped courses:** archives in the folder can be unzipped first, each beside itself (into its own folder when it
+    would otherwise spill files). Every file is then read back and checked against the archive's record of it. A
+    different file of the same name already there is kept, not overwritten. Only archives whose every file checked
+    out are offered for the Recycle Bin, and only if you say so. RAR and 7z need [7-Zip](https://www.7-zip.org/).
+- **New Course** starts an empty one: drag videos onto the lesson list (or **Add Videos...**). Nothing is copied or
+  moved: a course links its files where they are, and **Relink...** finds moved ones by name.
+- **Watching:** click a lesson to play it in the app's player (it resumes, speeds up, loops A-B and sends frames to
+  the Artbook). A lesson ticks itself done at 90% watched (click its box to tick or untick it), and the next one
+  starts by itself. The right side has the lesson's files (each opens in its app, Maya first; pictures drag onto the
+  Artbook) and then the whole course's.
+- **Notes:** **N** while watching pauses and notes that moment (Enter keeps it, Esc drops it). Notes show as dots on
+  the time bar; click one to jump back there. Each note also lands on the course's Artbook page ("Course: ..."), with
+  the frame it was made on, in a row per lesson. **Open the Artbook Page** goes there.
+- **Edit Course:** drag lessons to reorder them (under another chapter's name: into that chapter), double-click to
+  rename, drop files on a lesson to make them its files, **Add Chapter**, and **Delete** to take a lesson out (its
+  video and files go to the tray).
+- **Lessons from the web:** Edit Course > **Add Link...** (or drag a link in from your browser) makes a lesson of a web
+  address; its title comes from the site.
+  - **YouTube** plays in the course window, through YouTube's own embedded player: it resumes, ticks itself done,
+    goes on to the next lesson, and N notes the moment (with its frame on the Artbook page).
+  - **A link straight to a video file** (an `.mp4` on a server) plays in the app's own player.
+  - **Anything else** opens in your browser, where you're logged in (course sites, and Vimeo, whose player can't play
+    inside the app): tick it done yourself; notes on it are kept without a time.
+  - **Download for Offline**, if you've installed [yt-dlp](https://github.com/yt-dlp/yt-dlp) yourself
+    (`winget install yt-dlp`; it isn't part of the app): an HD copy (video and sound joined by ffmpeg) is saved with the
+    course, and the lesson plays it from then on. Downloading from YouTube is against YouTube's terms, so that's your
+    call. Videos protected against copying (most paid course sites) can't be downloaded. If yt-dlp stops working, run
+    `yt-dlp -U` to update it.
+- **A long video as lessons:** while editing, the bar under the player shows the video's parts. **K** cuts it at the
+  moment playing, a cut drags to move it, double-clicking a part names it, and Delete joins it with the next. Each part
+  is a lesson of its own: ticked, noted, with its own files.
+
 ## Viewing 3D models
 
 Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid to turn it round in 3D.

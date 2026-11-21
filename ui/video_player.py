@@ -171,6 +171,18 @@ class SeekSlider(QSlider):
         self.sliderMoved.connect(self._on_dragged)
         self.sliderReleased.connect(self._on_released)
         self._loop: tuple[Optional[int], Optional[int]] = (None, None)
+        self._marks: list[int] = []
+        self._part: tuple[Optional[int], Optional[int]] = (None, None)
+
+    def set_marks(self, values: list[int]) -> None:
+        """Small dots over the bar at these times (a course's notes)."""
+        self._marks = list(values)
+        self.update()
+
+    def set_part(self, start: Optional[int], end: Optional[int]) -> None:
+        """Light up the part of the video that's the lesson playing (a long video cut into lessons)."""
+        self._part = (start, end)
+        self.update()
 
     def set_loop(self, start: Optional[int], end: Optional[int]) -> None:
         """Highlight an A-B loop (start only: a marker where A is)."""
@@ -179,6 +191,24 @@ class SeekSlider(QSlider):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
+        if self.maximum() > self.minimum() and (self._marks or self._part != (None, None)):
+            from ui.themes import theme_color
+
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            middle = self.height() // 2
+            part_start, part_end = self._part
+            if part_start is not None or part_end is not None:  # (the lesson's part: a soft band under the groove)
+                band = self.palette().color(QPalette.ColorRole.Highlight)
+                band.setAlpha(55)
+                x1 = self.x_for(part_start or 0)
+                x2 = self.x_for(part_end if part_end is not None else self.maximum())
+                painter.fillRect(QRectF(x1, middle - 5, max(2, x2 - x1), 10), band)
+            painter.setPen(QPen(QColor(0, 0, 0, 110), 1))  # (a dark rim: readable on the bar's fill too)
+            painter.setBrush(theme_color("note_text"))
+            for value in self._marks:
+                painter.drawEllipse(QPointF(self.x_for(value), middle), 3.4, 3.4)
+            painter.end()
         start, end = self._loop
         if start is None or self.maximum() <= self.minimum():
             return
@@ -781,16 +811,33 @@ class VideoPlayer(QWidget):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def load(self, path: str | Path, autoplay: bool = False) -> None:
-        """Open a video file (replacing whatever was loaded). It resumes where it was last left."""
+    def load(self, path: str | Path, autoplay: bool = False, position: Optional[int] = None) -> None:
+        """Open a video file (replacing whatever was loaded). It resumes where it was last left, or at position (ms:
+        a course's lesson that's part of a long video)."""
         self._remember_position()
         self._cancel_proxy_job()
         self._source = Path(path)
         self._using_proxy = False
         self._set_proxy_button(False)
         self.clear_loop()
-        self._resume_saved = True
-        self._open(self._source, autoplay)
+        self._resume_saved = position is None
+        self._open(self._source, autoplay, position or 0)
+
+    def load_url(self, url: str, autoplay: bool = False, position: int = 0) -> None:
+        """Play a video from the web (a link straight to a video file), from position (ms). Where it was left isn't
+        remembered here: the course does that."""
+        self._remember_position()
+        self._cancel_proxy_job()
+        self._source = None
+        self._using_proxy = False
+        self._set_proxy_button(False)
+        self.clear_loop()
+        self._resume_saved = False
+        self._open(None, autoplay, position, url=QUrl(url))
+
+    def source(self) -> Optional[Path]:
+        """The video loaded (None: none, or one from the web)."""
+        return self._source
 
     def _remember_position(self) -> None:
         """Save where the current video is, unless it was barely started or nearly finished."""
@@ -941,6 +988,17 @@ class VideoPlayer(QWidget):
     def closeEvent(self, event) -> None:
         self.stop()
         super().closeEvent(event)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange) and hasattr(self, "_icons"):
+            # (the theme changed: the transport icons were drawn in the old one's colour)
+            color = self.palette().color(QPalette.ColorRole.ButtonText)
+            self._icons = {kind: control_icon(kind, color) for kind in self._icons}
+            self.btn_back.setIcon(self._icons["back"])
+            self.btn_forward.setIcon(self._icons["forward"])
+            self.btn_fullscreen.setIcon(self._icons["exit_fullscreen" if self._fullscreen else "fullscreen"])
+            self._update_volume_icon()
 
     # Narrow players drop the least important bits so the controls never overlap
     _COMPACT_WIDTH = 860
@@ -1130,7 +1188,7 @@ class VideoPlayer(QWidget):
     # ------------------------------------------------------------------
     # Playback
     # ------------------------------------------------------------------
-    def _open(self, path: Path, autoplay: bool, position: int = 0) -> None:
+    def _open(self, path: Optional[Path], autoplay: bool, position: int = 0, url: Optional[QUrl] = None) -> None:
         self.player.stop()
         # Set after stop(): stopping the previous file reports LoadedMedia, which would consume it
         self._failed = False
@@ -1143,7 +1201,7 @@ class VideoPlayer(QWidget):
         # Hover previews decode whichever file is actually playing (original or proxy)
         self._preview_frames.set_source(path)
         # fromLocalFile handles spaces and non-ASCII characters in Windows paths
-        self.player.setSource(QUrl.fromLocalFile(str(path)))
+        self.player.setSource(url if url is not None else QUrl.fromLocalFile(str(path)))
         if autoplay:
             self.player.play()
 

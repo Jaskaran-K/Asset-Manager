@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
+    QCoreApplication,
     QEvent,
     QItemSelection,
     QItemSelectionModel,
@@ -298,6 +299,8 @@ class MainWindow(QMainWindow):
             self.asset_toolbar_slot, self.artbook_panel.toolbar_slot, self._build_window_controls,
         )
         self._view_restored = False
+        self.course_window = None  # (ui.course_window: made the first time Course View is opened)
+        self.view_modes.open_courses = self.open_courses
         # Narrow asset side (Split View): icon-only buttons and a narrower search box
         self.asset_toolbar = CompactToolbar(
             self.asset_panel, self.control_bar,
@@ -312,6 +315,27 @@ class MainWindow(QMainWindow):
 
         # 3. Status Bar
         self._build_status_bar()
+
+    def open_courses(self) -> None:
+        """Course View (Ctrl+5): your courses, in their own window."""
+        if self.course_window is None:
+            from ui.course_window import CourseWindow
+
+            self.course_window = CourseWindow(self.artbook_panel, self.artbook_sender, self._show_artbook_for_course)
+        window = self.course_window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _show_artbook_for_course(self) -> None:
+        """The course's Artbook page was opened: bring the Artbook into view (beside the assets if they're showing)."""
+        if self.view_modes.mode == "asset":
+            self.view_modes.set_mode("artbook")
+        target = self.view_modes.separate_window if self.view_modes.mode == "separate" else self
+        if target is not None:
+            target.show()
+            target.raise_()
+            target.activateWindow()
 
     def _on_view_mode_changed(self, mode: str) -> None:
         self.asset_toolbar.update()
@@ -369,6 +393,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.view_modes.restore)
             self._find_apps_timer.start()
             QTimer.singleShot(0, self._after_start_browser)
+            from core.settings import get_course_window
+
+            if get_course_window()["open"]:  # (it was open when the app quit)
+                QTimer.singleShot(0, self.open_courses)
 
     def _after_start_browser(self) -> None:
         """Pictures sent to the Artbook while the app was closed go on the page now, and the extension's setup
@@ -2335,6 +2363,8 @@ class MainWindow(QMainWindow):
         # Stop background work before Qt is torn down: a job still running then crashes the process
         self.library.shutdown()  # the scan, live updates and file-details reading
         self.view_modes.shutdown()  # the separate Artbook window closes with the app
+        if self.course_window is not None:
+            self.course_window.shutdown()  # (where you were in the lesson is kept)
         self.thumbnail_manager.shutdown()
         wait_for_background()
         ai_helper.close()
@@ -2429,6 +2459,8 @@ def main() -> None:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AssetManager.App")
 
+    # Qt's web view (a course's YouTube lessons: ui.course_web) needs this set before the app starts
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setWindowIcon(app_icon())

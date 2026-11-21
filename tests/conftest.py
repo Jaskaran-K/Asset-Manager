@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -18,6 +20,21 @@ def isolated_user_data(tmp_path, monkeypatch):
     monkeypatch.setattr(tag_repository, "_repository", None)
     monkeypatch.setattr(crash_log, "LOG_DIR", data)
     monkeypatch.setattr(artbook_store, "PAGES_DIR", data / "artbook")
+    from core import courses
+
+    monkeypatch.setattr(courses, "COURSES_DIR", data / "courses")
+    from core import course_unzip
+
+    def to_test_bin(path):  # (never the real Recycle Bin: a folder of the test's)
+        import shutil
+
+        bin_dir = data / "recycle-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(bin_dir / Path(path).name))
+        return True
+
+    monkeypatch.setattr(courses, "to_recycle_bin", to_test_bin)
+    monkeypatch.setattr(course_unzip, "to_recycle_bin", to_test_bin)
     monkeypatch.setattr(pdf_notes, "NOTES_DIR", data / "pdf-notes")
     monkeypatch.setattr(video_tools, "CACHE_ROOT", data / "cache")
     monkeypatch.setattr(video_tools, "PROXY_DIR", data / "cache" / "proxies")
@@ -102,6 +119,10 @@ def qapp():
 
     from ui import main_thread_gc, scroll_bar_watch
 
+    from PySide6.QtCore import QCoreApplication, Qt
+
+    if QApplication.instance() is None:  # (as the app does: Qt's web view needs it before the app starts)
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication.instance() or QApplication([])
     main_thread_gc.install(app)  # as the app does: garbage is only collected on this thread
     scroll_bar_watch.install(app)  # (as the app does)

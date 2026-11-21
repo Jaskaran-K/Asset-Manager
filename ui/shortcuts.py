@@ -45,7 +45,8 @@ VIEWS = "Views"
 ARTBOOK = "Artbook"
 PAGES = "Artbook Pages"
 FIND = "Artbook Find"
-CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, FIND, PAGES, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG, THEME_STUDIO)
+COURSE = "Courses"
+CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, FIND, PAGES, COURSE, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG, THEME_STUDIO)
 
 SHORTCUTS: tuple[Shortcut, ...] = (
     # Views (both windows)
@@ -53,6 +54,7 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("view.artbook", VIEWS, "Ctrl+2", "Artbook View: your reference boards", "Ctrl+2"),
     Shortcut("view.split", VIEWS, "Ctrl+3", "Split View: assets and Artbook side by side", "Ctrl+3"),
     Shortcut("view.separate", VIEWS, "Ctrl+4", "Separate View: the Artbook in its own window", "Ctrl+4"),
+    Shortcut("view.course", VIEWS, "Ctrl+5", "Course View: your courses, in their own window", "Ctrl+5"),
     Shortcut("view.switch", VIEWS, "Click View", "Switch between Asset and Artbook view (the arrow lists every view)"),
     Shortcut("view.split_drag", VIEWS, "Drag the divider", "Split View: give one side more room (remembered)"),
     Shortcut("view.window_options", VIEWS, "Click Window", "Separate View: always on top, opacity and click-through for the Artbook window"),
@@ -317,6 +319,23 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("image.pan", IMAGE, "Left-drag / Middle-drag", "Pan the image"),
 
     # Video player
+    # Courses (the Course View window)
+    Shortcut("course.note", COURSE, "N", "A note at this moment of the lesson (also on the course's Artbook page)", "N"),
+    Shortcut("course.cut", COURSE, "K", "Editing, a long video: cut it into lessons here", "K"),
+    Shortcut("course.note_cancel", COURSE, "Esc (typing a note)", "Drop the note (playing carries on)", "Esc"),
+    Shortcut("course.remove", COURSE, "Delete", "Editing: take the selected lesson out of the course (or the cut after it, in the cuts bar)", "Delete"),
+    Shortcut("course.lesson_click", COURSE, "Click a lesson", "Play it (where you were in it)"),
+    Shortcut("course.tick", COURSE, "Click a lesson's box", "Mark it done or not done (it's ticked by itself at 90% watched)"),
+    Shortcut("course.note_click", COURSE, "Click a note", "Jump back to its moment"),
+    Shortcut("course.file_open", COURSE, "Double-click a lesson file", "Open it in its app (Maya first), a folder in Explorer"),
+    Shortcut("course.file_drag", COURSE, "Drag a lesson file out", "Onto the Artbook (a picture), or into another app"),
+    Shortcut("course.lesson_drag", COURSE, "Editing: drag a lesson", "Put it somewhere else in the course (under a chapter's name: in that chapter)"),
+    Shortcut("course.lesson_rename", COURSE, "Editing: double-click a lesson or chapter", "Rename it (Enter when done)"),
+    Shortcut("course.file_drop", COURSE, "Editing: drop files on a lesson", "They become its files (videos dropped elsewhere: new lessons)"),
+    Shortcut("course.link_drop", COURSE, "Editing: drag a link from your browser onto the lessons", "A web lesson: YouTube plays here, a video file's address in the player, anything else in your browser"),
+    Shortcut("course.cut_drag", COURSE, "Editing: drag a cut", "Move where one part ends and the next begins"),
+    Shortcut("course.part_rename", COURSE, "Editing: double-click a part", "Name that lesson"),
+
     Shortcut("video.play_pause", VIDEO, "Space", "Play / pause", "Space"),
     Shortcut("video.back", VIDEO, "Left arrow", "Jump back by the jump time", "Left"),
     Shortcut("video.forward", VIDEO, "Right arrow", "Jump forward by the jump time", "Right"),

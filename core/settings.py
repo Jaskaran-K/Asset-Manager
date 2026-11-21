@@ -704,6 +704,20 @@ def set_artbook_headers_hint_shown() -> None:
     _update_config("artbook_headers_hint", True)
 
 
+def get_course_window() -> dict:
+    """The Course View window: {"geometry": base64 or "", "open": was it open when the app quit}."""
+    raw = _load_raw_config().get("course_window")
+    raw = raw if isinstance(raw, dict) else {}
+    return {"geometry": raw.get("geometry") if isinstance(raw.get("geometry"), str) else "",
+            "open": raw.get("open") is True}
+
+
+def set_course_window(**changes) -> None:
+    state = get_course_window()
+    state.update({k: v for k, v in changes.items() if k in state})
+    _update_config("course_window", state)
+
+
 def get_artbook_nav_hints() -> bool:
     """Whether the board shows its mouse controls in the bottom-right corner (on to start with)."""
     return _load_raw_config().get("artbook_nav_hints") is not False

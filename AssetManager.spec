@@ -6,6 +6,7 @@
 # Build locally with:   pyinstaller AssetManager.spec --noconfirm
 # The release workflow (.github/workflows/release.yml) uses this same file.
 
+from pathlib import Path
 
 a = Analysis(
     ['main.py'],
@@ -24,6 +25,11 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Qt's web view (a course's YouTube lessons: ui.course_web) comes with its developer tools' resources and debug
+# copies of its resources (about 85 MB, unused), and its languages besides English (the app is in English)
+a.datas = [entry for entry in a.datas
+           if not (entry[0].lower().endswith(".debug.pak") or "qtwebengine_devtools_resources" in entry[0].lower()
+                   or ("qtwebengine_locales" in entry[0].lower() and not Path(entry[0]).name.lower().startswith("en-")))]
 pyz = PYZ(a.pure)
 
 common = dict(

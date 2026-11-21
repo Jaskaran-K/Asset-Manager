@@ -54,6 +54,8 @@ class ViewSwitchButton(GhostButton):
         menu.setToolTipsVisible(True)
         for action in modes.actions.values():
             menu.addAction(action)
+        menu.addSeparator()
+        menu.addAction(modes.course_action)  # (its own window: not one of the main window's views)
         self.setMenu(menu)
         self.clicked.connect(self._on_clicked)
         modes.mode_changed.connect(self.show_mode)
@@ -67,7 +69,7 @@ class ViewSwitchButton(GhostButton):
         set_icon(self, icon, size=18)
         target = "Artbook" if mode == "asset" else "Asset"
         self.setToolTip(
-            f"{label}. Click for {target} View; the arrow lists every view (Ctrl+1 to Ctrl+4)"
+            f"{label}. Click for {target} View; the arrow lists every view (Ctrl+1 to Ctrl+5)"
         )
 
 
@@ -115,6 +117,16 @@ class ViewModes(QObject):
             window.addAction(action)
             self.actions[mode] = action
 
+        # Course View: your courses in a window of their own (ui.course_window); the main window decides how to open it
+        self.open_courses: Optional[Callable[[], None]] = None
+        self.course_action = QAction("Course View (own window)", self)
+        self.course_action.setShortcut(shortcuts.sequence("view.course"))
+        self.course_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.course_action.setToolTip(shortcuts.get("view.course").action)
+        set_icon(self.course_action, "book")
+        self.course_action.triggered.connect(self._on_course_view)
+        window.addAction(self.course_action)
+
         # The shared View / Settings buttons, built once the actions exist
         self.controls = controls(self)
 
@@ -126,6 +138,10 @@ class ViewModes(QObject):
         self.set_mode("asset", save=False)
 
     # ------------------ switching ------------------
+    def _on_course_view(self) -> None:
+        if self.open_courses is not None:
+            self.open_courses()
+
     def _on_action(self) -> None:
         for mode, action in self.actions.items():
             if action is self.sender():
@@ -181,7 +197,7 @@ class ViewModes(QObject):
         if self.separate_window is None:
             self.separate_window = ArtbookWindow(self.window.windowTitle())
             self.separate_window.closed_by_user.connect(self._on_separate_closed)
-            for action in self.actions.values():
+            for action in (*self.actions.values(), self.course_action):
                 self.separate_window.addAction(action)
         win = self.separate_window
         geometry = get_view_state()["window"]

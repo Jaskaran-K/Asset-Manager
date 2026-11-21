@@ -8,6 +8,8 @@ Each release has two downloads:
   and starts much faster, because nothing has to be unpacked at launch. Updates from **Settings > About**
   run the new installer silently and restart the app.
 - **AssetManager.exe**: the portable single file. Put it anywhere and run it. It updates by swapping itself.
+- **KeyDial.exe** (a bonus): [KeyDial](#keydial-huion-kd100) on its own, for the Huion KD100. The installer also
+  installs it unless you untick its box.
 
 Settings (`~\.3d_asset_manager_config.json`) and the library (`%LOCALAPPDATA%\AssetManager`) are shared by both
 and are never touched by installing, updating or uninstalling. Settings are saved so a crash can't leave the file
@@ -464,6 +466,49 @@ lesson videos with their scene files and references, in an order of your own, wi
   moment playing, a cut drags to move it, double-clicking a part names it, and Delete joins it with the next. Each part
   is a lesson of its own: ticked, noted, with its own files.
 
+## KeyDial (Huion KD100)
+
+KeyDial is a small app of its own for the **Huion Mini KeyDial KD100**, in place of Huion's software for it. Its 18
+keys and dial do what you set, per app, and it switches as you change apps. It runs in the tray and starts with
+Windows. The installer adds it to the Start menu as **KeyDial**, unless you untick its box; it's also on each release
+page as `KeyDial.exe`.
+
+- **The editor:** your KD100 as it is, each key showing what it does. Click a key or the dial, or press it on the
+  KD100 while KeyDial's window is in front, then set what it does:
+  - **Shortcut:** click the box and press it. **More Keys** has the keys most keyboards haven't got (media keys, F13
+    to F24, the number pad).
+  - **Hold Keys:** held for as long as you hold the KD100 key (Space to pan, Alt to orbit, Ctrl to mask).
+  - **Type Text**, **Scroll** (with Ctrl, Shift or Alt held: Ctrl + wheel zooms in many apps), **Open** (a program, a
+    file, a folder or a web page), **Dial Mode**, or **Nothing**.
+  - **Profile:** go to the next or previous profile, or to one by name (manual mode), or back to **Auto Mode**. A dial
+    mode can do it too, to turn through your profiles.
+  - **Macro:** several steps in a row. **Record** writes down what you type, with the pauses between keys as waits;
+    drag the steps to reorder them.
+- **Profiles:** one per app (Maya first). **Add Profile for...** has starter layouts for Maya, ZBrush, Substance 3D
+  Painter, Photoshop, Blender, Marmoset Toolbag, media players (**Multimedia**) and **Browsers**, and **Other
+  Program...** for anything else. **Default** is a number pad, as the KD100 is laid out for one (the tall key is
+  Enter, the wide one 0); keys a profile doesn't set do what Default does (each shows a small dot).
+- **Auto and Manual mode** (at the top of the editor, and in the tray menu): **Auto** switches profile by the app in
+  front. **Manual** uses the profile you pick in every app, until you switch again.
+- **Every web browser:** a profile's **Also in every web browser** box makes it work in Chrome, Edge, Firefox, Opera,
+  Brave, Vivaldi and the rest, and in any browser Windows has installed. The **Browsers** starter profile has it ticked:
+  back, forward, tabs, zoom, and play / previous / next for the video playing. If those media keys do nothing in a
+  browser, its own media-key handling is off; in Opera GX, try **Hardware Media Key Handling** at `opera://flags`.
+- **The dial:** each profile has its own modes (Maya: Zoom, Timeline, Keyframes, Undo / Redo). Pressing the dial
+  steps to the next one, and a pop-up at the bottom of the screen says which mode is on. The pop-up never takes the
+  focus. **Settings** moves it to the top, or turns it off.
+- **Saving:** every change works straight away. The profiles are kept in `%APPDATA%\KeyDial\profiles.json`; you can
+  edit it by hand, and KeyDial reloads it when it's saved. A broken edit keeps the last good one working.
+- **Tray menu:** Open KeyDial, **Pause** (the keys do nothing until you resume), **Auto Mode** / **Manual Mode** and
+  the **Manual Profile**, **Start with Windows**, **Run as Administrator**, Show Pop-up, Quit. Closing the editor keeps
+  KeyDial running.
+- **Run as administrator:** needed only if an app you use runs as administrator. Windows blocks shortcuts from normal
+  programs into those. Turning it on restarts KeyDial as administrator (Windows asks once). From then on it starts
+  with Windows through Task Scheduler, without asking.
+- **The Huion driver:** KeyDial takes over the KD100 while it runs. The KD100's own built-in shortcuts stop until it's
+  unplugged, which is why KeyDial stays in the tray. If you keep the Huion driver for a Huion tablet, set each of the
+  KD100's keys and its dial to **None** in the driver, or each press does two things.
+
 ## Viewing 3D models
 
 Open a model (`.fbx`, `.obj`, `.gltf`, `.glb`, `.stl`, `.ply` ...) from the grid to turn it round in 3D.
@@ -669,4 +714,5 @@ always show up on the page. **Settings > Appearance > Animations** turns animati
 made-up 50,000-file library, and fail when something takes over its budget (`tests/test_speed.py`). `requirements.lock` holds the
 exact versions the tests pass with; CI and release builds install those, so a release never ships an untested
 version (its header says how to update it). The project rules (shortcuts, threads, tooltips) are in `CLAUDE.md`. Release builds: `pyinstaller AssetManager.spec` makes both the portable exe and the folder
-build; `iscc /DAppVersion=x.y.z installer\AssetManager.iss` turns the folder build into the installer.
+build; `iscc /DAppVersion=x.y.z installer\AssetManager.iss` turns the folder build into the installer. `pyinstaller KeyDial.spec` builds KeyDial
+(`keydial_main.py`; `core/keydial` and `ui/keydial_*.py`), which the installer picks up from `dist\KeyDial`.

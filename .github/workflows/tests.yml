@@ -79,3 +79,16 @@ jobs:
             Write-Output "::error title=Self-test failed (exit code $code)::$text"
             exit $code
           }
+
+      - name: KeyDial self-test
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "keydial-self-test.log"
+          python keydial_main.py --self-test "$log"
+          $code = $LASTEXITCODE
+          if (Test-Path $log) { Get-Content $log }
+          if ($code -ne 0) {
+            $text = (Get-Content $log -ErrorAction SilentlyContinue | ForEach-Object { $_ -replace '%', '%25' }) -join '%0A'
+            Write-Output "::error title=KeyDial self-test failed (exit code $code)::$text"
+            exit $code
+          }

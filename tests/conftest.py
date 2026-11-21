@@ -7,6 +7,43 @@ from pathlib import Path
 import pytest
 
 
+class FakeRunKey:
+    """KeyDial's start-up entry (core.keydial.autostart._registry), kept in memory."""
+
+    def __init__(self):
+        self.value = None
+
+    def set(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def delete(self):
+        self.value = None
+
+
+class FakeTasks:
+    """schtasks, as KeyDial calls it (core.keydial.autostart._schtasks): a record of the tasks made."""
+
+    def __init__(self):
+        self.tasks = {}
+        self.calls = []
+
+    def __call__(self, args):
+        self.calls.append(list(args))
+        verb, name = args[0], args[2]
+        if verb == "/Create":
+            self.tasks[name] = open(args[4], encoding="utf-16").read()
+            return 0, "SUCCESS"
+        if verb == "/Query":
+            return (0, name) if name in self.tasks else (1, "not found")
+        if verb == "/Delete":
+            self.tasks.pop(name, None)
+            return 0, "SUCCESS"
+        return 1, "unknown"
+
+
 @pytest.fixture(autouse=True)
 def isolated_user_data(tmp_path, monkeypatch):
     """Never touch the real config, library database, caches or logs from a test."""
@@ -34,6 +71,12 @@ def isolated_user_data(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(courses, "to_recycle_bin", to_test_bin)
+    # KeyDial: its own folder, and never the real start-up entry or Task Scheduler (a record instead)
+    from core.keydial import autostart as keydial_autostart, store as keydial_store
+
+    monkeypatch.setattr(keydial_store, "DATA_DIR", data / "keydial")
+    monkeypatch.setattr(keydial_autostart, "_registry", FakeRunKey())
+    monkeypatch.setattr(keydial_autostart, "_schtasks", FakeTasks())
     monkeypatch.setattr(course_unzip, "to_recycle_bin", to_test_bin)
     monkeypatch.setattr(pdf_notes, "NOTES_DIR", data / "pdf-notes")
     monkeypatch.setattr(video_tools, "CACHE_ROOT", data / "cache")

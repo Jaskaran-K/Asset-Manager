@@ -713,6 +713,18 @@ def _keyboard(p, primary, secondary):
     _line(p, primary, 1.8, (8.5, 15.6), (15.5, 15.6))  # the space bar
 
 
+def _keydial(p, primary, secondary):
+    """A Huion KD100: the dial over a grid of keys (KeyDial, the KD100's tray app)."""
+    _body(p, _rounded(4.5, 2, 15, 20, 3.2), secondary)
+    p.setPen(_pen(primary, 1.8))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(QPointF(9.6, 7.2), 2.6, 2.6)
+    for row, y in enumerate((13.2, 17.4)):
+        for col, x in enumerate((7.4, 12)):
+            p.fillPath(_rounded(x, y, 3, 2.6, 0.8), primary)
+    p.fillPath(_rounded(16.4, 13.2, 1.6, 6.8, 0.8), primary)  # (the tall key)
+
+
 def _book(p, primary, secondary):
     """An open book: the guides."""
     left = _polygon((2.5, 5), (11.2, 6.4), (11.2, 20), (2.5, 18.6))
@@ -911,7 +923,7 @@ ICONS: dict[str, IconPainter] = {
     "more": _more, "info": _info, "search": _search, "fullscreen": _fullscreen, "checker": _checker,
     "shading": _shading, "turn_light": _turn_light, "turntable": _turntable,
     "crop": _crop, "flip_h": _flip_h, "flip_v": _flip_v, "align_objects": _align_objects,
-    "keyboard": _keyboard, "book": _book, "heading": _heading, "todo": _todo, "column": _column, "line": _line_arrow,
+    "keyboard": _keyboard, "keydial": _keydial, "book": _book, "heading": _heading, "todo": _todo, "column": _column, "line": _line_arrow,
     "table": _table, "add": _add, "tray": _tray,
 }
 

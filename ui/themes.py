@@ -22,7 +22,6 @@ from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QApplication, QToolTip
 
-from core.thumbnail_manager import set_thumbnail_card_style
 
 
 THEMES: dict[str, dict[str, str]] = {
@@ -867,10 +866,13 @@ def _apply_pending() -> None:
                 pass  # (its widget was closed meanwhile)
 
 
-def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str | None = None) -> None:
+def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str | None = None,
+                thumbnails: bool = True) -> None:
     """Install the theme's stylesheet, palette and thumbnail colors application-wide.
 
     texture_id: background texture (ui.backgrounds.TEXTURES); None keeps the current one.
+    thumbnails: False leaves the thumbnail colours alone (KeyDial: it has no thumbnails, and
+    importing them would bring PIL, the PDF reader and the model readers into its build).
     """
     global _current_theme_id, _current_texture_id
     app = app or QApplication.instance()
@@ -885,10 +887,13 @@ def apply_theme(theme_id: str, app: QApplication | None = None, texture_id: str 
     app.setPalette(palette_from(t))
     app.setStyleSheet(build_stylesheet(theme_id, _current_texture_id))
 
-    set_thumbnail_card_style(
-        QColor(t["thumb_card"]), QColor(t["thumb_border"]),
-        QColor(t["thumb_badge"]), QColor(t["thumb_badge_text"]),
-    )
+    if thumbnails:
+        from core.thumbnail_manager import set_thumbnail_card_style
+
+        set_thumbnail_card_style(
+            QColor(t["thumb_card"]), QColor(t["thumb_border"]),
+            QColor(t["thumb_badge"]), QColor(t["thumb_badge_text"]),
+        )
     from ui import title_bar
 
     title_bar.restyle_all()

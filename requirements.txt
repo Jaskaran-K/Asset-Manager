@@ -9,3 +9,6 @@ PyOpenGL>=3.1.0
 scipy>=1.10.0
 OpenEXR>=3.3  # .exr thumbnails and viewing (core.hdr_image)
 inflate64>=1.0.4  # zips packed with Deflate64, which Python's zipfile can't read (core.archives)
+# KeyDial (core/keydial, KeyDial.spec): the Huion KD100's tray app
+hidapi>=0.14  # reads the KD100
+pynput>=1.7  # sends the shortcuts, wheel turns and text its keys are set to

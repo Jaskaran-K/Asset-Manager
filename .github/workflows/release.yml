@@ -57,12 +57,14 @@ jobs:
           }
 
       - name: Build with PyInstaller (portable exe + folder build)
-        run: pyinstaller AssetManager.spec --noconfirm
+        run: |
+          pyinstaller AssetManager.spec --noconfirm
+          pyinstaller KeyDial.spec --noconfirm
 
       - name: Self-test the builds
         shell: pwsh
         run: |
-          foreach ($exe in "dist\AssetManager.exe", "dist\AssetManager\AssetManager.exe") {
+          foreach ($exe in "dist\AssetManager.exe", "dist\AssetManager\AssetManager.exe", "dist\KeyDial.exe", "dist\KeyDial\KeyDial.exe") {
             $log = Join-Path $env:RUNNER_TEMP "self-test-$([guid]::NewGuid()).log"
             $p = Start-Process -FilePath $exe -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
             Write-Host "== $exe"; if (Test-Path $log) { Get-Content $log }
@@ -92,6 +94,12 @@ jobs:
           $p = Start-Process -FilePath (Join-Path $dir "AssetManager.exe") -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
           if (Test-Path $log) { Get-Content $log }
           if ($p.ExitCode -ne 0) { Write-Error "Installed app self-test failed; not publishing."; exit 1 }
+          $kd = Join-Path $dir "KeyDial\KeyDial.exe"
+          if (-not (Test-Path $kd)) { Write-Error "The installer didn't install KeyDial; not publishing."; exit 1 }
+          $log = Join-Path $env:RUNNER_TEMP "self-test-keydial-installed.log"
+          $p = Start-Process -FilePath $kd -ArgumentList "--self-test", "`"$log`"" -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { Write-Error "Installed KeyDial self-test failed; not publishing."; exit 1 }
 
       - name: Find release notes
         id: notes
@@ -108,5 +116,6 @@ jobs:
           files: |
             dist/AssetManager-Setup.exe
             dist/AssetManager.exe
+            dist/KeyDial.exe
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true # appended below the hand-written notes

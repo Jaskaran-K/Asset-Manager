@@ -46,7 +46,9 @@ ARTBOOK = "Artbook"
 PAGES = "Artbook Pages"
 FIND = "Artbook Find"
 COURSE = "Courses"
-CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, FIND, PAGES, COURSE, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG, THEME_STUDIO)
+KEYDIAL = "KeyDial (Huion KD100)"
+CATEGORIES = (VIEWS, MAIN, SEARCH, ARTBOOK, FIND, PAGES, COURSE, VIEWER, PDF, MODEL, IMAGE, VIDEO, TAG_DIALOG, THEME_STUDIO,
+              KEYDIAL)
 
 SHORTCUTS: tuple[Shortcut, ...] = (
     # Views (both windows)
@@ -335,6 +337,16 @@ SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("course.link_drop", COURSE, "Editing: drag a link from your browser onto the lessons", "A web lesson: YouTube plays here, a video file's address in the player, anything else in your browser"),
     Shortcut("course.cut_drag", COURSE, "Editing: drag a cut", "Move where one part ends and the next begins"),
     Shortcut("course.part_rename", COURSE, "Editing: double-click a part", "Name that lesson"),
+
+    # KeyDial, the KD100's own app (ui/keydial_*.py): every control is the mouse, or the KD100 itself
+    Shortcut("keydial.pick", KEYDIAL, "Click a key or the dial", "Pick it in the KD100 picture, to set what it does"),
+    Shortcut("keydial.press_pick", KEYDIAL, "Press a key on the KD100", "With KeyDial's window in front: pick that key (it sends nothing then)"),
+    Shortcut("keydial.profile", KEYDIAL, "Click empty space by the KD100", "The profile's own settings: its programs, and what keys it doesn't set do"),
+    Shortcut("keydial.capture", KEYDIAL, "Click a shortcut box, then press keys", "Set the shortcut (modifiers alone, like Ctrl, for Hold Keys)"),
+    Shortcut("keydial.record", KEYDIAL, "Macro: Record, then type", "Each shortcut becomes a step, pauses become waits; click Stop when done"),
+    Shortcut("keydial.reorder", KEYDIAL, "Drag a macro step or a dial mode", "Put it in a new place in the order"),
+    Shortcut("keydial.profile_menu", KEYDIAL, "Right-click a profile", "Duplicate or delete it"),
+    Shortcut("keydial.tray", KEYDIAL, "Click the tray icon", "Open KeyDial (right-click: pause, Auto / Manual mode, settings, quit)"),
 
     Shortcut("video.play_pause", VIDEO, "Space", "Play / pause", "Space"),
     Shortcut("video.back", VIDEO, "Left arrow", "Jump back by the jump time", "Left"),

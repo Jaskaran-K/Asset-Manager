@@ -655,9 +655,11 @@ def current_texture_id() -> str:
 
 
 def build_stylesheet(theme_id: str, texture_id: str = "none") -> str:
+    tokens = theme_tokens(theme_id)
+    if not texture_id or texture_id == "none":  # (no texture: ui.backgrounds, and numpy, aren't needed: KeyDial)
+        return stylesheet_from(tokens, None)
     from ui.backgrounds import tile_path
 
-    tokens = theme_tokens(theme_id)
     return stylesheet_from(tokens, tile_path(texture_id, QColor(tokens["texture_ink"])))
 
 

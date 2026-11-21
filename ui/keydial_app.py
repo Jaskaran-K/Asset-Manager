@@ -542,8 +542,16 @@ def run_self_test(log_path: Optional[str]) -> int:
         config = load_config(presets.starter_document())
         return f"{len(config.profiles)} starter profiles"
 
+    def setup():
+        from ui.themes import current_theme_id
+
+        set_up(QApplication.instance())
+        from core.keydial import browsers
+
+        return f"theme {current_theme_id()}, {len(browsers.all_browsers())} browsers known"
+
     def windows():
-        from ui.keydial_editor import KeyDialWindow
+        from ui.keydial_editor import AddProgramDialog
 
         class _Reader:
             def __init__(self, *a, **k): pass
@@ -560,18 +568,35 @@ def run_self_test(log_path: Optional[str]) -> int:
         with tempfile.TemporaryDirectory() as folder:
             store.DATA_DIR = Path(folder)  # (never the real profiles or settings)
             service = KeyDialService(reader_factory=_Reader, output=_Output(), start_device=False)
+            keydial = None
             try:
-                window = KeyDialWindow(service, None)
-                window.select("K1")
+                keydial = KeyDialApp(service)  # (the tray menu and the pop-up)
+                keydial.show_editor()
+                window = keydial.editor
+                for button in ("K1", "DIAL", None):
+                    window.select(button)
+                for kind in window.key_editor.picker.kinds:  # (every kind of action's page)
+                    window.select("K1")
+                    window.key_editor._on_kind(kind)
+                service.set_mode("manual")
+                service.set_mode("auto")
+                keydial.popup.show_state("Maya", "Zoom", 0, 4)
+                dialog = AddProgramDialog(window)
+                dialog.deleteLater()
+                window.grab()
                 window.allow_close = True
                 window.close()
             finally:
+                if keydial is not None:
+                    keydial.popup.hide()
+                    keydial.tray.hide()
                 service.shutdown()
                 store.DATA_DIR = real_dir
-        return "editor"
+        return "tray, pop-up, editor"
 
     step("libraries", libraries)
     step("starter profiles", profiles)
+    step("set-up", setup)
     step("windows", windows)
     report = "\n".join(lines)
     if log_path:
@@ -583,26 +608,15 @@ def run_self_test(log_path: Optional[str]) -> int:
     return 0 if ok else 1
 
 
-def main(argv: list[str]) -> int:
-    if "--self-test" in argv:
-        index = argv.index("--self-test")
-        return run_self_test(argv[index + 1] if index + 1 < len(argv) else None)
-    if "--remove-autostart" in argv:
-        autostart.remove_all()
-        return 0
-
+def set_up(app: QApplication) -> None:
+    """KeyDial's look and behaviour (the self-test runs this too, so a build missing a library it
+    needs fails there, not on your PC)."""
     from core.settings import get_theme
     from ui import main_thread_gc
     from ui.animations import install_popup_animations
     from ui.themes import apply_theme
     from ui.views import install_view_effects
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    if sys.platform == "win32":
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AssetManager.KeyDial")
-    app = QApplication(argv)
     app.setApplicationName("KeyDial")
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)  # (it lives in the tray)
@@ -611,6 +625,23 @@ def main(argv: list[str]) -> int:
     install_popup_animations(app)
     install_view_effects(app)
     main_thread_gc.install(app)
+
+
+def main(argv: list[str]) -> int:
+    if "--self-test" in argv:
+        index = argv.index("--self-test")
+        return run_self_test(argv[index + 1] if index + 1 < len(argv) else None)
+    if "--remove-autostart" in argv:
+        autostart.remove_all()
+        return 0
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AssetManager.KeyDial")
+    app = QApplication(argv)
+    set_up(app)
 
     if "--elevated" in argv:  # (restarted as administrator: the old KeyDial is quitting)
         for _ in range(20):

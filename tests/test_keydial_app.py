@@ -505,12 +505,41 @@ def test_tray_pause_and_modes(qapp, service):
     keydial.menu.deleteLater()
 
 
-def test_self_test_passes(qapp, tmp_path):
-    from ui.keydial_app import run_self_test
+def spec_excludes() -> list[str]:
+    """The libraries KeyDial.spec leaves out of KeyDial's build."""
+    import ast
+    from pathlib import Path
 
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "KeyDial.spec").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Analysis":
+            for keyword in node.keywords:
+                if keyword.arg == "excludes":
+                    return ast.literal_eval(keyword.value)
+    raise AssertionError("no excludes in KeyDial.spec")
+
+
+def test_self_test_passes_without_what_the_build_leaves_out(tmp_path):
+    """KeyDial's self-test (its whole start-up: theme, tray, pop-up, editor) in a process of its own where
+    every library KeyDial.spec leaves out can't be imported: KeyDial.exe 0.7.50 failed at start on numpy,
+    which the theme's background textures need (and the self-test didn't apply the theme then)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    excludes = spec_excludes()
+    assert "numpy" in excludes and "PIL" in excludes
+    root = Path(__file__).resolve().parents[1]
     log = tmp_path / "self-test.log"
-    assert run_self_test(str(log)) == 0, log.read_text("utf-8")
-    assert "FAIL" not in log.read_text("utf-8")
+    blocker = (f"import sys, runpy\nfor name in {excludes!r}: sys.modules[name] = None\n"
+               f"sys.argv = ['keydial_main.py', '--self-test', {str(log)!r}]\n"
+               "runpy.run_path('keydial_main.py', run_name='__main__')\n")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", APPDATA=str(tmp_path / "appdata"))
+    done = subprocess.run([sys.executable, "-c", blocker], cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    report = log.read_text("utf-8") if log.exists() else ""
+    assert done.returncode == 0, report + done.stdout + done.stderr
+    assert "FAIL" not in report and "PASS  set-up" in report and "PASS  windows: tray, pop-up, editor" in report
 
 
 # -- reading the device, and sending keys ---------------------------------------------------------------
